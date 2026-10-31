@@ -11,12 +11,12 @@
 Подключитесь к роутеру по SSH и выполните одну команду:
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/unknownpeace/lol/refs/heads/main/setup_gateway.sh | sh
+curl -fsSL "https://raw.githubusercontent.com/unknownpeace/lol/refs/heads/main/setup_gateway.sh" | tr -d '\r' > /usr/bin/gateway && chmod +x /usr/bin/gateway && gateway
 ```
 
 *(Если в системе еще нет `curl`)*:
 ```sh
-wget -qO- https://raw.githubusercontent.com/unknownpeace/lol/refs/heads/main/setup_gateway.sh | sh
+wget -qO /usr/bin/gateway "https://raw.githubusercontent.com/unknownpeace/lol/refs/heads/main/setup_gateway.sh" && sed -i 's/\r$//' /usr/bin/gateway && chmod +x /usr/bin/gateway && gateway
 ```
 
 ---
