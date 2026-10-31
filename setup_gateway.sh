@@ -3,7 +3,7 @@ cat << 'EOF' > /tmp/setup_gateway.sh
 set -e
 
 # ==============================================================================
-# Глобальные пути и переменные (OpenWrt + APK Edition)
+# Глобальные пути и переменные (OpenWrt 25.x + APK Edition — 2026)
 # ==============================================================================
 MIHOMO_DIR="/etc/mihomo"
 MIHOMO_CONF="${MIHOMO_DIR}/config.yaml"
@@ -25,7 +25,7 @@ LATEST_MIHOMO_TAG=""
 LATEST_AGH_TAG=""
 LATEST_UI_TAG=""
 
-# Проверка целевой платформы (только OpenWrt с пакетным менеджером apk)
+# Проверка целевой платформы (OpenWrt 25.x+ с пакетным менеджером apk)
 detect_os() {
     if [ ! -f /etc/openwrt_release ]; then
         echo "[X] Ошибка: Скрипт предназначен исключительно для OpenWrt."
@@ -41,7 +41,7 @@ detect_os() {
     case "$ARCH_RAW" in
         x86_64)
             if grep -q "avx2" /proc/cpuinfo 2>/dev/null; then
-                MIHOMO_ARCH="amd64"
+                MIHOMO_ARCH="amd64-v3"
             else
                 MIHOMO_ARCH="amd64-compatible"
             fi
@@ -117,12 +117,26 @@ detect_adblock_mode() {
     fi
 }
 
-# Настройка nftables: перехват DNS 53 порта и TCP MSS Clamping для туннеля
+# Проверка состояния аппаратного Kill-Switch
+is_killswitch_enabled() {
+    [ -f /etc/nftables.d/97-mihomo-anti-leak.nft ] && grep -q "#KILLSWITCH_ACTIVE" /etc/nftables.d/97-mihomo-anti-leak.nft 2>/dev/null
+}
+
+# Настройка nftables (fw4): TCP MSS Clamping, перехват DNS 53, Блок IPv6/DoT/DoQ и Kill-Switch
 sync_dns_firewall() {
     USE_AGH_REDIRECT="$1"
+    KS_STATE="${2:-keep}"
+    if [ "$KS_STATE" = "keep" ]; then
+        if is_killswitch_enabled; then
+            KS_STATE="yes"
+        else
+            KS_STATE="no"
+        fi
+    fi
+
     mkdir -p /etc/nftables.d
 
-    # 1. Выравнивание TCP MSS (защита от PMTU Blackhole в Sidecar-схеме)
+    # 1. Выравнивание TCP MSS (защита от PMTU Blackhole и детекта MTU в Sidecar-схеме)
     cat << 'NFT_MSS' > /etc/nftables.d/98-mihomo-mss-clamp.nft
 chain mihomo_mss_clamp {
     type filter hook forward priority mangle; policy accept;
@@ -131,7 +145,28 @@ chain mihomo_mss_clamp {
 }
 NFT_MSS
 
-    # 2. Перехват сторонних DNS-запросов (например, зашитых 8.8.8.8 на Smart TV)
+    # 2. Защита от утечек (Anti-Leak): жесткий блок IPv6 форвардинга, DoT/DoQ (853) и опциональный Kill-Switch
+    if [ "$KS_STATE" = "yes" ]; then
+        cat << 'NFT_LEAK_KS' > /etc/nftables.d/97-mihomo-anti-leak.nft
+#KILLSWITCH_ACTIVE
+chain mihomo_anti_leak {
+    type filter hook forward priority filter - 5; policy accept;
+    meta nfproto ipv6 drop
+    iifname "br-lan" meta l4proto { tcp, udp } th dport 853 reject
+    iifname "br-lan" oifname "br-lan" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject
+}
+NFT_LEAK_KS
+    else
+        cat << 'NFT_LEAK' > /etc/nftables.d/97-mihomo-anti-leak.nft
+chain mihomo_anti_leak {
+    type filter hook forward priority filter - 5; policy accept;
+    meta nfproto ipv6 drop
+    iifname "br-lan" meta l4proto { tcp, udp } th dport 853 reject
+}
+NFT_LEAK
+    fi
+
+    # 3. Перехват всех сторонних DNS-запросов (например, зашитых 8.8.8.8 на Smart TV / IoT)
     if [ "$USE_AGH_REDIRECT" = "yes" ]; then
         cat << 'NFT_OWRT' > /etc/nftables.d/99-agh-dns-redirect.nft
 chain agh_dns_prerouting {
@@ -291,6 +326,8 @@ dns:
   upstream_mode: load_balance
   cache_enabled: false
   cache_size: 0
+  aaaa_disabled: true
+  enable_dnssec: false
   use_private_ptr_resolvers: true
   local_ptr_upstreams: [${GW_IP_CUR}:53]
   serve_plain_dns: true
@@ -340,7 +377,7 @@ apply_adblock_mode() {
             echo "Остановка AdGuard Home и передача роли DNS (0.0.0.0:53) в Mihomo..."
             /etc/init.d/adguardhome stop 2>/dev/null || true
             /etc/init.d/adguardhome disable 2>/dev/null || true
-            sync_dns_firewall "no"
+            sync_dns_firewall "no" "keep"
 
             sed -i 's/^[[:space:]]*listen:[[:space:]]*127\.0\.0\.1:1053/  listen: 0.0.0.0:53/' "$MIHOMO_CONF"
             sed -i '/#DNS_HIJACK$/ s/^#*//' "$MIHOMO_CONF"
@@ -368,7 +405,7 @@ apply_adblock_mode() {
                 set_agh_filtering "true"
                 /etc/init.d/adguardhome enable 2>/dev/null || true
                 /etc/init.d/adguardhome restart 2>/dev/null || true
-                sync_dns_firewall "yes"
+                sync_dns_firewall "yes" "keep"
                 echo "[✓] Роль DNS (0.0.0.0:53) и фильтрация рекламы переданы AdGuard Home (Mihomo переведен на 127.0.0.1:1053)."
             else
                 mv "${MIHOMO_CONF}.bak" "$MIHOMO_CONF"
@@ -389,7 +426,7 @@ apply_adblock_mode() {
                 set_agh_filtering "true"
                 /etc/init.d/adguardhome enable 2>/dev/null || true
                 /etc/init.d/adguardhome restart 2>/dev/null || true
-                sync_dns_firewall "yes"
+                sync_dns_firewall "yes" "keep"
                 echo "[✓] Включен двойной щит: AdGuard Home (DNS 0.0.0.0:53) + Mihomo (.mrs + SNI)."
             else
                 mv "${MIHOMO_CONF}.bak" "$MIHOMO_CONF"
@@ -557,6 +594,14 @@ print_gateway_header() {
         UI_VER_INFO="не установлена"
     fi
 
+    if is_killswitch_enabled; then
+        KS_STAT="[АКТИВЕН]     "
+        KS_INFO="строгая блокировка трафика мимо mihomo-tun"
+    else
+        KS_STAT="[СТАНДАРТ]    "
+        KS_INFO="защита IPv6 + DoT/DoQ (без жесткой блокировки WAN)"
+    fi
+
     if is_autoupdate_enabled; then
         AU_STAT="[ВКЛЮЧЕНО]    "
         AU_INFO="ежедневно в 04:00 (поставил и забыл ,_,)"
@@ -568,6 +613,7 @@ print_gateway_header() {
     echo " Mihomo:        ${M_STAT}${M_VER_INFO}"
     echo " AdGuard Home:  ${A_STAT}${A_VER_INFO}"
     echo " Антиреклама:   ${ADBLOCK_STAT}${ADBLOCK_DESC}"
+    echo " Kill-Switch:   ${KS_STAT}${KS_INFO}"
     echo " Веб-панель:    ${UI_STAT}${UI_VER_INFO}"
     echo " Автоапдейт:    ${AU_STAT}${AU_INFO}"
 }
@@ -579,7 +625,7 @@ check_github_mirror() {
         GH_PROXY=""
         return 0
     fi
-    for MIRROR in "https://ghfast.top/" "https://gh-proxy.com/"; do
+    for MIRROR in "https://ghfast.top/" "https://gh-proxy.com/" "https://ghproxy.net/"; do
         if curl -fsSL --connect-timeout 3 -m 5 -o /dev/null "${MIRROR}${TEST_URL}" 2>/dev/null; then
             echo "[!] Прямой доступ к GitHub ограничен, включено зеркало: ${MIRROR}"
             GH_PROXY="$MIRROR"
@@ -593,7 +639,7 @@ check_github_mirror() {
 download_file() {
     DL_URL="$1"
     DL_OUT="$2"
-    for PREFIX in "$GH_PROXY" "" "https://ghfast.top/" "https://gh-proxy.com/"; do
+    for PREFIX in "$GH_PROXY" "" "https://ghfast.top/" "https://gh-proxy.com/" "https://ghproxy.net/"; do
         if curl --retry 2 --connect-timeout 5 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null; then
             return 0
         fi
@@ -611,7 +657,7 @@ init_user_lists() {
     [ -f "$CUSTOM_NODES_FILE" ] || : > "$CUSTOM_NODES_FILE"
 }
 
-# Горячая перезагрузка конфигурации и провайдеров Mihomo через REST API
+# Горячая перезагрузка конфигурации и провайдеров Mihomo через REST API + сброс Fake-IP кэша
 reload_mihomo_api() {
     if ! pgrep mihomo >/dev/null 2>&1; then
         return 0
@@ -620,6 +666,8 @@ reload_mihomo_api() {
     [ -f "$MIHOMO_CONF" ] && API_SECRET=$(sed -n 's/^secret:[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" | head -n 1 | tr -d '\r\n')
     curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" -H "Content-Type: application/json" \
         -d "{\"path\":\"${MIHOMO_CONF}\"}" "http://127.0.0.1:9090/configs?force=true" >/dev/null 2>&1 || true
+    curl -fsS -X POST -H "Authorization: Bearer ${API_SECRET}" \
+        "http://127.0.0.1:9090/cache/fakeip/flush" >/dev/null 2>&1 || true
     curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
         "http://127.0.0.1:9090/providers/proxies/custom_sub" >/dev/null 2>&1 || true
     curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
@@ -630,7 +678,7 @@ reload_mihomo_api() {
         "http://127.0.0.1:9090/providers/rules/user_proxy_domains" >/dev/null 2>&1 || true
 }
 
-# Обработка подписки или одиночных ключей (VLESS/SS/Trojan/Hy2/TUIC/WG)
+# Обработка подписки или одиночных ключей (VLESS/SS/Trojan/Hy2/TUIC/WG/AnyTLS/Mieru)
 apply_subscription_input() {
     RAW_INPUT="$1"
     mkdir -p "$MIHOMO_PROVIDERS_DIR"
@@ -639,7 +687,7 @@ apply_subscription_input() {
             SUB_URL="$RAW_INPUT"
             PROVIDER_TYPE="http"
             ;;
-        vless://*|vmess://*|ss://*|trojan://*|hy2://*|hysteria2://*|tuic://*|wg://*)
+        vless://*|vmess://*|ss://*|trojan://*|hy2://*|hysteria2://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*)
             printf "%s\n" "$RAW_INPUT" | tr ' ,' '\n\n' | sed '/^$/d' > "${MIHOMO_PROVIDERS_DIR}/custom_sub.yaml"
             SUB_URL="file://custom_sub.yaml"
             PROVIDER_TYPE="file"
@@ -706,7 +754,11 @@ update_cores_only() {
     else
         echo "Загрузка Mihomo ${MIHOMO_TAG} (${MIHOMO_ARCH})..."
         MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_TAG}/mihomo-linux-${MIHOMO_ARCH}-${MIHOMO_TAG}.gz"
-        if download_file "$MIHOMO_URL" "/tmp/mihomo.gz"; then
+        if ! download_file "$MIHOMO_URL" "/tmp/mihomo.gz" && [ "$MIHOMO_ARCH" = "amd64-v3" ]; then
+            MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_TAG}/mihomo-linux-amd64-${MIHOMO_TAG}.gz"
+            download_file "$MIHOMO_URL" "/tmp/mihomo.gz" || true
+        fi
+        if [ -f "/tmp/mihomo.gz" ]; then
             /etc/init.d/mihomo stop 2>/dev/null || true
             rm -f /usr/bin/mihomo
             gunzip -c /tmp/mihomo.gz > /usr/bin/mihomo
@@ -855,7 +907,7 @@ run_installer() {
 
     # 1. Запрос ссылки на подписку или прямого ключа
     if [ -n "$SAVED_SUB_URL" ]; then
-        printf "Введите ссылку на подписку или ключ vless/ss/hy2 [Enter = оставить текущую]: "
+        printf "Введите ссылку на подписку или ключ vless/ss/hy2/anytls [Enter = оставить текущую]: "
     else
         printf "Введите ссылку на подписку (http://...) или прямой ключ (vless://...): "
     fi
@@ -1031,20 +1083,26 @@ run_installer() {
         hwclock -w -u 2>/dev/null || true
     }
 
-    # ЭТАП 1: Сеть, TCP BBR, тюнинг буферов и NAT (OpenWrt)
+    # ЭТАП 1: Сеть, TCP BBR, тюнинг буферов, отключение rp_filter и NAT (Sidecar OpenWrt 25)
     modprobe tcp_bbr 2>/dev/null || true
 
     cat << 'SYS_EOF' > /etc/sysctl.d/99-gateway-forward.conf
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.forwarding = 1
+net.ipv4.conf.all.rp_filter = 0
+net.ipv4.conf.default.rp_filter = 0
 net.ipv4.conf.all.send_redirects = 0
 net.ipv4.conf.default.send_redirects = 0
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 0
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_mtu_probing = 1
 net.core.rmem_max = 33554432
 net.core.wmem_max = 33554432
 net.netfilter.nf_conntrack_max = 131072
@@ -1058,6 +1116,7 @@ SYS_EOF
     uci del network.lan.dns 2>/dev/null || true
     uci add_list network.lan.dns="$GW_IP"
     uci add_list network.lan.dns="77.88.8.8"
+    uci set network.lan.ipv6='0' 2>/dev/null || true
     uci del network.lan.ip6assign 2>/dev/null || true
     uci set network.lan.delegate='0' 2>/dev/null || true
     uci set dhcp.lan.ignore='1'
@@ -1066,6 +1125,8 @@ SYS_EOF
     uci set dhcp.@dnsmasq[0].port='5353'
     uci commit network
     uci commit dhcp
+    /etc/init.d/odhcpd stop 2>/dev/null || true
+    /etc/init.d/odhcpd disable 2>/dev/null || true
 
     printf "nameserver %s\nnameserver 77.88.8.8\nnameserver 1.1.1.1\n" "$GW_IP" > /tmp/resolv.conf
     cp -f /tmp/resolv.conf /etc/resolv.conf
@@ -1091,11 +1152,13 @@ SYS_EOF
     [ -z "$LAN_ZONE_IDX" ] && LAN_ZONE_IDX="@zone[0]"
     uci set "firewall.${LAN_ZONE_IDX}.masq=1"
     uci set "firewall.${LAN_ZONE_IDX}.forward=ACCEPT"
+    uci set firewall.@defaults[0].flow_offloading='0' 2>/dev/null || true
+    uci set firewall.@defaults[0].flow_offloading_hw='0' 2>/dev/null || true
     uci commit firewall
 
-    sync_dns_firewall "$USE_AGH"
+    sync_dns_firewall "$USE_AGH" "keep"
 
-    REQ_PKGS="ca-certificates curl gzip tar kmod-tun kmod-tcp-bbr ip-full conntrack"
+    REQ_PKGS="ca-certificates curl gzip tar kmod-tun kmod-tcp-bbr kmod-nft-tproxy ip-full conntrack"
     [ "$USE_AGH" = "yes" ] && REQ_PKGS="$REQ_PKGS apache-utils"
     NEED_PKGS=""
     for pkg in $REQ_PKGS; do
@@ -1159,6 +1222,10 @@ log-level: warning
 ipv6: false
 unified-delay: true
 tcp-concurrent: true
+global-client-fingerprint: chrome
+keep-alive-interval: 15
+keep-alive-idle: 600
+disable-keep-alive: false
 find-process-mode: off
 geodata-mode: false
 geodata-loader: memconservative
@@ -1182,7 +1249,7 @@ tun:
   auto-detect-interface: true
   auto-redirect: true
   strict-route: true
-  endpoint-independent-nat: false
+  endpoint-independent-nat: true
   gso: true
   gso-max-size: 65536
   udp-timeout: 300
@@ -1232,6 +1299,12 @@ dns:
     - "+.localdomain"
     - "localhost"
     - "+.localhost"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+    - "+.xboxlive.com"
+    - "+.battlenet.com.cn"
+    - "+.stun.*.*"
+    - "+.stun.*.*.*"
     - "rule-set:private_domain"
     - "rule-set:ntp_domain"
     - "rule-set:stun_domain"
@@ -1240,16 +1313,14 @@ dns:
     - "+.market.xiaomi.com"
     - "+.connectivitycheck.gstatic.com"
     - "+.connectivitycheck.android.com"
-    - "+.msftconnecttest.com"
-    - "+.msftncsi.com"
     - "+.captive.apple.com"
   default-nameserver:
     - 77.88.8.8
-    - 1.1.1.1
     - 94.140.14.140
   nameserver:
-    - "https://cloudflare-dns.com/dns-query"
-    - "https://dns.google/dns-query"
+    - "https://cloudflare-dns.com/dns-query#⚡ Авто (Самый быстрый)"
+    - "https://dns.google/dns-query#⚡ Авто (Самый быстрый)"
+    - "https://dns.quad9.net/dns-query#⚡ Авто (Самый быстрый)"
   nameserver-policy:
     "rule-set:private_domain": "${GW_IP}"
     "*": "${GW_IP}"
@@ -1260,9 +1331,9 @@ dns:
     "+.localdomain": "${GW_IP}"
     "+.in-addr.arpa": "${GW_IP}"
     "rule-set:ntp_domain": &ru_bootstrap_dns
-      - "https://common.dot.dns.yandex.net/dns-query"
-      - "tls://common.dot.dns.yandex.net"
-      - "https://dns.adguard-dns.com/dns-query"
+      - "https://common.dot.dns.yandex.net/dns-query#DIRECT"
+      - "tls://common.dot.dns.yandex.net#DIRECT"
+      - "https://dns.adguard-dns.com/dns-query#DIRECT"
       - 77.88.8.8
     "+.connectivitycheck.gstatic.com": *ru_bootstrap_dns
     "+.connectivitycheck.android.com": *ru_bootstrap_dns
@@ -1272,14 +1343,14 @@ dns:
     "rule-set:user_direct_domains": *ru_bootstrap_dns
     "rule-set:ru_domain": *ru_bootstrap_dns
   proxy-server-nameserver:
-    - "https://common.dot.dns.yandex.net/dns-query"
-    - "tls://common.dot.dns.yandex.net"
-    - "https://dns.adguard-dns.com/dns-query"
+    - "https://common.dot.dns.yandex.net/dns-query#DIRECT"
+    - "tls://common.dot.dns.yandex.net#DIRECT"
+    - "https://dns.adguard-dns.com/dns-query#DIRECT"
     - 77.88.8.8
   direct-nameserver:
-    - "https://common.dot.dns.yandex.net/dns-query"
-    - "tls://common.dot.dns.yandex.net"
-    - "https://dns.adguard-dns.com/dns-query"
+    - "https://common.dot.dns.yandex.net/dns-query#DIRECT"
+    - "tls://common.dot.dns.yandex.net#DIRECT"
+    - "https://dns.adguard-dns.com/dns-query#DIRECT"
     - 77.88.8.8
   direct-nameserver-follow-policy: true
 proxy-providers:
@@ -1293,12 +1364,14 @@ $(printf '%b' "$CUSTOM_SUB_BLOCK")
       expected-status: 204
     override:
       udp: true
+      client-fingerprint: chrome
   my_nodes:
     type: file
     path: ./proxy_providers/my_nodes.yaml
     health-check: *hc_default
     override:
       udp: true
+      client-fingerprint: chrome
 proxy-groups:
   - name: "⚡ Авто (Самый быстрый)"
     type: url-test
@@ -1457,14 +1530,14 @@ ${ADB_PRE}    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-
     path: ./rule_sets/ru_ip.mrs
     url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/ru.mrs"
 rules:
+  - RULE-SET,private_domain,DIRECT
+  - RULE-SET,private_ip,DIRECT,no-resolve
 $(printf '%b' "$DEVICE_RULES_STR")
   - RULE-SET,user_direct_domains,DIRECT
   - RULE-SET,user_proxy_domains,⚡ Авто (Самый быстрый)
   - DST-PORT,853,REJECT
   - DST-PORT,123,DIRECT
   - RULE-SET,ntp_domain,DIRECT
-  - RULE-SET,private_domain,DIRECT
-  - RULE-SET,private_ip,DIRECT,no-resolve
 ${ADB_PRE}  - RULE-SET,ads_domain,🛑 Реклама #ADBLOCK_MIHOMO
 ${ADB_PRE}  - RULE-SET,telemetry_domain,🛑 Реклама #ADBLOCK_MIHOMO
   - RULE-SET,torrent_domain,🧲 Торренты
@@ -1476,10 +1549,10 @@ ${ADB_PRE}  - RULE-SET,telemetry_domain,🛑 Реклама #ADBLOCK_MIHOMO
   - RULE-SET,roblox_domain,👾 Discord & Игры
   - RULE-SET,discord_domain,👾 Discord & Игры
   - RULE-SET,discord_voice_ip,👾 Discord & Игры,no-resolve
-  - RULE-SET,stun_domain,💬 Мессенджеры & Связь
-  - AND,((NETWORK,udp),(DST-PORT,3478)),💬 Мессенджеры & Связь
-  - AND,((NETWORK,udp),(DST-PORT,5349)),💬 Мессенджеры & Связь
-  - AND,((NETWORK,udp),(DST-PORT,19302)),💬 Мессенджеры & Связь
+  - RULE-SET,stun_domain,⚡ Авто (Самый быстрый)
+  - AND,((NETWORK,udp),(DST-PORT,3478)),⚡ Авто (Самый быстрый)
+  - AND,((NETWORK,udp),(DST-PORT,5349)),⚡ Авто (Самый быстрый)
+  - AND,((NETWORK,udp),(DST-PORT,19302)),⚡ Авто (Самый быстрый)
   - AND,((NETWORK,udp),(DST-PORT,50000-65535)),💬 Мессенджеры & Связь
   - RULE-SET,communication_domain,💬 Мессенджеры & Связь
   - RULE-SET,telegram_ip,💬 Мессенджеры & Связь,no-resolve
@@ -1537,8 +1610,9 @@ CONFIG_EOF
                 in_list { in_list=0 }
                 { print }
             ' "$AGH_CONF" > "${AGH_CONF}.tmp" && mv "${AGH_CONF}.tmp" "$AGH_CONF"
+            grep -q "aaaa_disabled:" "$AGH_CONF" 2>/dev/null || sed -i '/cache_size:/a \  aaaa_disabled: true' "$AGH_CONF" 2>/dev/null || true
             set_agh_filtering "$AGH_FILT_BOOL"
-            echo "[✓] Существующий AdGuardHome.yaml обновлен (фильтры сохранены, режим антирекламы синхронизирован)."
+            echo "[✓] Существующий AdGuardHome.yaml обновлен (фильтры сохранены, aaaa_disabled: true активен)."
         else
             cat << AGH_EOF > "$AGH_CONF"
 http:
@@ -1559,6 +1633,8 @@ dns:
   upstream_mode: load_balance
   cache_enabled: false
   cache_size: 0
+  aaaa_disabled: true
+  enable_dnssec: false
   use_private_ptr_resolvers: true
   local_ptr_upstreams: [${GW_IP}:53]
   serve_plain_dns: true
@@ -1647,9 +1723,9 @@ INIT_AGH
     echo "========================================================"
 }
 
-# Расширенная диагностика шлюза (Self-Test)
+# Расширенная диагностика шлюза и проверка на утечки (Self-Test + Anti-Leak)
 run_self_test() {
-    echo "=== [Self-Test] Диагностика прозрачного шлюза ==="
+    echo "=== [Self-Test] Диагностика прозрачного шлюза и Anti-Leak ==="
     sleep 2
     if pgrep mihomo >/dev/null 2>&1; then
         echo "[✓] Служба Mihomo: ЗАПУЩЕНА"
@@ -1672,16 +1748,23 @@ run_self_test() {
         echo "[X] TUN-интерфейс (mihomo-tun): НЕ НАЙДЕН"
     fi
 
+    RP_STAT=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo "unknown")
     BBR_STAT=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-    echo "[✓] Алгоритм TCP Congestion: ${BBR_STAT}"
+    echo "[✓] Сетевой стек: TCP ${BBR_STAT} | rp_filter=${RP_STAT} (Sidecar OK)"
+
+    if is_killswitch_enabled; then
+        echo "[✓] Защита от утечек (Kill-Switch): АКТИВНА (строгий запрет обхода TUN)"
+    else
+        echo "[✓] Защита от утечек: IPv6 Drop + DoT/DoQ 853 Reject активны"
+    fi
 
     if [ -f "$MIHOMO_CONF" ] && pgrep mihomo >/dev/null 2>&1; then
         SECRET=$(sed -n 's/^secret:[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" | head -n 1 | tr -d '\r\n')
         ACTIVE_NODE=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${SECRET}" "http://127.0.0.1:9090/proxies" 2>/dev/null | sed -n 's/.*"⚡ Авто (Самый быстрый)".*"now":"\([^"]*\)".*/\1/p' | head -n 1)
         [ -n "$ACTIVE_NODE" ] && echo "[✓] Активная нода (Авто): ${ACTIVE_NODE}"
-        EXT_IP=$(curl -fsS --connect-timeout 4 -x http://127.0.0.1:7890 "http://ip-api.com/line/?fields=query,countryCode,org" 2>/dev/null | tr '\n' ' ' || true)
-        if [ -n "$EXT_IP" ]; then
-            echo "[✓] Внешний IP через туннель: ${EXT_IP}"
+        CF_TRACE=$(curl -fsS --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
+        if [ -n "$CF_TRACE" ]; then
+            echo "[✓] Внешний выход через туннель (Cloudflare Trace): ${CF_TRACE}"
         else
             echo "[!] Туннель еще прогревается или подписка недоступна."
         fi
@@ -1697,7 +1780,7 @@ if [ ! -f "$INSTALL_PATH" ] || [ "$0" != "$INSTALL_PATH" ]; then
 fi
 
 # ==============================================================================
-# Интерактивное меню управления (OpenWrt)
+# Интерактивное меню управления (OpenWrt 25.x)
 # ==============================================================================
 show_menu() {
     init_user_lists
@@ -1709,10 +1792,10 @@ show_menu() {
         echo "========================================================"
         print_gateway_header
         echo "--------------------------------------------------------"
-        echo " 1) Статус служб и глубокий тест туннеля (Self-Test)"
+        echo " 1) Статус служб и глубокий тест на утечки (Self-Test)"
         echo " 2) Управление подпиской и личными ключами (без обрыва)"
         echo " 3) Обновить ядра Mihomo, AdGuard Home и веб-панель"
-        echo " 4) Перезапустить службы + сброс зависших сессий"
+        echo " 4) Перезапустить службы + сброс conntrack и Fake-IP кэша"
         echo " 5) Посмотреть живые логи Mihomo (logread)"
         echo " 6) Полная перенастройка шлюза (Мастер установки)"
         echo " 7) Сменить веб-панель Mihomo (MetaCubeXD / Zashboard)"
@@ -1721,9 +1804,10 @@ show_menu() {
         echo " 10) Режим паузы / Бэкап и восстановление настроек"
         echo " 11) Автообновление (поставил и забыл) — Бро я думаю ты осознаешь последствия ,_,"
         echo " 12) Блокировка рекламы и DNS: переключить (AGH / Mihomo / Оба / Выкл)"
+        echo " 13) Аппаратный Kill-Switch (защита от утечек при падении Mihomo)"
         echo " 0) Выход"
         echo "--------------------------------------------------------"
-        printf "Выберите действие [0-12]: "
+        printf "Выберите действие [0-13]: "
         read -r CHOICE < /dev/tty || true
 
         case "$CHOICE" in
@@ -1738,14 +1822,14 @@ show_menu() {
             2)
                 echo "=== Управление подпиской и личными ключами ==="
                 echo " 1) Заменить основную ссылку подписки (или основной ключ)"
-                echo " 2) Добавить дополнительный личный ключ (vless/hy2/ss/tuic) к подписке"
+                echo " 2) Добавить дополнительный личный ключ (vless/hy2/ss/tuic/anytls) к подписке"
                 echo " 3) Очистить список дополнительных личных ключей (${CUSTOM_NODES_FILE})"
                 echo " 0) Назад"
                 printf "Выбор: "
                 read -r SUB_ACT < /dev/tty || true
                 case "$SUB_ACT" in
                     1)
-                        printf "Введите новую ссылку (http://...) или прямой ключ (vless/ss/hy2): "
+                        printf "Введите новую ссылку (http://...) или прямой ключ (vless/ss/hy2/anytls): "
                         read -r NEW_SUB < /dev/tty || true
                         NEW_SUB=$(printf "%s" "$NEW_SUB" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                         if [ -n "$NEW_SUB" ] && [ -f "$MIHOMO_CONF" ]; then
@@ -1788,7 +1872,7 @@ show_menu() {
                         sleep 2
                         ;;
                     2)
-                        printf "Вставьте ключ (vless://, hy2://, ss://, tuic://, wg://): "
+                        printf "Вставьте ключ (vless://, hy2://, ss://, tuic://, wg://, anytls://): "
                         read -r EXTRA_KEY < /dev/tty || true
                         EXTRA_KEY=$(printf "%s" "$EXTRA_KEY" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                         if [ -n "$EXTRA_KEY" ]; then
@@ -1820,12 +1904,13 @@ show_menu() {
             4)
                 echo "Проверка синтаксиса конфигурации Mihomo..."
                 if /usr/bin/mihomo -d "$MIHOMO_DIR" -t; then
+                    reload_mihomo_api
                     conntrack -F >/dev/null 2>&1 || true
                     /etc/init.d/mihomo restart 2>/dev/null || true
                     if grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null; then
                         /etc/init.d/adguardhome restart 2>/dev/null || true
                     fi
-                    echo "[✓] Таблица conntrack очищена, службы успешно перезапущены."
+                    echo "[✓] Кэш Fake-IP и таблица conntrack очищены, службы успешно перезапущены."
                 else
                     echo "[X] Конфигурация повреждена! Проверьте ошибки выше."
                 fi
@@ -1952,6 +2037,7 @@ show_menu() {
                             sed -i "\|^${IP_IN}$|d" "$USER_FORCE_PROXY_IPS" 2>/dev/null || true
                             grep -qxF "$IP_IN" "$USER_BYPASS_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_BYPASS_IPS"
                             sync_device_ips_in_config
+                            conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
                             echo "[✓] Устройство ${IP_IN} теперь идет мимо прокси (DIRECT)."
                         fi
                         sleep 2
@@ -1964,6 +2050,7 @@ show_menu() {
                             sed -i "\|^${IP_IN}$|d" "$USER_BYPASS_IPS" 2>/dev/null || true
                             grep -qxF "$IP_IN" "$USER_FORCE_PROXY_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_FORCE_PROXY_IPS"
                             sync_device_ips_in_config
+                            conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
                             echo "[✓] Весь трафик устройства ${IP_IN} направлен через прокси."
                         fi
                         sleep 2
@@ -1972,6 +2059,7 @@ show_menu() {
                         : > "$USER_BYPASS_IPS"
                         : > "$USER_FORCE_PROXY_IPS"
                         sync_device_ips_in_config
+                        conntrack -F >/dev/null 2>&1 || true
                         echo "[✓] Списки маршрутизации по IP очищены."
                         sleep 2
                         ;;
@@ -2079,6 +2167,31 @@ show_menu() {
                     2) apply_adblock_mode "mihomo"; sleep 2 ;;
                     3) apply_adblock_mode "both";   sleep 2 ;;
                     4) apply_adblock_mode "off";    sleep 2 ;;
+                esac
+                ;;
+            13)
+                echo "=== Аппаратный Kill-Switch (fw4 / nftables) ==="
+                echo "Блокирует любую прямую маршрутизацию из br-lan в основной роутер в обход mihomo-tun."
+                echo "Если служба Mihomo упадет, клиенты не «светят» реальный российский IP провайдера."
+                echo "--------------------------------------------------------"
+                USE_AGH_CUR="no"
+                grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null && USE_AGH_CUR="yes"
+                echo " 1) ВКЛЮЧИТЬ строгий Kill-Switch (рекомендуется против утечек)"
+                echo " 2) ВЫКЛЮЧИТЬ строгий Kill-Switch (оставить только защиту IPv6 и DoT 853)"
+                echo " 0) Назад"
+                printf "Выбор [0-2]: "
+                read -r KS_ACT < /dev/tty || true
+                case "$KS_ACT" in
+                    1)
+                        sync_dns_firewall "$USE_AGH_CUR" "yes"
+                        echo "[✓] Аппаратный Kill-Switch ВКЛЮЧЕН."
+                        sleep 2
+                        ;;
+                    2)
+                        sync_dns_firewall "$USE_AGH_CUR" "no"
+                        echo "[✓] Аппаратный Kill-Switch ВЫКЛЮЧЕН."
+                        sleep 2
+                        ;;
                 esac
                 ;;
             0)
