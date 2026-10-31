@@ -1,29 +1,9 @@
+cat << 'EOF' > /tmp/setup_gateway.sh
 #!/bin/sh
 set -e
 
 # ==============================================================================
-# Умный загрузчик: поддержка curl | sh, прямого запуска и установки gateway
-# ==============================================================================
-if [ ! -t 0 ]; then
-    case "$0" in
-        *sh|*ash|*dash)
-            BOOTSTRAP_FILE="/tmp/setup_gateway_$$.sh"
-            cat > "$BOOTSTRAP_FILE"
-            chmod +x "$BOOTSTRAP_FILE"
-            exec /bin/sh "$BOOTSTRAP_FILE" "$@" < /dev/tty
-            ;;
-    esac
-fi
-
-INSTALL_PATH="/usr/bin/gateway"
-SCRIPT_BASE="$(basename "$0" 2>/dev/null || true)"
-if [ -f "$0" ] && [ "$0" != "$INSTALL_PATH" ] && [ "$SCRIPT_BASE" != "sh" ] && [ "$SCRIPT_BASE" != "ash" ] && [ "$SCRIPT_BASE" != "-sh" ] && [ "$SCRIPT_BASE" != "-ash" ]; then
-    cp -f "$0" "$INSTALL_PATH"
-    chmod +x "$INSTALL_PATH"
-fi
-
-# ==============================================================================
-# Глобальные пути и переменные (OpenWrt 23.x / 24.x / 25.x + APK/OPKG — 2026)
+# Глобальные пути и переменные (OpenWrt 25.x + APK Edition — Октябрь 2026)
 # ==============================================================================
 MIHOMO_DIR="/etc/mihomo"
 MIHOMO_CONF="${MIHOMO_DIR}/config.yaml"
@@ -48,34 +28,19 @@ GH_PROXY=""
 LATEST_MIHOMO_TAG=""
 LATEST_AGH_TAG=""
 LATEST_UI_TAG=""
-LAN_DEV="br-lan"
-PKG_MGR="apk"
-LOW_RAM_SYSTEM="no"
 
-# ==============================================================================
-# Аппаратная диагностика и поддержка пакетных менеджеров (APK и OPKG)
-# ==============================================================================
-detect_pkg_manager() {
-    if command -v apk >/dev/null 2>&1; then
-        PKG_MGR="apk"
-    elif command -v opkg >/dev/null 2>&1; then
-        PKG_MGR="opkg"
-    else
-        echo "[X] Ошибка: Не найден пакетный менеджер (требуется apk или opkg)."
-        exit 1
-    fi
-}
-
+# Проверка целевой платформы (OpenWrt 25.x+ с пакетным менеджером apk)
 detect_os() {
     if [ ! -f /etc/openwrt_release ]; then
         echo "[X] Ошибка: Скрипт предназначен исключительно для OpenWrt."
         exit 1
     fi
+    if ! command -v apk >/dev/null 2>&1; then
+        echo "[X] Ошибка: Не найден пакетный менеджер apk (требуется OpenWrt 25.x+)."
+        exit 1
+    fi
 
-    detect_pkg_manager
-
-    OS_VER=$(grep DISTRIB_RELEASE /etc/openwrt_release 2>/dev/null | cut -d"'" -f2 || echo "Unknown")
-    OS_NAME="OpenWrt (${OS_VER}, ${PKG_MGR})"
+    OS_NAME="OpenWrt ($(grep DISTRIB_RELEASE /etc/openwrt_release | cut -d"'" -f2))"
     ARCH_RAW=$(uname -m)
     case "$ARCH_RAW" in
         x86_64)
@@ -90,75 +55,11 @@ detect_os() {
             MIHOMO_ARCH="arm64"
             AGH_ARCH="arm64"
             ;;
-        armv7l|armv7)
-            MIHOMO_ARCH="armv7"
-            AGH_ARCH="armv7"
-            ;;
-        mips|mipsel)
-            MIHOMO_ARCH="mips-softfloat"
-            AGH_ARCH="mipsle-softfloat"
-            ;;
         *)
             echo "[X] Ошибка: Неподдерживаемая архитектура ${ARCH_RAW}."
             exit 1
             ;;
     esac
-}
-
-detect_lan_dev() {
-    LAN_DEV=$(uci -q get network.lan.device 2>/dev/null || true)
-    [ -z "$LAN_DEV" ] && LAN_DEV=$(uci -q get network.lan.ifname 2>/dev/null || true)
-    [ -z "$LAN_DEV" ] && LAN_DEV=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
-    [ -z "$LAN_DEV" ] && LAN_DEV="br-lan"
-}
-
-check_system_memory() {
-    TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
-    [ -z "$TOTAL_RAM_KB" ] && TOTAL_RAM_KB=524288
-    TOTAL_RAM_MB=$((TOTAL_RAM_KB / 1024))
-
-    if [ "$TOTAL_RAM_MB" -lt 240 ]; then
-        LOW_RAM_SYSTEM="yes"
-        SWAP_TOTAL=$(grep SwapTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
-        if [ "${SWAP_TOTAL:-0}" -eq 0 ]; then
-            install_packages "zram-swap"
-            if [ -x /etc/init.d/zram ]; then
-                uci set zram.@zram[0].zram_size_mb="$((TOTAL_RAM_MB / 2))" 2>/dev/null || true
-                uci commit zram 2>/dev/null || true
-                /etc/init.d/zram enable 2>/dev/null || true
-                /etc/init.d/zram restart 2>/dev/null || true
-            fi
-        fi
-    else
-        LOW_RAM_SYSTEM="no"
-    fi
-}
-
-install_packages() {
-    PKGS="$*"
-    [ -z "$PKGS" ] && return 0
-    detect_pkg_manager
-    NEED_PKGS=""
-    for pkg in $PKGS; do
-        if [ "$PKG_MGR" = "apk" ]; then
-            apk info -e "$pkg" >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS $pkg"
-        else
-            opkg list-installed "$pkg" 2>/dev/null | grep -q "^$pkg" || NEED_PKGS="$NEED_PKGS $pkg"
-        fi
-    done
-
-    if [ -n "$NEED_PKGS" ]; then
-        echo "Установка необходимых пакетов (${PKG_MGR}): ${NEED_PKGS}..."
-        if [ "$PKG_MGR" = "apk" ]; then
-            apk update --allow-untrusted >/dev/null 2>&1 || true
-            # shellcheck disable=SC2086
-            apk add --allow-untrusted $NEED_PKGS >/dev/null 2>&1 || true
-        else
-            opkg update >/dev/null 2>&1 || true
-            # shellcheck disable=SC2086
-            opkg install $NEED_PKGS >/dev/null 2>&1 || true
-        fi
-    fi
 }
 
 # Защита файлов шлюза от удаления при обновлении прошивки OpenWrt (sysupgrade / owut)
@@ -181,7 +82,7 @@ ensure_sysupgrade_persistence() {
 
 # Отключение фонового демона apache (устанавливается как зависимость apache-utils для htpasswd)
 disable_apache_daemon() {
-    for srv in apache apache2 httpd; do
+    for srv in apache apache2; do
         if [ -x "/etc/init.d/${srv}" ]; then
             "/etc/init.d/${srv}" stop >/dev/null 2>&1 || true
             "/etc/init.d/${srv}" disable >/dev/null 2>&1 || true
@@ -270,7 +171,6 @@ sync_dns_firewall() {
         fi
     fi
 
-    detect_lan_dev
     mkdir -p /etc/nftables.d
 
     # 1. Выравнивание TCP MSS (защита от PMTU Blackhole и детекта MTU в Sidecar-схеме)
@@ -282,33 +182,33 @@ chain mihomo_mss_clamp {
 }
 NFT_MSS
 
-    # 2. Защита от утечек (Anti-Leak): жесткий блок IPv6 форвардинга, DoT/DoQ (853) и Kill-Switch
+    # 2. Защита от утечек (Anti-Leak): жесткий блок IPv6 форвардинга, DoT/DoQ (853) и опциональный Kill-Switch
     if [ "$KS_STATE" = "yes" ]; then
-        cat << NFT_LEAK_KS > /etc/nftables.d/97-mihomo-anti-leak.nft
+        cat << 'NFT_LEAK_KS' > /etc/nftables.d/97-mihomo-anti-leak.nft
 #KILLSWITCH_ACTIVE
 chain mihomo_anti_leak {
     type filter hook forward priority filter - 5; policy accept;
     meta nfproto ipv6 drop
-    iifname "${LAN_DEV}" meta l4proto { tcp, udp } th dport 853 reject
-    iifname "${LAN_DEV}" oifname "${LAN_DEV}" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject
+    iifname "br-lan" meta l4proto { tcp, udp } th dport 853 reject
+    iifname "br-lan" oifname "br-lan" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject
 }
 NFT_LEAK_KS
     else
-        cat << NFT_LEAK > /etc/nftables.d/97-mihomo-anti-leak.nft
+        cat << 'NFT_LEAK' > /etc/nftables.d/97-mihomo-anti-leak.nft
 chain mihomo_anti_leak {
     type filter hook forward priority filter - 5; policy accept;
     meta nfproto ipv6 drop
-    iifname "${LAN_DEV}" meta l4proto { tcp, udp } th dport 853 reject
+    iifname "br-lan" meta l4proto { tcp, udp } th dport 853 reject
 }
 NFT_LEAK
     fi
 
-    # 3. Принудительный перехват любых сторонних DNS-запросов (зашитых 8.8.8.8 на Smart TV / IoT)
+    # 3. Принудительный перехват любых сторонних DNS-запросов (зашитых 8.8.8.8 на Smart TV / IoT и запросов к основному роутеру)
     if [ "$USE_DNS_REDIRECT" = "yes" ]; then
-        cat << NFT_OWRT > /etc/nftables.d/99-agh-dns-redirect.nft
+        cat << 'NFT_OWRT' > /etc/nftables.d/99-agh-dns-redirect.nft
 chain agh_dns_prerouting {
     type nat hook prerouting priority dstnat - 5; policy accept;
-    iifname "${LAN_DEV}" meta l4proto { tcp, udp } th dport 53 redirect to :53
+    iifname "br-lan" meta l4proto { tcp, udp } th dport 53 redirect to :53
 }
 NFT_OWRT
     else
@@ -357,19 +257,12 @@ set_agh_filtering() {
     fi
 }
 
-# Подготовка, очистка багов и миграция конфига Mihomo
+# Подготовка и миграция меток #DNS_HIJACK и #ADBLOCK_MIHOMO в существующем config.yaml
 ensure_mihomo_config_tags() {
     [ -f "$MIHOMO_CONF" ] || return 0
 
-    # Исправление экранирования t\.me/
+    # Исправление старого экранирования t\.me/ в существующем конфиге
     sed -i 's/t\\\.me\//t[.]me\//g' "$MIHOMO_CONF" 2>/dev/null || true
-
-    # КРИТИЧЕСКИЙ БАГФИКС: удаление '*' из fake-ip-filter (blacklist)
-    sed -i '/^[[:space:]]*-[[:space:]]*"\*"/d' "$MIHOMO_CONF" 2>/dev/null || true
-
-    # КРИТИЧЕСКИЙ БАГФИКС: удаление "*": "${GW_IP}" из nameserver-policy для исключения утечек DNS
-    sed -i '/^[[:space:]]*"\*":[[:space:]]*"\${GW_IP}"/d' "$MIHOMO_CONF" 2>/dev/null || true
-    sed -i 's/^[[:space:]]*"\*":[[:space:]]*"[0-9.]*"/# &/' "$MIHOMO_CONF" 2>/dev/null || true
 
     if ! grep -q "#DNS_HIJACK" "$MIHOMO_CONF" 2>/dev/null; then
         if grep -q "dns-hijack:" "$MIHOMO_CONF" 2>/dev/null; then
@@ -431,7 +324,7 @@ ensure_mihomo_config_tags() {
         fi
     fi
 
-    # Авто-миграция конфига для пула warp_nodes
+    # Авто-миграция конфига для поддержки пула warp_nodes, если конфиг от старой версии
     if ! grep -q "warp_nodes:" "$MIHOMO_CONF" 2>/dev/null; then
         awk '
             /^  my_nodes:/ {
@@ -464,7 +357,8 @@ ensure_agh_installed() {
         [ -z "$PASS_CUR" ] && PASS_CUR="admin"
 
         if ! command -v htpasswd >/dev/null 2>&1; then
-            install_packages "apache-utils"
+            apk update --allow-untrusted >/dev/null 2>&1 || true
+            apk add --allow-untrusted apache-utils >/dev/null 2>&1 || true
             disable_apache_daemon
         fi
 
@@ -661,15 +555,15 @@ run_autoupdate() {
 # Получение последнего тега релиза с GitHub
 fetch_latest_github_tag() {
     REPO="$1"
-    TAG=$(curl -fsSL --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n 1 | cut -d'"' -f4 || true)
+    TAG=$(curl -fsSL --connect-timeout 2 -m 3 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n 1 | cut -d'"' -f4 || true)
     if [ -z "$TAG" ]; then
-        TAG=$(curl -fsSLI --connect-timeout 3 -m 5 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d '\r\n' || true)
+        TAG=$(curl -fsSLI --connect-timeout 2 -m 3 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d '\r\n' || true)
         [ "$TAG" = "latest" ] && TAG=""
     fi
     printf "%s" "$TAG"
 }
 
-# Кэширование актуальных версий с GitHub
+# Кэширование актуальных версий с GitHub для быстрого отображения в меню
 refresh_remote_versions() {
     detect_current_ui
     LATEST_MIHOMO_TAG=$(fetch_latest_github_tag "MetaCubeX/mihomo")
@@ -739,7 +633,7 @@ print_gateway_header() {
 
     if is_warp_enabled; then
         W_STAT="[АКТИВЕН]     "
-        W_INFO="8 нод (Cloudflare AWG 2.0 + Европа 🇳🇱🇫🇮🇩🇪🇵🇱)"
+        W_INFO="8 бесплатных нод (Cloudflare + Европа 🇳🇱🇫🇮🇩🇪🇵🇱)"
     else
         W_STAT="[ВЫКЛЮЧЕН]    "
         W_INFO="можно включить бесплатно в пункте 2"
@@ -771,7 +665,7 @@ print_gateway_header() {
 
     if is_killswitch_enabled; then
         KS_STAT="[АКТИВЕН]     "
-        KS_INFO="строгая блокировка утечек мимо mihomo-tun"
+        KS_INFO="строгая блокировка трафика мимо mihomo-tun"
     else
         KS_STAT="[СТАНДАРТ]    "
         KS_INFO="защита IPv6 + DoT/DoQ + перехват DNS 53"
@@ -779,7 +673,7 @@ print_gateway_header() {
 
     if is_autoupdate_enabled; then
         AU_STAT="[ВКЛЮЧЕНО]    "
-        AU_INFO="ежедневно в 04:00 (поставил и забыл)"
+        AU_INFO="ежедневно в 04:00 (поставил и забыл ,_,)"
     else
         AU_STAT="[ВЫКЛЮЧЕНО]   "
         AU_INFO="только вручную"
@@ -823,7 +717,7 @@ download_file() {
     return 1
 }
 
-# Инициализация пользовательских списков и файлов провайдеров
+# Инициализация пользовательских списков и файлов провайдеров (с защитой от 0-байтовых YAML)
 init_user_lists() {
     mkdir -p "$MIHOMO_RULES_DIR" "$MIHOMO_PROVIDERS_DIR"
     [ -f "$USER_DIRECT_FILE" ] || echo "+.localdomain" > "$USER_DIRECT_FILE"
@@ -834,24 +728,18 @@ init_user_lists() {
     [ -s "$WARP_NODES_FILE" ] || echo "proxies: []" > "$WARP_NODES_FILE"
 }
 
-# Безопасное разделение нескольких URI-ключей без повреждения параметров
+# Безопасное разделение нескольких URI-ключей без повреждения alpn=h2,http/1.1 и пробелов в #Названии
 format_uri_keys() {
     printf "%s\n" "$1" | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
 }
 
-# Генератор случайных чисел для рандомизации AmneziaWG параметров
-get_random_range() {
-    R_MIN="$1"
-    R_MAX="$2"
-    awk -v min="$R_MIN" -v max="$R_MAX" 'BEGIN{srand(); print int(min+rand()*(max-min+1))}'
-}
-
-# Автоматическая генерация Amnezia WARP (Cloudflare WARP + AmneziaWG 2.0 обфускация)
+# Автоматическая бесплатная генерация Amnezia WARP (Cloudflare WARP + AmneziaWG 2.0)
 generate_amnezia_warp() {
     mkdir -p "$MIHOMO_PROVIDERS_DIR"
     if ! command -v wg >/dev/null 2>&1; then
-        echo "Установка wireguard-tools..."
-        install_packages "wireguard-tools"
+        echo "Установка генератора ключей wireguard-tools..."
+        apk update --allow-untrusted >/dev/null 2>&1 || true
+        apk add --allow-untrusted wireguard-tools >/dev/null 2>&1 || true
     fi
 
     PRIV_KEY=""
@@ -892,7 +780,7 @@ generate_amnezia_warp() {
         done
     fi
 
-    # Фоллбэк на публичные зеркала генератора WARP
+    # Фоллбэк на публичные зеркала генератора WARP, если провайдер глушит все IP api.cloudflareclient.com
     if [ "$REG_OK" = "no" ]; then
         for MIRROR_API in "https://warp.llimonix.pw/api/warp" "https://warp-reg.vercel.app/api/warp"; do
             RESP_M=$(curl -fsSL --connect-timeout 4 -m 7 "$MIRROR_API" 2>/dev/null || true)
@@ -907,7 +795,7 @@ generate_amnezia_warp() {
         done
     fi
 
-    # Если уже есть рабочий ключ в warp_nodes.yaml и API недоступен
+    # Если уже есть рабочий ключ в warp_nodes.yaml и API недоступен — сохраняем существующий ключ
     if [ "$REG_OK" = "no" ] && is_warp_enabled; then
         OLD_PRIV=$(sed -n 's/^[[:space:]]*private-key:[[:space:]]*"\([^"]*\)".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
         OLD_IP=$(sed -n 's/^[[:space:]]*ip:[[:space:]]*\([0-9.]*\).*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
@@ -919,7 +807,7 @@ generate_amnezia_warp() {
         fi
     fi
 
-    # Ручной ввод PrivateKey
+    # Ручной ввод PrivateKey, если регистрация полностью заблокирована на линии провайдера
     if [ "$REG_OK" = "no" ]; then
         echo "[!] Провайдер блокирует прямой доступ к API регистрации Cloudflare."
         printf "Вставьте готовый WARP PrivateKey (например, из @warp_generator_bot) [Enter = отмена]: "
@@ -937,11 +825,6 @@ generate_amnezia_warp() {
 
     [ -z "$WARP_IPV4" ] && WARP_IPV4="172.16.0.2"
 
-    # Динамическая рандомизация параметров AWG для обхода эвристического анализа ТСПУ
-    AWG_JC=$(get_random_range 3 7)
-    AWG_JMIN=$(get_random_range 35 48)
-    AWG_JMAX=$(get_random_range 65 92)
-
     cat << WARP_EOF > "$WARP_NODES_FILE"
 proxies:
   - name: "☁️ WARP Fast (162.159.192.1:4500)"
@@ -957,9 +840,9 @@ proxies:
     remote-dns-resolve: true
     dns: [1.1.1.1, 8.8.8.8]
     amnezia-wg-option: &awg_warp
-      jc: ${AWG_JC}
-      jmin: ${AWG_JMIN}
-      jmax: ${AWG_JMAX}
+      jc: 4
+      jmin: 40
+      jmax: 70
       s1: 0
       s2: 0
       h1: 1
@@ -1067,11 +950,11 @@ proxies:
     amnezia-wg-option: *awg_warp
 WARP_EOF
 
-    echo "[✓] Пул Amnezia WARP (8 нод: Cloudflare AWG 2.0 + Европа) успешно сгенерирован (IP: ${WARP_IPV4}, JC: ${AWG_JC})!"
+    echo "[✓] Бесплатный пул Amnezia WARP (8 нод: Cloudflare + Европа) успешно создан (IP: ${WARP_IPV4})!"
     return 0
 }
 
-# Горячая перезагрузка конфигурации и провайдеров Mihomo через REST API + сброс Fake-IP
+# Горячая перезагрузка конфигурации и провайдеров Mihomo через REST API + сброс Fake-IP кэша
 reload_mihomo_api() {
     if ! pgrep mihomo >/dev/null 2>&1; then
         return 0
@@ -1094,7 +977,7 @@ reload_mihomo_api() {
         "http://127.0.0.1:9090/providers/rules/user_proxy_domains" >/dev/null 2>&1 || true
 }
 
-# Обработка подписки, одиночных ключей или режима Amnezia WARP
+# Обработка подписки, одиночных ключей или режима бесплатного Amnezia WARP
 apply_subscription_input() {
     RAW_INPUT="$1"
     mkdir -p "$MIHOMO_PROVIDERS_DIR"
@@ -1124,7 +1007,7 @@ apply_subscription_input() {
     esac
 }
 
-# Загрузка и установка веб-панели Mihomo
+# Загрузка и установка веб-панели Mihomo с сохранением версии
 install_mihomo_ui() {
     TARGET_UI_TYPE="$1"
     TARGET_UI_NAME="$2"
@@ -1154,12 +1037,12 @@ install_mihomo_ui() {
         echo "[✓] Веб-панель ${TARGET_UI_NAME} ${TARGET_UI_VER} успешно установлена в /etc/mihomo/ui."
     else
         rm -rf /tmp/mihomo_ui.tar.gz /tmp/mihomo_ui_extract
-        echo "[X] Ошибка загрузки веб-панели ${TARGET_UI_NAME}!"
+        echo "[X] Ошибка загрузки или распаковки веб-панели ${TARGET_UI_NAME}!"
         return 1
     fi
 }
 
-# Атомарное обновление бинарников Mihomo, AdGuard Home и UI с проверкой валидности
+# Атомарное обновление бинарников Mihomo, AdGuard Home и UI (с проверкой целостности до замены)
 update_cores_only() {
     CHECK_UI_UPDATE="${1:-no}"
     detect_os
@@ -1187,7 +1070,7 @@ update_cores_only() {
                 /etc/init.d/mihomo stop 2>/dev/null || true
                 mv -f /tmp/mihomo.new /usr/bin/mihomo
                 rm -f /tmp/mihomo.gz
-                echo "[✓] Mihomo успешно обновлен до ${MIHOMO_TAG}."
+                echo "[✓] Mihomo безопасно обновлен до ${MIHOMO_TAG}."
             else
                 rm -f /tmp/mihomo.gz /tmp/mihomo.new
                 echo "[X] Ошибка: скачанный бинарник Mihomo поврежден, оставлена текущая версия."
@@ -1218,9 +1101,9 @@ update_cores_only() {
                     if /tmp/agh_extract/AdGuardHome/AdGuardHome --version >/dev/null 2>&1; then
                         /etc/init.d/adguardhome stop 2>/dev/null || true
                         mv -f /tmp/agh_extract/AdGuardHome/AdGuardHome /usr/bin/AdGuardHome
-                        echo "[✓] AdGuard Home успешно обновлен до ${AGH_TAG}."
+                        echo "[✓] AdGuard Home безопасно обновлен до ${AGH_TAG}."
                     else
-                        echo "[X] Ошибка проверки AdGuard Home, оставлена текущая версия."
+                        echo "[X] Ошибка проверки бинарника AdGuard Home, оставлена текущая версия."
                     fi
                 fi
                 rm -rf /tmp/agh.tar.gz /tmp/agh_extract
@@ -1245,7 +1128,7 @@ update_cores_only() {
     fi
 }
 
-# Сборка правил маршрутизации по локальным IP (DIRECT и Full-VPN)
+# Сборка правил локальных IP-адресов (DIRECT и FULL-VPN) с метками #DEVICE_IP_RULE
 build_device_ip_rules() {
     BYPASS_RULES_STR=""
     FORCE_PROXY_RULES_STR=""
@@ -1275,7 +1158,7 @@ build_device_ip_rules() {
     fi
 }
 
-# Пересборка списка SRC-IP-CIDR в config.yaml
+# Пересборка списка SRC-IP-CIDR в существующем config.yaml
 sync_device_ips_in_config() {
     [ -f "$MIHOMO_CONF" ] || return 0
     cp -f "$MIHOMO_CONF" "${MIHOMO_CONF}.bak"
@@ -1310,18 +1193,12 @@ sync_device_ips_in_config() {
 # ==============================================================================
 run_installer() {
     detect_os
-    detect_lan_dev
-    check_system_memory
     init_user_lists
 
     echo "========================================================"
     echo "  Установщик шлюза Mihomo + AdGuard Home (OpenWrt 2026) "
     echo "========================================================"
     echo "Система: ${OS_NAME} [${ARCH_RAW} -> ${MIHOMO_ARCH}]"
-    echo "Сетевой интерфейс LAN: ${LAN_DEV}"
-    if [ "$LOW_RAM_SYSTEM" = "yes" ]; then
-        echo "Внимание: Обнаружено < 256MB RAM. Включен zram-swap. Рекомендуется режим 'Только Mihomo'."
-    fi
     echo "--------------------------------------------------------"
 
     SAVED_SUB_URL=""
@@ -1387,7 +1264,7 @@ run_installer() {
                 RAW_SUB_CHOICE="warp"
                 ;;
             *)
-                echo "[X] Ошибка: Требуется подписка, vless/hy2 ключ или Amnezia WARP."
+                echo "Бро я не буду этого делать без подписки или ключа ,_."
                 exit 1
                 ;;
         esac
@@ -1422,7 +1299,6 @@ run_installer() {
     echo "  4) Выключить блокировку рекламы (AGH как чистый DNS без фильтрации)"
     DEF_ADB_CHOICE="1"
     [ "$SAVED_USE_AGH" = "no" ] && DEF_ADB_CHOICE="2"
-    [ "$LOW_RAM_SYSTEM" = "yes" ] && DEF_ADB_CHOICE="2"
     printf "Ваш выбор (1-4) [Enter = %s]: " "$DEF_ADB_CHOICE"
     read -r INPUT_ADB_CHOICE < /dev/tty || true
     INPUT_ADB_CHOICE=$(printf "%s" "$INPUT_ADB_CHOICE" | tr -d ' \t\r\n')
@@ -1518,9 +1394,9 @@ run_installer() {
             ;;
     esac
 
-    # 6. Запрос на автообновление
+    # 6. Запрос на автообновление («поставил и забыл»)
     DEF_AU_CHAR=$(is_autoupdate_enabled && echo "y" || echo "n")
-    printf "Включить автообновление ядер и панелей (каждый день в 04:00)? (y/n) [Enter = %s]: " "$DEF_AU_CHAR"
+    printf "Включить автообновление ядер и панелей (поставил и забыл — Бро я думаю ты осознаешь последствия ,_,)? (y/n) [Enter = %s]: " "$DEF_AU_CHAR"
     read -r INPUT_AU_ANS < /dev/tty || true
     INPUT_AU_ANS=$(printf "%s" "$INPUT_AU_ANS" | tr -d ' \t\r\n')
     [ -z "$INPUT_AU_ANS" ] && INPUT_AU_ANS="$DEF_AU_CHAR"
@@ -1532,7 +1408,6 @@ run_installer() {
     echo "--------------------------------------------------------"
     echo "Итоговая конфигурация развертывания:"
     echo " - ОС:              ${OS_NAME}"
-    echo " - Сеть LAN:        ${LAN_DEV}"
     echo " - Основной роутер: ${GW_IP}"
     echo " - Схема DNS:       ${DNS_MODE_DESC}"
     echo " - Антиреклама:     ${ADBLOCK_SUMMARY}"
@@ -1553,7 +1428,7 @@ run_installer() {
         hwclock -w -u 2>/dev/null || true
     }
 
-    # ЭТАП 1: Сеть, TCP BBR, тюнинг буферов и сброс rp_filter
+    # ЭТАП 1: Сеть, TCP BBR, тюнинг буферов, отключение rp_filter и NAT (Sidecar OpenWrt 25)
     modprobe tcp_bbr 2>/dev/null || true
 
     cat << 'SYS_EOF' > /etc/sysctl.d/99-gateway-forward.conf
@@ -1605,7 +1480,7 @@ SYS_EOF
     /etc/init.d/dnsmasq restart
     sleep 2
 
-    CURRENT_IP=$(uci -q get network.lan.ipaddr || ip -4 addr show "${LAN_DEV}" 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
+    CURRENT_IP=$(uci -q get network.lan.ipaddr || ip -4 addr show br-lan 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
     CURRENT_IP="${CURRENT_IP%%/*}"
 
     CUR_TZ=$(uci -q get system.@system[0].zonename || true)
@@ -1631,7 +1506,11 @@ SYS_EOF
 
     REQ_PKGS="ca-certificates curl gzip tar kmod-tun kmod-tcp-bbr kmod-nft-tproxy ip-full conntrack wireguard-tools"
     [ "$USE_AGH" = "yes" ] && REQ_PKGS="$REQ_PKGS apache-utils"
-    install_packages "$REQ_PKGS"
+    NEED_PKGS=""
+    for pkg in $REQ_PKGS; do
+        apk info -e "$pkg" >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS $pkg"
+    done
+    [ -n "$NEED_PKGS" ] && { apk update --allow-untrusted || true; apk add --allow-untrusted $NEED_PKGS || true; }
     disable_apache_daemon
 
     modprobe tun 2>/dev/null || true
@@ -1639,7 +1518,7 @@ SYS_EOF
     sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
     [ -e /dev/net/tun ] || { mkdir -p /dev/net && mknod /dev/net/tun c 10 200; }
 
-    # Генерация пула Amnezia WARP при выборе бесплатного режима
+    # Если выбран режим бесплатного Amnezia WARP — генерируем пул нод после синхронизации часов и установки пакетов
     if [ "$PROVIDER_TYPE" = "warp" ]; then
         generate_amnezia_warp || true
     fi
@@ -1647,7 +1526,7 @@ SYS_EOF
     # ЭТАП 2: Загрузка/обновление ядер Mihomo и AdGuard Home
     update_cores_only "no"
 
-    # ЭТАП 3: Генерация конфигурации Mihomo
+    # ЭТАП 3: Генерация конфига Mihomo и установка веб-панели
     /etc/init.d/mihomo stop 2>/dev/null || true
 
     if [ "$PROVIDER_TYPE" = "http" ] && [ -n "$SAVED_SUB_URL" ] && [ "$SUB_URL" != "$SAVED_SUB_URL" ]; then
@@ -1766,6 +1645,7 @@ dns:
   fake-ip-range: 198.18.0.1/16
   fake-ip-filter-mode: blacklist
   fake-ip-filter:
+    - "*"
     - "+.lan"
     - "+.local"
     - "+.home.arpa"
@@ -1806,6 +1686,7 @@ dns:
     - "https://dns.quad9.net/dns-query#⚡ Авто (Самый быстрый)"
   nameserver-policy:
     "rule-set:private_domain": "${GW_IP}"
+    "*": "${GW_IP}"
     "+.lan": "${GW_IP}"
     "+.local": "${GW_IP}"
     "+.home.arpa": "${GW_IP}"
@@ -2079,7 +1960,7 @@ $(printf '%b' "$FORCE_PROXY_RULES_STR")
   - MATCH,🐟 Прочий трафик
 CONFIG_EOF
 
-    # ЭТАП 4: Настройка AdGuard Home
+    # ЭТАП 4: Настройка AdGuard Home с сохранением пользовательских фильтров и обновлением пароля
     if [ "$USE_AGH" = "yes" ]; then
         echo "Генерация bcrypt-хэша пароля..."
         AGH_PASS_HASH=""
@@ -2126,7 +2007,7 @@ CONFIG_EOF
             ' "$AGH_CONF" > "${AGH_CONF}.tmp" && mv "${AGH_CONF}.tmp" "$AGH_CONF"
             grep -q "aaaa_disabled:" "$AGH_CONF" 2>/dev/null || sed -i '/cache_size:/a \  aaaa_disabled: true' "$AGH_CONF" 2>/dev/null || true
             set_agh_filtering "$AGH_FILT_BOOL"
-            echo "[✓] AdGuardHome.yaml обновлен (фильтры сохранены, aaaa_disabled: true активен)."
+            echo "[✓] Существующий AdGuardHome.yaml обновлен (фильтры сохранены, aaaa_disabled: true активен)."
         else
             cat << AGH_EOF > "$AGH_CONF"
 http:
@@ -2169,7 +2050,7 @@ AGH_EOF
         /etc/init.d/adguardhome disable 2>/dev/null || true
     fi
 
-    # ЭТАП 5: Регистрация служб procd
+    # ЭТАП 5: Регистрация служб procd (OpenWrt) и защита от удаления при sysupgrade
     cat << 'INIT_MIHOMO' > /etc/init.d/mihomo
 #!/bin/sh /etc/rc.common
 USE_PROCD=1
@@ -2229,7 +2110,6 @@ INIT_AGH
     echo "========================================================"
     echo " Развертывание на ${OS_NAME} успешно завершено!"
     echo " - IP-адрес шлюза:     ${CURRENT_IP}"
-    echo " - Сеть LAN:           ${LAN_DEV}"
     echo " - Основной роутер:    ${GW_IP}"
     echo " - Антиреклама:        ${ADBLOCK_SUMMARY}"
     echo " - Панель Mihomo:      http://${CURRENT_IP}:9090/ui [${UI_NAME}] (пароль: ${ADMIN_PASS})"
@@ -2243,6 +2123,7 @@ INIT_AGH
 # Расширенная диагностика шлюза и проверка на утечки (Self-Test + Anti-Leak)
 run_self_test() {
     echo "=== [Self-Test] Диагностика прозрачного шлюза и Anti-Leak ==="
+    # Ожидание первичной загрузки подписки и инициализации интерфейса mihomo-tun (до 12 сек)
     WAIT_CNT=0
     while [ "$WAIT_CNT" -lt 12 ]; do
         if pgrep mihomo >/dev/null 2>&1 && ip link show mihomo-tun >/dev/null 2>&1; then
@@ -2265,7 +2146,7 @@ run_self_test() {
     fi
 
     if is_warp_enabled; then
-        echo "[✓] Пул Amnezia WARP: АКТИВЕН (8 нод Cloudflare AWG 2.0 + EU)"
+        echo "[✓] Пул Amnezia WARP: АКТИВЕН (8 бесплатных нод Cloudflare + EU)"
     fi
 
     detect_adblock_mode
@@ -2282,9 +2163,9 @@ run_self_test() {
     echo "[✓] Сетевой стек: TCP ${BBR_STAT} | rp_filter=${RP_STAT} (Sidecar OK)"
 
     if is_killswitch_enabled; then
-        echo "[✓] Защита от утечек (Kill-Switch): АКТИВНА (строгий запрет обхода TUN на ${LAN_DEV})"
+        echo "[✓] Защита от утечек (Kill-Switch): АКТИВНА (строгий запрет обхода TUN)"
     else
-        echo "[✓] Защита от утечек: IPv6 Drop + DoT/DoQ 853 Reject + DNS 53 Redirect активны (${LAN_DEV})"
+        echo "[✓] Защита от утечек: IPv6 Drop + DoT/DoQ 853 Reject + DNS 53 Redirect активны"
     fi
 
     if [ -f "$MIHOMO_CONF" ] && pgrep mihomo >/dev/null 2>&1; then
@@ -2300,12 +2181,20 @@ run_self_test() {
     fi
 }
 
+# Безопасная самоустановка скрипта в качестве системной команды gateway
+INSTALL_PATH="/usr/bin/gateway"
+SCRIPT_BASE="$(basename "$0" 2>/dev/null || true)"
+if [ -f "$0" ] && [ "$0" != "$INSTALL_PATH" ] && [ "$SCRIPT_BASE" != "sh" ] && [ "$SCRIPT_BASE" != "ash" ] && [ "$SCRIPT_BASE" != "-sh" ] && [ "$SCRIPT_BASE" != "-ash" ]; then
+    cp -f "$0" "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+    ensure_sysupgrade_persistence
+    echo "[✓] Команда 'gateway' успешно установлена в систему."
+fi
+
 # ==============================================================================
-# Интерактивное меню управления (OpenWrt)
+# Интерактивное меню управления (OpenWrt 25.x)
 # ==============================================================================
 show_menu() {
-    detect_os
-    detect_lan_dev
     init_user_lists
     ensure_mihomo_config_tags
     ensure_sysupgrade_persistence
@@ -2313,7 +2202,7 @@ show_menu() {
     while true; do
         clear
         echo "========================================================"
-        echo "     Панель управления шлюзом (OpenWrt Unified Core)    "
+        echo "     Панель управления шлюзом (OpenWrt APK Edition)     "
         echo "========================================================"
         print_gateway_header
         echo "--------------------------------------------------------"
@@ -2327,7 +2216,7 @@ show_menu() {
         echo " 8) Свои домены: добавить/очистить (В прокси / Напрямую)"
         echo " 9) Маршрутизация устройств по IP (Обход DIRECT / Full-VPN)"
         echo " 10) Режим паузы / Бэкап и восстановление настроек"
-        echo " 11) Автообновление ядер и панелей (04:00 ежедневно)"
+        echo " 11) Автообновление (поставил и забыл) — Бро я думаю ты осознаешь последствия ,_,"
         echo " 12) Блокировка рекламы и DNS: переключить (AGH / Mihomo / Оба / Выкл)"
         echo " 13) Аппаратный Kill-Switch (защита от утечек при падении Mihomo)"
         echo " 0) Выход"
@@ -2349,7 +2238,7 @@ show_menu() {
                 echo " 1) Заменить основную подписку (http://...), основной ключ или 'warp'"
                 echo " 2) Добавить дополнительный личный ключ (vless/hy2/ss/tuic/anytls) в пул my_nodes"
                 echo " 3) Очистить дополнительные личные ключи (${CUSTOM_NODES_FILE})"
-                echo " 4) Сгенерировать / обновить БЕСПЛАТНЫЙ Amnezia WARP (8 нод: Cloudflare AWG 2.0 + Европа)"
+                echo " 4) Сгенерировать / обновить БЕСПЛАТНЫЙ Amnezia WARP (8 нод: Cloudflare + Европа)"
                 echo " 5) Отключить / очистить ноды Amnezia WARP (${WARP_NODES_FILE})"
                 echo " 0) Назад"
                 printf "Выбор [0-5]: "
@@ -2409,7 +2298,7 @@ show_menu() {
                             sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
                             format_uri_keys "$EXTRA_KEY" >> "$CUSTOM_NODES_FILE"
                             reload_mihomo_api
-                            echo "[✓] Ключ добавлен в пул my_nodes и подключен к автовыбору!"
+                            echo "[✓] Ключ добавлен в локальный пул my_nodes и подключен к автовыбору!"
                         fi
                         sleep 2
                         ;;
@@ -2658,13 +2547,15 @@ show_menu() {
                 ;;
             11)
                 echo "=== Автообновление Mihomo, AdGuard Home и веб-панелей ==="
+                echo " ⚠️  Бро я думаю ты осознаешь последствия ,_,"
+                echo "--------------------------------------------------------"
                 if is_autoupdate_enabled; then
                     echo " Текущий статус: ВКЛЮЧЕНО (каждый день в 04:00)"
                 else
                     echo " Текущий статус: ВЫКЛЮЧЕНО"
                 fi
                 echo "--------------------------------------------------------"
-                echo " 1) Включить (поставил и забыл — автоматически обновляет ядра в 04:00)"
+                echo " 1) Включить (поставил и забыл — Бро я думаю ты осознаешь последствия ,_,)"
                 echo " 2) Выключить (обновлять только вручную через пункт 3)"
                 echo " 3) Посмотреть лог последнего автообновления (${AUTOUPDATE_LOG})"
                 echo " 0) Назад"
@@ -2673,7 +2564,7 @@ show_menu() {
                 case "$AU_ACT" in
                     1)
                         enable_autoupdate
-                        echo "[✓] Автообновление включено (ежедневно в 04:00)."
+                        echo "[✓] Автообновление включено (ежедневно в 04:00). Бро я думаю ты осознаешь последствия ,_,"
                         sleep 2
                         ;;
                     2)
@@ -2714,8 +2605,8 @@ show_menu() {
                 ;;
             13)
                 echo "=== Аппаратный Kill-Switch (fw4 / nftables) ==="
-                echo "Блокирует любую прямую маршрутизацию из ${LAN_DEV} в основной роутер в обход mihomo-tun."
-                echo "Если служба Mihomo упадет, клиенты гарантированно не «светят» реальный российский IP провайдера."
+                echo "Блокирует любую прямую маршрутизацию из br-lan в основной роутер в обход mihomo-tun."
+                echo "Если служба Mihomo упадет, клиенты не «светят» реальный российский IP провайдера."
                 echo "--------------------------------------------------------"
                 echo " 1) ВКЛЮЧИТЬ строгий Kill-Switch (рекомендуется против утечек)"
                 echo " 2) ВЫКЛЮЧИТЬ строгий Kill-Switch (оставить только защиту IPv6, DoT 853 и DNS 53)"
@@ -2742,9 +2633,7 @@ show_menu() {
     done
 }
 
-# ==============================================================================
 # Маршрутизация аргументов командной строки
-# ==============================================================================
 if [ "${1:-}" = "autoupdate" ]; then
     run_autoupdate
 elif [ ! -f "$MIHOMO_CONF" ] || [ "${1:-}" = "install" ]; then
@@ -2752,3 +2641,9 @@ elif [ ! -f "$MIHOMO_CONF" ] || [ "${1:-}" = "install" ]; then
 else
     show_menu
 fi
+EOF
+
+chmod +x /tmp/setup_gateway.sh
+cp -f /tmp/setup_gateway.sh /usr/bin/gateway
+chmod +x /usr/bin/gateway
+gateway install
