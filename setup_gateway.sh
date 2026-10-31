@@ -22,7 +22,8 @@ AUTOUPDATE_LOG="/var/log/gateway_autoupdate.log"
 UI_TYPE_FILE="/etc/mihomo/ui/.ui_type"
 UI_VER_FILE="/etc/mihomo/ui/.ui_version"
 AGH_CONF="/etc/AdGuardHome/AdGuardHome.yaml"
-SUB_FILTER_REGEX="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|осталось|трафик|истекает|подписк|тариф|инфо|новост|поддержк|канал|бот|t\\.me/)"
+SYSUPGRADE_CONF="/etc/sysupgrade.conf"
+SUB_FILTER_REGEX="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|осталось|трафик|истекает|подписк|тариф|инфо|новост|поддержк|канал|бот|t[.]me/)"
 GH_PROXY=""
 LATEST_MIHOMO_TAG=""
 LATEST_AGH_TAG=""
@@ -59,6 +60,34 @@ detect_os() {
             exit 1
             ;;
     esac
+}
+
+# Защита файлов шлюза от удаления при обновлении прошивки OpenWrt (sysupgrade / owut)
+ensure_sysupgrade_persistence() {
+    touch "$SYSUPGRADE_CONF" 2>/dev/null || return 0
+    for item in \
+        "/usr/bin/gateway" \
+        "/usr/bin/mihomo" \
+        "/usr/bin/AdGuardHome" \
+        "/etc/mihomo" \
+        "/etc/AdGuardHome" \
+        "/etc/init.d/mihomo" \
+        "/etc/init.d/adguardhome" \
+        "/etc/sysctl.d/99-gateway-forward.conf" \
+        "/etc/nftables.d"
+    do
+        grep -qxF "$item" "$SYSUPGRADE_CONF" 2>/dev/null || echo "$item" >> "$SYSUPGRADE_CONF"
+    done
+}
+
+# Отключение фонового демона apache (устанавливается как зависимость apache-utils для htpasswd)
+disable_apache_daemon() {
+    for srv in apache apache2; do
+        if [ -x "/etc/init.d/${srv}" ]; then
+            "/etc/init.d/${srv}" stop >/dev/null 2>&1 || true
+            "/etc/init.d/${srv}" disable >/dev/null 2>&1 || true
+        fi
+    done
 }
 
 # Определение параметров текущей выбранной веб-панели
@@ -232,6 +261,9 @@ set_agh_filtering() {
 ensure_mihomo_config_tags() {
     [ -f "$MIHOMO_CONF" ] || return 0
 
+    # Исправление старого экранирования t\.me/ в существующем конфиге
+    sed -i 's/t\\\.me\//t[.]me\//g' "$MIHOMO_CONF" 2>/dev/null || true
+
     if ! grep -q "#DNS_HIJACK" "$MIHOMO_CONF" 2>/dev/null; then
         if grep -q "dns-hijack:" "$MIHOMO_CONF" 2>/dev/null; then
             sed -i '/dns-hijack:/ s/$/ #DNS_HIJACK/' "$MIHOMO_CONF"
@@ -327,6 +359,7 @@ ensure_agh_installed() {
         if ! command -v htpasswd >/dev/null 2>&1; then
             apk update --allow-untrusted >/dev/null 2>&1 || true
             apk add --allow-untrusted apache-utils >/dev/null 2>&1 || true
+            disable_apache_daemon
         fi
 
         AGH_PASS_HASH=$(printf "%s\n" "$PASS_CUR" | htpasswd -inBC 10 "admin" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
@@ -684,20 +717,20 @@ download_file() {
     return 1
 }
 
-# Инициализация пользовательских списков и файлов провайдеров
+# Инициализация пользовательских списков и файлов провайдеров (с защитой от 0-байтовых YAML)
 init_user_lists() {
     mkdir -p "$MIHOMO_RULES_DIR" "$MIHOMO_PROVIDERS_DIR"
     [ -f "$USER_DIRECT_FILE" ] || echo "+.localdomain" > "$USER_DIRECT_FILE"
     [ -f "$USER_PROXY_FILE" ] || echo "+.chatgpt.com" > "$USER_PROXY_FILE"
     [ -f "$USER_BYPASS_IPS" ] || : > "$USER_BYPASS_IPS"
     [ -f "$USER_FORCE_PROXY_IPS" ] || : > "$USER_FORCE_PROXY_IPS"
-    [ -f "$CUSTOM_NODES_FILE" ] || : > "$CUSTOM_NODES_FILE"
-    [ -f "$WARP_NODES_FILE" ] || echo "proxies: []" > "$WARP_NODES_FILE"
+    [ -s "$CUSTOM_NODES_FILE" ] || echo "proxies: []" > "$CUSTOM_NODES_FILE"
+    [ -s "$WARP_NODES_FILE" ] || echo "proxies: []" > "$WARP_NODES_FILE"
 }
 
 # Безопасное разделение нескольких URI-ключей без повреждения alpn=h2,http/1.1 и пробелов в #Названии
 format_uri_keys() {
-    printf "%s\n" "$1" | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|tuic|wg|wireguard|anytls|mieru|socks5):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
+    printf "%s\n" "$1" | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
 }
 
 # Автоматическая бесплатная генерация Amnezia WARP (Cloudflare WARP + AmneziaWG 2.0)
@@ -958,7 +991,7 @@ apply_subscription_input() {
             SUB_URL="$RAW_INPUT"
             PROVIDER_TYPE="http"
             ;;
-        vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|socks5://*)
+        vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|xhttp://*|splithttp://*|socks5://*)
             format_uri_keys "$RAW_INPUT" > "$CUSTOM_SUB_FILE"
             SUB_URL="file://custom_sub.yaml"
             PROVIDER_TYPE="file"
@@ -1412,8 +1445,7 @@ net.ipv4.conf.default.secure_redirects = 0
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 0
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
+net.core.default_qdisc = fq_codel
 net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_mtu_probing = 1
 net.core.rmem_max = 33554432
@@ -1422,9 +1454,10 @@ net.netfilter.nf_conntrack_max = 131072
 net.netfilter.nf_conntrack_tcp_timeout_established = 7200
 net.netfilter.nf_conntrack_udp_timeout = 60
 net.netfilter.nf_conntrack_udp_timeout_stream = 180
+net.ipv4.tcp_congestion_control = bbr
 SYS_EOF
 
-    sysctl -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
+    sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
     uci set network.lan.gateway="$GW_IP"
     uci del network.lan.dns 2>/dev/null || true
     uci add_list network.lan.dns="$GW_IP"
@@ -1478,10 +1511,11 @@ SYS_EOF
         apk info -e "$pkg" >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS $pkg"
     done
     [ -n "$NEED_PKGS" ] && { apk update --allow-untrusted || true; apk add --allow-untrusted $NEED_PKGS || true; }
+    disable_apache_daemon
 
     modprobe tun 2>/dev/null || true
     modprobe tcp_bbr 2>/dev/null || true
-    sysctl -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
+    sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
     [ -e /dev/net/tun ] || { mkdir -p /dev/net && mknod /dev/net/tun c 10 200; }
 
     # Если выбран режим бесплатного Amnezia WARP — генерируем пул нод после синхронизации часов и установки пакетов
@@ -1523,7 +1557,7 @@ SYS_EOF
     fi
 
     if [ "$PROVIDER_TYPE" = "file" ] || [ "$PROVIDER_TYPE" = "warp" ]; then
-        [ -f "$CUSTOM_SUB_FILE" ] || echo "proxies: []" > "$CUSTOM_SUB_FILE"
+        [ -s "$CUSTOM_SUB_FILE" ] || echo "proxies: []" > "$CUSTOM_SUB_FILE"
         CUSTOM_SUB_BLOCK="  custom_sub:\n    type: file\n    path: ./proxy_providers/custom_sub.yaml"
     else
         CUSTOM_SUB_BLOCK="  custom_sub:\n    type: http\n    url: \"${SUB_URL}\"\n    path: ./proxy_providers/custom_sub.yaml\n    interval: 86400\n    exclude-filter: \"${SUB_FILTER_REGEX}\""
@@ -1691,7 +1725,7 @@ $(printf '%b' "$CUSTOM_SUB_BLOCK")
     health-check: &hc_default
       enable: true
       url: "https://www.gstatic.com/generate_204"
-      interval: 300
+      interval: 180
       timeout: 5000
       lazy: true
       expected-status: 204
@@ -1716,8 +1750,8 @@ proxy-groups:
     type: url-test
     use: [custom_sub, my_nodes, warp_nodes]
     url: "https://www.gstatic.com/generate_204"
-    interval: 300
-    tolerance: 50
+    interval: 180
+    tolerance: 35
     timeout: 5000
     lazy: true
     expected-status: 204
@@ -1725,7 +1759,7 @@ proxy-groups:
     type: fallback
     use: [custom_sub, my_nodes, warp_nodes]
     url: "https://www.gstatic.com/generate_204"
-    interval: 300
+    interval: 180
     timeout: 5000
     lazy: true
     expected-status: 204
@@ -1745,6 +1779,7 @@ proxy-groups:
     type: select
     proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)"]
     use: [custom_sub, my_nodes, warp_nodes]
+    exclude-filter: "(?i)^☁️ WARP"
   - name: "👾 Discord & Игры"
     type: select
     proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
@@ -1757,6 +1792,7 @@ proxy-groups:
     type: select
     proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
     use: [custom_sub, my_nodes, warp_nodes]
+    exclude-filter: "(?i)^☁️ WARP"
   - name: "📺 Устройства (Full-VPN)"
     type: select
     proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", "🔓 Обход блокировок", DIRECT]
@@ -1905,12 +1941,7 @@ $(printf '%b' "$FORCE_PROXY_RULES_STR")
   - RULE-SET,roblox_domain,👾 Discord & Игры
   - RULE-SET,discord_domain,👾 Discord & Игры
   - RULE-SET,discord_voice_ip,👾 Discord & Игры,no-resolve
-  - AND,((NETWORK,udp),(DST-PORT,50000-50100)),👾 Discord & Игры
   - RULE-SET,stun_domain,💬 Мессенджеры & Связь
-  - AND,((NETWORK,udp),(DST-PORT,3478)),💬 Мессенджеры & Связь
-  - AND,((NETWORK,udp),(DST-PORT,5349)),💬 Мессенджеры & Связь
-  - AND,((NETWORK,udp),(DST-PORT,19302)),💬 Мессенджеры & Связь
-  - AND,((NETWORK,udp),(DST-PORT,50101-65535)),💬 Мессенджеры & Связь
   - RULE-SET,communication_domain,💬 Мессенджеры & Связь
   - RULE-SET,telegram_ip,💬 Мессенджеры & Связь,no-resolve
   - RULE-SET,inside_ru_blocked,🔓 Обход блокировок
@@ -1921,6 +1952,11 @@ $(printf '%b' "$FORCE_PROXY_RULES_STR")
   - RULE-SET,cloudflare_ip,☁️ Cloudflare & CDN,no-resolve
   - RULE-SET,ru_domain,🇷🇺 Россия
   - RULE-SET,ru_ip,🇷🇺 Россия,no-resolve
+  - AND,((NETWORK,udp),(DST-PORT,50000-50100)),👾 Discord & Игры
+  - AND,((NETWORK,udp),(DST-PORT,3478)),💬 Мессенджеры & Связь
+  - AND,((NETWORK,udp),(DST-PORT,5349)),💬 Мессенджеры & Связь
+  - AND,((NETWORK,udp),(DST-PORT,19302)),💬 Мессенджеры & Связь
+  - AND,((NETWORK,udp),(DST-PORT,50101-65535)),💬 Мессенджеры & Связь
   - MATCH,🐟 Прочий трафик
 CONFIG_EOF
 
@@ -2014,7 +2050,7 @@ AGH_EOF
         /etc/init.d/adguardhome disable 2>/dev/null || true
     fi
 
-    # ЭТАП 5: Регистрация служб procd (OpenWrt)
+    # ЭТАП 5: Регистрация служб procd (OpenWrt) и защита от удаления при sysupgrade
     cat << 'INIT_MIHOMO' > /etc/init.d/mihomo
 #!/bin/sh /etc/rc.common
 USE_PROCD=1
@@ -2060,6 +2096,8 @@ INIT_AGH
     printf "nameserver 127.0.0.1\nnameserver 77.88.8.8\nnameserver 77.88.8.1\n" > /tmp/resolv.conf
     cp -f /tmp/resolv.conf /etc/resolv.conf
 
+    ensure_sysupgrade_persistence
+
     if [ "$ENABLE_AU" = "yes" ]; then
         enable_autoupdate
     else
@@ -2085,7 +2123,16 @@ INIT_AGH
 # Расширенная диагностика шлюза и проверка на утечки (Self-Test + Anti-Leak)
 run_self_test() {
     echo "=== [Self-Test] Диагностика прозрачного шлюза и Anti-Leak ==="
-    sleep 2
+    # Ожидание первичной загрузки подписки и инициализации интерфейса mihomo-tun (до 12 сек)
+    WAIT_CNT=0
+    while [ "$WAIT_CNT" -lt 12 ]; do
+        if pgrep mihomo >/dev/null 2>&1 && ip link show mihomo-tun >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        WAIT_CNT=$((WAIT_CNT + 1))
+    done
+
     if pgrep mihomo >/dev/null 2>&1; then
         echo "[✓] Служба Mihomo: ЗАПУЩЕНА"
     else
@@ -2134,11 +2181,13 @@ run_self_test() {
     fi
 }
 
-# Самоустановка скрипта в качестве системной команды gateway
+# Безопасная самоустановка скрипта в качестве системной команды gateway
 INSTALL_PATH="/usr/bin/gateway"
-if [ ! -f "$INSTALL_PATH" ] || [ "$0" != "$INSTALL_PATH" ]; then
+SCRIPT_BASE="$(basename "$0" 2>/dev/null || true)"
+if [ -f "$0" ] && [ "$0" != "$INSTALL_PATH" ] && [ "$SCRIPT_BASE" != "sh" ] && [ "$SCRIPT_BASE" != "ash" ] && [ "$SCRIPT_BASE" != "-sh" ] && [ "$SCRIPT_BASE" != "-ash" ]; then
     cp -f "$0" "$INSTALL_PATH"
     chmod +x "$INSTALL_PATH"
+    ensure_sysupgrade_persistence
     echo "[✓] Команда 'gateway' успешно установлена в систему."
 fi
 
@@ -2148,6 +2197,7 @@ fi
 show_menu() {
     init_user_lists
     ensure_mihomo_config_tags
+    ensure_sysupgrade_persistence
     refresh_remote_versions
     while true; do
         clear
@@ -2245,6 +2295,7 @@ show_menu() {
                         read -r EXTRA_KEY < /dev/tty || true
                         EXTRA_KEY=$(printf "%s" "$EXTRA_KEY" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                         if [ -n "$EXTRA_KEY" ]; then
+                            sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
                             format_uri_keys "$EXTRA_KEY" >> "$CUSTOM_NODES_FILE"
                             reload_mihomo_api
                             echo "[✓] Ключ добавлен в локальный пул my_nodes и подключен к автовыбору!"
@@ -2252,7 +2303,7 @@ show_menu() {
                         sleep 2
                         ;;
                     3)
-                        : > "$CUSTOM_NODES_FILE"
+                        echo "proxies: []" > "$CUSTOM_NODES_FILE"
                         reload_mihomo_api
                         echo "[✓] Дополнительные личные ключи очищены."
                         sleep 2
@@ -2595,4 +2646,4 @@ EOF
 chmod +x /tmp/setup_gateway.sh
 cp -f /tmp/setup_gateway.sh /usr/bin/gateway
 chmod +x /usr/bin/gateway
-gateway
+gateway install
