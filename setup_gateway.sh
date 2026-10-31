@@ -3,13 +3,15 @@ cat << 'EOF' > /tmp/setup_gateway.sh
 set -e
 
 # ==============================================================================
-# Глобальные пути и переменные (OpenWrt 25.x + APK Edition — 2026)
+# Глобальные пути и переменные (OpenWrt 25.x + APK Edition — Октябрь 2026)
 # ==============================================================================
 MIHOMO_DIR="/etc/mihomo"
 MIHOMO_CONF="${MIHOMO_DIR}/config.yaml"
 MIHOMO_RULES_DIR="${MIHOMO_DIR}/rule_sets"
 MIHOMO_PROVIDERS_DIR="${MIHOMO_DIR}/proxy_providers"
+CUSTOM_SUB_FILE="${MIHOMO_PROVIDERS_DIR}/custom_sub.yaml"
 CUSTOM_NODES_FILE="${MIHOMO_PROVIDERS_DIR}/my_nodes.yaml"
+WARP_NODES_FILE="${MIHOMO_PROVIDERS_DIR}/warp_nodes.yaml"
 USER_DIRECT_FILE="${MIHOMO_RULES_DIR}/user_direct_domains.list"
 USER_PROXY_FILE="${MIHOMO_RULES_DIR}/user_proxy_domains.list"
 USER_BYPASS_IPS="${MIHOMO_DIR}/bypass_devices.conf"
@@ -20,6 +22,7 @@ AUTOUPDATE_LOG="/var/log/gateway_autoupdate.log"
 UI_TYPE_FILE="/etc/mihomo/ui/.ui_type"
 UI_VER_FILE="/etc/mihomo/ui/.ui_version"
 AGH_CONF="/etc/AdGuardHome/AdGuardHome.yaml"
+SUB_FILTER_REGEX="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|осталось|трафик|истекает|подписк|тариф|инфо|новост|поддержк|канал|бот|t\\.me/)"
 GH_PROXY=""
 LATEST_MIHOMO_TAG=""
 LATEST_AGH_TAG=""
@@ -117,6 +120,11 @@ detect_adblock_mode() {
     fi
 }
 
+# Проверка, активны ли ноды Amnezia WARP
+is_warp_enabled() {
+    [ -f "$WARP_NODES_FILE" ] && grep -q "type: wireguard" "$WARP_NODES_FILE" 2>/dev/null
+}
+
 # Проверка состояния аппаратного Kill-Switch
 is_killswitch_enabled() {
     [ -f /etc/nftables.d/97-mihomo-anti-leak.nft ] && grep -q "#KILLSWITCH_ACTIVE" /etc/nftables.d/97-mihomo-anti-leak.nft 2>/dev/null
@@ -124,7 +132,7 @@ is_killswitch_enabled() {
 
 # Настройка nftables (fw4): TCP MSS Clamping, перехват DNS 53, Блок IPv6/DoT/DoQ и Kill-Switch
 sync_dns_firewall() {
-    USE_AGH_REDIRECT="$1"
+    USE_DNS_REDIRECT="${1:-yes}"
     KS_STATE="${2:-keep}"
     if [ "$KS_STATE" = "keep" ]; then
         if is_killswitch_enabled; then
@@ -166,8 +174,8 @@ chain mihomo_anti_leak {
 NFT_LEAK
     fi
 
-    # 3. Перехват всех сторонних DNS-запросов (например, зашитых 8.8.8.8 на Smart TV / IoT)
-    if [ "$USE_AGH_REDIRECT" = "yes" ]; then
+    # 3. Принудительный перехват любых сторонних DNS-запросов (зашитых 8.8.8.8 на Smart TV / IoT и запросов к основному роутеру)
+    if [ "$USE_DNS_REDIRECT" = "yes" ]; then
         cat << 'NFT_OWRT' > /etc/nftables.d/99-agh-dns-redirect.nft
 chain agh_dns_prerouting {
     type nat hook prerouting priority dstnat - 5; policy accept;
@@ -283,6 +291,24 @@ ensure_mihomo_config_tags() {
             ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
         fi
     fi
+
+    # Авто-миграция конфига для поддержки пула warp_nodes, если конфиг от старой версии
+    if ! grep -q "warp_nodes:" "$MIHOMO_CONF" 2>/dev/null; then
+        awk '
+            /^  my_nodes:/ {
+                print "  warp_nodes:"
+                print "    type: file"
+                print "    path: ./proxy_providers/warp_nodes.yaml"
+                print "    health-check: *hc_default"
+                print "    override:"
+                print "      udp: true"
+            }
+            {
+                gsub(/use: \[custom_sub, my_nodes\]/, "use: [custom_sub, my_nodes, warp_nodes]")
+                print
+            }
+        ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
+    fi
 }
 
 # Автоустановка и инициализация AdGuard Home
@@ -305,6 +331,7 @@ ensure_agh_installed() {
 
         AGH_PASS_HASH=$(printf "%s\n" "$PASS_CUR" | htpasswd -inBC 10 "admin" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
         [ -z "$AGH_PASS_HASH" ] && AGH_PASS_HASH=$(htpasswd -nbBC 10 "admin" "$PASS_CUR" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
+        [ -z "$AGH_PASS_HASH" ] && AGH_PASS_HASH='$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi'
 
         mkdir -p /etc/AdGuardHome/data
         cat << AGH_EOF > "$AGH_CONF"
@@ -322,7 +349,7 @@ dns:
   bind_hosts: [0.0.0.0]
   port: 53
   upstream_dns: [127.0.0.1:1053]
-  bootstrap_dns: [${GW_IP_CUR}, 77.88.8.8, 1.1.1.1]
+  bootstrap_dns: [${GW_IP_CUR}, 77.88.8.8, 77.88.8.1]
   upstream_mode: load_balance
   cache_enabled: false
   cache_size: 0
@@ -377,7 +404,7 @@ apply_adblock_mode() {
             echo "Остановка AdGuard Home и передача роли DNS (0.0.0.0:53) в Mihomo..."
             /etc/init.d/adguardhome stop 2>/dev/null || true
             /etc/init.d/adguardhome disable 2>/dev/null || true
-            sync_dns_firewall "no" "keep"
+            sync_dns_firewall "yes" "keep"
 
             sed -i 's/^[[:space:]]*listen:[[:space:]]*127\.0\.0\.1:1053/  listen: 0.0.0.0:53/' "$MIHOMO_CONF"
             sed -i '/#DNS_HIJACK$/ s/^#*//' "$MIHOMO_CONF"
@@ -488,6 +515,7 @@ run_autoupdate() {
             /etc/init.d/adguardhome start 2>/dev/null || true
         fi
     fi
+    reload_mihomo_api
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Автообновление завершено ==="
 }
 
@@ -570,6 +598,14 @@ print_gateway_header() {
         A_VER_INFO="${A_VER}"
     fi
 
+    if is_warp_enabled; then
+        W_STAT="[АКТИВЕН]     "
+        W_INFO="8 бесплатных нод (Cloudflare + Европа 🇳🇱🇫🇮🇩🇪🇵🇱)"
+    else
+        W_STAT="[ВЫКЛЮЧЕН]    "
+        W_INFO="можно включить бесплатно в пункте 2"
+    fi
+
     if [ -f /etc/mihomo/ui/index.html ]; then
         if [ "$CUR_UI_TYPE" = "zashboard" ]; then
             UI_STAT="[Zashboard]   "
@@ -599,7 +635,7 @@ print_gateway_header() {
         KS_INFO="строгая блокировка трафика мимо mihomo-tun"
     else
         KS_STAT="[СТАНДАРТ]    "
-        KS_INFO="защита IPv6 + DoT/DoQ (без жесткой блокировки WAN)"
+        KS_INFO="защита IPv6 + DoT/DoQ + перехват DNS 53"
     fi
 
     if is_autoupdate_enabled; then
@@ -612,6 +648,7 @@ print_gateway_header() {
 
     echo " Mihomo:        ${M_STAT}${M_VER_INFO}"
     echo " AdGuard Home:  ${A_STAT}${A_VER_INFO}"
+    echo " Amnezia WARP:  ${W_STAT}${W_INFO}"
     echo " Антиреклама:   ${ADBLOCK_STAT}${ADBLOCK_DESC}"
     echo " Kill-Switch:   ${KS_STAT}${KS_INFO}"
     echo " Веб-панель:    ${UI_STAT}${UI_VER_INFO}"
@@ -647,7 +684,7 @@ download_file() {
     return 1
 }
 
-# Инициализация пользовательских списков и файла личных ключей
+# Инициализация пользовательских списков и файлов провайдеров
 init_user_lists() {
     mkdir -p "$MIHOMO_RULES_DIR" "$MIHOMO_PROVIDERS_DIR"
     [ -f "$USER_DIRECT_FILE" ] || echo "+.localdomain" > "$USER_DIRECT_FILE"
@@ -655,6 +692,233 @@ init_user_lists() {
     [ -f "$USER_BYPASS_IPS" ] || : > "$USER_BYPASS_IPS"
     [ -f "$USER_FORCE_PROXY_IPS" ] || : > "$USER_FORCE_PROXY_IPS"
     [ -f "$CUSTOM_NODES_FILE" ] || : > "$CUSTOM_NODES_FILE"
+    [ -f "$WARP_NODES_FILE" ] || echo "proxies: []" > "$WARP_NODES_FILE"
+}
+
+# Безопасное разделение нескольких URI-ключей без повреждения alpn=h2,http/1.1 и пробелов в #Названии
+format_uri_keys() {
+    printf "%s\n" "$1" | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|tuic|wg|wireguard|anytls|mieru|socks5):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
+}
+
+# Автоматическая бесплатная генерация Amnezia WARP (Cloudflare WARP + AmneziaWG 2.0)
+generate_amnezia_warp() {
+    mkdir -p "$MIHOMO_PROVIDERS_DIR"
+    if ! command -v wg >/dev/null 2>&1; then
+        echo "Установка генератора ключей wireguard-tools..."
+        apk update --allow-untrusted >/dev/null 2>&1 || true
+        apk add --allow-untrusted wireguard-tools >/dev/null 2>&1 || true
+    fi
+
+    PRIV_KEY=""
+    PUB_KEY=""
+    if command -v wg >/dev/null 2>&1; then
+        PRIV_KEY=$(wg genkey)
+        PUB_KEY=$(printf "%s" "$PRIV_KEY" | wg pubkey)
+    fi
+
+    WARP_IPV4=""
+    REG_OK="no"
+
+    if [ -n "$PUB_KEY" ]; then
+        TOS_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+        REG_PAYLOAD="{\"key\":\"${PUB_KEY}\",\"install_id\":\"\",\"warp_enabled\":true,\"tos\":\"${TOS_DATE}\",\"type\":\"Android\",\"locale\":\"en_US\"}"
+        echo "Бесплатная регистрация нового аккаунта Cloudflare WARP..."
+
+        for CURL_OPT in \
+            "-x http://127.0.0.1:7890" \
+            "" \
+            "--connect-to api.cloudflareclient.com:443:104.16.80.230:443" \
+            "--connect-to api.cloudflareclient.com:443:104.17.143.163:443" \
+            "--connect-to api.cloudflareclient.com:443:162.159.138.105:443" \
+            "--connect-to api.cloudflareclient.com:443:162.159.137.105:443" \
+            "--connect-to api.cloudflareclient.com:443:172.67.73.32:443"
+        do
+            # shellcheck disable=SC2086
+            RESP=$(curl -fsSL --connect-timeout 4 -m 7 $CURL_OPT \
+                -H "User-Agent: okhttp/3.12.1" \
+                -H "Content-Type: application/json" \
+                -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
+                -d "$REG_PAYLOAD" 2>/dev/null || true)
+            if printf "%s" "$RESP" | grep -q '"v4"'; then
+                WARP_IPV4=$(printf "%s" "$RESP" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
+                REG_OK="yes"
+                break
+            fi
+        done
+    fi
+
+    # Фоллбэк на публичные зеркала генератора WARP, если провайдер глушит все IP api.cloudflareclient.com
+    if [ "$REG_OK" = "no" ]; then
+        for MIRROR_API in "https://warp.llimonix.pw/api/warp" "https://warp-reg.vercel.app/api/warp"; do
+            RESP_M=$(curl -fsSL --connect-timeout 4 -m 7 "$MIRROR_API" 2>/dev/null || true)
+            M_PRIV=$(printf "%s" "$RESP_M" | sed -n 's/.*"private_key":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+            M_IPV4=$(printf "%s" "$RESP_M" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
+            if [ -n "$M_PRIV" ]; then
+                PRIV_KEY="$M_PRIV"
+                [ -n "$M_IPV4" ] && WARP_IPV4="$M_IPV4"
+                REG_OK="yes"
+                break
+            fi
+        done
+    fi
+
+    # Если уже есть рабочий ключ в warp_nodes.yaml и API недоступен — сохраняем существующий ключ
+    if [ "$REG_OK" = "no" ] && is_warp_enabled; then
+        OLD_PRIV=$(sed -n 's/^[[:space:]]*private-key:[[:space:]]*"\([^"]*\)".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+        OLD_IP=$(sed -n 's/^[[:space:]]*ip:[[:space:]]*\([0-9.]*\).*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+        if [ -n "$OLD_PRIV" ]; then
+            PRIV_KEY="$OLD_PRIV"
+            WARP_IPV4="${OLD_IP:-172.16.0.2}"
+            REG_OK="yes"
+            echo "[i] Сохранен ранее зарегистрированный ключ Amnezia WARP."
+        fi
+    fi
+
+    # Ручной ввод PrivateKey, если регистрация полностью заблокирована на линии провайдера
+    if [ "$REG_OK" = "no" ]; then
+        echo "[!] Провайдер блокирует прямой доступ к API регистрации Cloudflare."
+        printf "Вставьте готовый WARP PrivateKey (например, из @warp_generator_bot) [Enter = отмена]: "
+        read -r USER_PRIV < /dev/tty || true
+        USER_PRIV=$(printf "%s" "$USER_PRIV" | tr -d ' \t\r\n')
+        if [ -n "$USER_PRIV" ]; then
+            PRIV_KEY="$USER_PRIV"
+            WARP_IPV4="172.16.0.2"
+            REG_OK="yes"
+        else
+            echo "[X] Не удалось получить ключ WARP."
+            return 1
+        fi
+    fi
+
+    [ -z "$WARP_IPV4" ] && WARP_IPV4="172.16.0.2"
+
+    cat << WARP_EOF > "$WARP_NODES_FILE"
+proxies:
+  - name: "☁️ WARP Fast (162.159.192.1:4500)"
+    type: wireguard
+    server: 162.159.192.1
+    port: 4500
+    ip: ${WARP_IPV4}
+    private-key: "${PRIV_KEY}"
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+    mtu: 1280
+    remote-dns-resolve: true
+    dns: [1.1.1.1, 8.8.8.8]
+    amnezia-wg-option: &awg_warp
+      jc: 4
+      jmin: 40
+      jmax: 70
+      s1: 0
+      s2: 0
+      h1: 1
+      h2: 2
+      h3: 3
+      h4: 4
+      i1: "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
+
+  - name: "☁️ WARP Reserve (188.114.97.1:500)"
+    type: wireguard
+    server: 188.114.97.1
+    port: 500
+    ip: ${WARP_IPV4}
+    private-key: "${PRIV_KEY}"
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+    mtu: 1280
+    remote-dns-resolve: true
+    dns: [1.1.1.1, 8.8.8.8]
+    amnezia-wg-option: *awg_warp
+
+  - name: "☁️ WARP Alt (188.114.99.224:1002)"
+    type: wireguard
+    server: 188.114.99.224
+    port: 1002
+    ip: ${WARP_IPV4}
+    private-key: "${PRIV_KEY}"
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+    mtu: 1280
+    remote-dns-resolve: true
+    dns: [1.1.1.1, 8.8.8.8]
+    amnezia-wg-option: *awg_warp
+
+  - name: "☁️ WARP Engage (2408)"
+    type: wireguard
+    server: engage.cloudflareclient.com
+    port: 2408
+    ip: ${WARP_IPV4}
+    private-key: "${PRIV_KEY}"
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+    mtu: 1280
+    remote-dns-resolve: true
+    dns: [1.1.1.1, 8.8.8.8]
+    amnezia-wg-option: *awg_warp
+
+  - name: "🇳🇱 WARP Нидерланды (AI / ChatGPT)"
+    type: wireguard
+    server: nl.tribukvy.ltd
+    port: 4500
+    ip: ${WARP_IPV4}
+    private-key: "${PRIV_KEY}"
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+    mtu: 1280
+    remote-dns-resolve: true
+    dns: [1.1.1.1, 8.8.8.8]
+    amnezia-wg-option: *awg_warp
+
+  - name: "🇫🇮 WARP Финляндия (AI / ChatGPT)"
+    type: wireguard
+    server: fi.tribukvy.ltd
+    port: 4500
+    ip: ${WARP_IPV4}
+    private-key: "${PRIV_KEY}"
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+    mtu: 1280
+    remote-dns-resolve: true
+    dns: [1.1.1.1, 8.8.8.8]
+    amnezia-wg-option: *awg_warp
+
+  - name: "🇩🇪 WARP Германия (AI / ChatGPT)"
+    type: wireguard
+    server: de.tribukvy.ltd
+    port: 4500
+    ip: ${WARP_IPV4}
+    private-key: "${PRIV_KEY}"
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+    mtu: 1280
+    remote-dns-resolve: true
+    dns: [1.1.1.1, 8.8.8.8]
+    amnezia-wg-option: *awg_warp
+
+  - name: "🇵🇱 WARP Польша (AI / ChatGPT)"
+    type: wireguard
+    server: pl.tribukvy.ltd
+    port: 4500
+    ip: ${WARP_IPV4}
+    private-key: "${PRIV_KEY}"
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    allowed-ips: ["0.0.0.0/0"]
+    udp: true
+    mtu: 1280
+    remote-dns-resolve: true
+    dns: [1.1.1.1, 8.8.8.8]
+    amnezia-wg-option: *awg_warp
+WARP_EOF
+
+    echo "[✓] Бесплатный пул Amnezia WARP (8 нод: Cloudflare + Европа) успешно создан (IP: ${WARP_IPV4})!"
+    return 0
 }
 
 # Горячая перезагрузка конфигурации и провайдеров Mihomo через REST API + сброс Fake-IP кэша
@@ -673,22 +937,29 @@ reload_mihomo_api() {
     curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
         "http://127.0.0.1:9090/providers/proxies/my_nodes" >/dev/null 2>&1 || true
     curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
+        "http://127.0.0.1:9090/providers/proxies/warp_nodes" >/dev/null 2>&1 || true
+    curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
         "http://127.0.0.1:9090/providers/rules/user_direct_domains" >/dev/null 2>&1 || true
     curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
         "http://127.0.0.1:9090/providers/rules/user_proxy_domains" >/dev/null 2>&1 || true
 }
 
-# Обработка подписки или одиночных ключей (VLESS/SS/Trojan/Hy2/TUIC/WG/AnyTLS/Mieru)
+# Обработка подписки, одиночных ключей или режима бесплатного Amnezia WARP
 apply_subscription_input() {
     RAW_INPUT="$1"
     mkdir -p "$MIHOMO_PROVIDERS_DIR"
     case "$RAW_INPUT" in
+        warp|WARP|amnezia|free)
+            echo "proxies: []" > "$CUSTOM_SUB_FILE"
+            SUB_URL="file://warp_nodes.yaml (Amnezia WARP)"
+            PROVIDER_TYPE="warp"
+            ;;
         http://*|https://*)
             SUB_URL="$RAW_INPUT"
             PROVIDER_TYPE="http"
             ;;
-        vless://*|vmess://*|ss://*|trojan://*|hy2://*|hysteria2://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*)
-            printf "%s\n" "$RAW_INPUT" | tr ' ,' '\n\n' | sed '/^$/d' > "${MIHOMO_PROVIDERS_DIR}/custom_sub.yaml"
+        vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|socks5://*)
+            format_uri_keys "$RAW_INPUT" > "$CUSTOM_SUB_FILE"
             SUB_URL="file://custom_sub.yaml"
             PROVIDER_TYPE="file"
             ;;
@@ -719,11 +990,12 @@ install_mihomo_ui() {
     fi
 
     echo "Загрузка и установка веб-панели ${TARGET_UI_NAME} ${TARGET_UI_VER}..."
-    rm -rf /tmp/mihomo_ui.tar.gz /tmp/mihomo_ui_extract /etc/mihomo/ui
-    mkdir -p /tmp/mihomo_ui_extract /etc/mihomo/ui
+    rm -rf /tmp/mihomo_ui.tar.gz /tmp/mihomo_ui_extract
+    mkdir -p /tmp/mihomo_ui_extract
 
-    if download_file "$TARGET_UI_TAR_URL" "/tmp/mihomo_ui.tar.gz"; then
-        tar -xzf /tmp/mihomo_ui.tar.gz -C /tmp/mihomo_ui_extract
+    if download_file "$TARGET_UI_TAR_URL" "/tmp/mihomo_ui.tar.gz" && tar -xzf /tmp/mihomo_ui.tar.gz -C /tmp/mihomo_ui_extract 2>/dev/null; then
+        rm -rf /etc/mihomo/ui
+        mkdir -p /etc/mihomo/ui
         cp -rf /tmp/mihomo_ui_extract/*/* /etc/mihomo/ui/ 2>/dev/null || cp -rf /tmp/mihomo_ui_extract/* /etc/mihomo/ui/
         echo "$TARGET_UI_TYPE" > "$UI_TYPE_FILE"
         [ -n "$TARGET_UI_VER" ] && echo "$TARGET_UI_VER" > "$UI_VER_FILE"
@@ -732,12 +1004,12 @@ install_mihomo_ui() {
         echo "[✓] Веб-панель ${TARGET_UI_NAME} ${TARGET_UI_VER} успешно установлена в /etc/mihomo/ui."
     else
         rm -rf /tmp/mihomo_ui.tar.gz /tmp/mihomo_ui_extract
-        echo "[X] Ошибка загрузки веб-панели ${TARGET_UI_NAME}!"
+        echo "[X] Ошибка загрузки или распаковки веб-панели ${TARGET_UI_NAME}!"
         return 1
     fi
 }
 
-# Тихое обновление бинарников Mihomo, AdGuard Home и UI
+# Атомарное обновление бинарников Mihomo, AdGuard Home и UI (с проверкой целостности до замены)
 update_cores_only() {
     CHECK_UI_UPDATE="${1:-no}"
     detect_os
@@ -753,19 +1025,25 @@ update_cores_only() {
         echo "[✓] Ядро Mihomo ${INSTALLED_MIHOMO_VER} (${MIHOMO_ARCH}) актуально."
     else
         echo "Загрузка Mihomo ${MIHOMO_TAG} (${MIHOMO_ARCH})..."
+        rm -f /tmp/mihomo.gz /tmp/mihomo.new
         MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_TAG}/mihomo-linux-${MIHOMO_ARCH}-${MIHOMO_TAG}.gz"
         if ! download_file "$MIHOMO_URL" "/tmp/mihomo.gz" && [ "$MIHOMO_ARCH" = "amd64-v3" ]; then
             MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_TAG}/mihomo-linux-amd64-${MIHOMO_TAG}.gz"
             download_file "$MIHOMO_URL" "/tmp/mihomo.gz" || true
         fi
-        if [ -f "/tmp/mihomo.gz" ]; then
-            /etc/init.d/mihomo stop 2>/dev/null || true
-            rm -f /usr/bin/mihomo
-            gunzip -c /tmp/mihomo.gz > /usr/bin/mihomo
-            chmod +x /usr/bin/mihomo
-            rm -f /tmp/mihomo.gz
-            echo "[✓] Mihomo обновлен до ${MIHOMO_TAG}."
+        if [ -f "/tmp/mihomo.gz" ] && gunzip -c /tmp/mihomo.gz > /tmp/mihomo.new 2>/dev/null; then
+            chmod +x /tmp/mihomo.new
+            if /tmp/mihomo.new -v >/dev/null 2>&1; then
+                /etc/init.d/mihomo stop 2>/dev/null || true
+                mv -f /tmp/mihomo.new /usr/bin/mihomo
+                rm -f /tmp/mihomo.gz
+                echo "[✓] Mihomo безопасно обновлен до ${MIHOMO_TAG}."
+            else
+                rm -f /tmp/mihomo.gz /tmp/mihomo.new
+                echo "[X] Ошибка: скачанный бинарник Mihomo поврежден, оставлена текущая версия."
+            fi
         else
+            rm -f /tmp/mihomo.gz /tmp/mihomo.new
             echo "[X] Не удалось скачать Mihomo ${MIHOMO_TAG}."
         fi
     fi
@@ -781,15 +1059,21 @@ update_cores_only() {
             echo "[✓] Ядро AdGuard Home ${INSTALLED_AGH_VER} актуально."
         else
             echo "Загрузка AdGuard Home ${AGH_TAG}..."
+            rm -rf /tmp/agh.tar.gz /tmp/agh_extract
             AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/${AGH_TAG}/AdGuardHome_linux_${AGH_ARCH}.tar.gz"
             if download_file "$AGH_URL" "/tmp/agh.tar.gz"; then
-                /etc/init.d/adguardhome stop 2>/dev/null || true
                 mkdir -p /tmp/agh_extract
-                tar -xzf /tmp/agh.tar.gz -C /tmp/agh_extract
-                cp -f /tmp/agh_extract/AdGuardHome/AdGuardHome /usr/bin/AdGuardHome
-                chmod +x /usr/bin/AdGuardHome
+                if tar -xzf /tmp/agh.tar.gz -C /tmp/agh_extract 2>/dev/null && [ -f /tmp/agh_extract/AdGuardHome/AdGuardHome ]; then
+                    chmod +x /tmp/agh_extract/AdGuardHome/AdGuardHome
+                    if /tmp/agh_extract/AdGuardHome/AdGuardHome --version >/dev/null 2>&1; then
+                        /etc/init.d/adguardhome stop 2>/dev/null || true
+                        mv -f /tmp/agh_extract/AdGuardHome/AdGuardHome /usr/bin/AdGuardHome
+                        echo "[✓] AdGuard Home безопасно обновлен до ${AGH_TAG}."
+                    else
+                        echo "[X] Ошибка проверки бинарника AdGuard Home, оставлена текущая версия."
+                    fi
+                fi
                 rm -rf /tmp/agh.tar.gz /tmp/agh_extract
-                echo "[✓] AdGuard Home обновлен до ${AGH_TAG}."
             else
                 echo "[X] Не удалось скачать AdGuard Home ${AGH_TAG}."
             fi
@@ -811,9 +1095,10 @@ update_cores_only() {
     fi
 }
 
-# Сборка правил локальных IP-адресов (DIRECT и FULL PROXY) для вставки в config.yaml
+# Сборка правил локальных IP-адресов (DIRECT и FULL-VPN) с метками #DEVICE_IP_RULE
 build_device_ip_rules() {
-    DEVICE_RULES_STR=""
+    BYPASS_RULES_STR=""
+    FORCE_PROXY_RULES_STR=""
     if [ -f "$USER_BYPASS_IPS" ]; then
         while IFS= read -r line || [ -n "$line" ]; do
             CLEAN_IP=$(printf "%s" "$line" | tr -d ' \t\r\n')
@@ -822,7 +1107,7 @@ build_device_ip_rules() {
                     */*) BYPASS_CIDR="$CLEAN_IP" ;;
                     *)   BYPASS_CIDR="${CLEAN_IP}/32" ;;
                 esac
-                DEVICE_RULES_STR="${DEVICE_RULES_STR}  - SRC-IP-CIDR,${BYPASS_CIDR},DIRECT\n"
+                BYPASS_RULES_STR="${BYPASS_RULES_STR}  - SRC-IP-CIDR,${BYPASS_CIDR},DIRECT #DEVICE_IP_RULE\n"
             fi
         done < "$USER_BYPASS_IPS"
     fi
@@ -834,7 +1119,7 @@ build_device_ip_rules() {
                     */*) FORCE_CIDR="$CLEAN_IP" ;;
                     *)   FORCE_CIDR="${CLEAN_IP}/32" ;;
                 esac
-                DEVICE_RULES_STR="${DEVICE_RULES_STR}  - SRC-IP-CIDR,${FORCE_CIDR},⚡ Авто (Самый быстрый)\n"
+                FORCE_PROXY_RULES_STR="${FORCE_PROXY_RULES_STR}  - SRC-IP-CIDR,${FORCE_CIDR},📺 Устройства (Full-VPN) #DEVICE_IP_RULE\n"
             fi
         done < "$USER_FORCE_PROXY_IPS"
     fi
@@ -844,14 +1129,24 @@ build_device_ip_rules() {
 sync_device_ips_in_config() {
     [ -f "$MIHOMO_CONF" ] || return 0
     cp -f "$MIHOMO_CONF" "${MIHOMO_CONF}.bak"
-    sed -i '/- SRC-IP-CIDR,.*,\(DIRECT\|⚡ Авто (Самый быстрый)\)/d' "$MIHOMO_CONF"
+    sed -i '/#DEVICE_IP_RULE$/d' "$MIHOMO_CONF"
+    sed -i '/- SRC-IP-CIDR,.*,\(DIRECT\|⚡ Авто (Самый быстрый)\|📺 Устройства (Full-VPN)\)/d' "$MIHOMO_CONF"
     build_device_ip_rules
-    if [ -n "$DEVICE_RULES_STR" ]; then
-        awk -v rules="$DEVICE_RULES_STR" '
-            /^rules:/ { print; printf "%s", rules; next }
-            { print }
-        ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
-    fi
+
+    awk -v bypass="$BYPASS_RULES_STR" -v force="$FORCE_PROXY_RULES_STR" '
+        /^  - RULE-SET,private_ip,DIRECT,no-resolve/ {
+            print
+            if (bypass != "") printf "%s", bypass
+            next
+        }
+        /^  - DST-PORT,6881-6889,/ {
+            print
+            if (force != "") printf "%s", force
+            next
+        }
+        { print }
+    ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
+
     if /usr/bin/mihomo -d "$MIHOMO_DIR" -t >/dev/null 2>&1; then
         reload_mihomo_api
     else
@@ -882,7 +1177,13 @@ run_installer() {
 
     if [ -f "$MIHOMO_CONF" ]; then
         SAVED_SUB_URL=$(sed -n '/custom_sub:/,/health-check:/ s/^[[:space:]]*url:[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" | head -n 1 | tr -d ' \t\r\n')
-        [ -z "$SAVED_SUB_URL" ] && [ -f "${MIHOMO_PROVIDERS_DIR}/custom_sub.yaml" ] && SAVED_SUB_URL="file://custom_sub.yaml"
+        if [ -z "$SAVED_SUB_URL" ]; then
+            if is_warp_enabled; then
+                SAVED_SUB_URL="warp"
+            elif [ -f "$CUSTOM_SUB_FILE" ]; then
+                SAVED_SUB_URL="file://custom_sub.yaml"
+            fi
+        fi
         SAVED_GW_IP=$(sed -n 's/^[[:space:]]*"+\.lan":[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" | head -n 1 | tr -d ' \t\r\n')
         SAVED_PASS=$(sed -n 's/^secret:[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" | head -n 1 | tr -d '\r\n')
         if grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null; then
@@ -905,11 +1206,11 @@ run_installer() {
         SAVED_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
     fi
 
-    # 1. Запрос ссылки на подписку или прямого ключа
+    # 1. Запрос ссылки на подписку, прямого ключа или бесплатного Amnezia WARP
     if [ -n "$SAVED_SUB_URL" ]; then
-        printf "Введите ссылку на подписку или ключ vless/ss/hy2/anytls [Enter = оставить текущую]: "
+        printf "Введите подписку, ключ (vless/hy2...) или 'warp' [Enter = оставить %s]: " "$SAVED_SUB_URL"
     else
-        printf "Введите ссылку на подписку (http://...) или прямой ключ (vless://...): "
+        printf "Введите подписку (http://...), ключ (vless://...) или 'warp' (бесплатный Amnezia WARP): "
     fi
     read -r INPUT_SUB_URL < /dev/tty || true
     INPUT_SUB_URL=$(printf "%s" "$INPUT_SUB_URL" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -921,8 +1222,19 @@ run_installer() {
     fi
 
     if [ -z "$RAW_SUB_CHOICE" ]; then
-        echo "Бро я не буду этого делать без подписки или ключа ,_."
-        exit 1
+        printf "Подписка не указана. Сгенерировать бесплатный безлимитный Amnezia WARP? (y/n) [Enter = y]: "
+        read -r WARP_FALLBACK < /dev/tty || true
+        WARP_FALLBACK=$(printf "%s" "$WARP_FALLBACK" | tr -d ' \t\r\n')
+        [ -z "$WARP_FALLBACK" ] && WARP_FALLBACK="y"
+        case "$WARP_FALLBACK" in
+            [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа])
+                RAW_SUB_CHOICE="warp"
+                ;;
+            *)
+                echo "Бро я не буду этого делать без подписки или ключа ,_."
+                exit 1
+                ;;
+        esac
     fi
     apply_subscription_input "$RAW_SUB_CHOICE"
 
@@ -964,7 +1276,7 @@ run_installer() {
             USE_AGH="no"
             SELECTED_ADBLOCK="mihomo"
             ADBLOCK_SUMMARY="Только Mihomo (.mrs + SNI, DNS 0.0.0.0:53)"
-            DNS_MODE_DESC="Mihomo напрямую (0.0.0.0:53 + dns-hijack, AGH остановлен)"
+            DNS_MODE_DESC="Mihomo напрямую (0.0.0.0:53 + DNAT/dns-hijack, AGH остановлен)"
             ;;
         3)
             USE_AGH="yes"
@@ -1102,6 +1414,7 @@ net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 0
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_mtu_probing = 1
 net.core.rmem_max = 33554432
 net.core.wmem_max = 33554432
@@ -1128,7 +1441,7 @@ SYS_EOF
     /etc/init.d/odhcpd stop 2>/dev/null || true
     /etc/init.d/odhcpd disable 2>/dev/null || true
 
-    printf "nameserver %s\nnameserver 77.88.8.8\nnameserver 1.1.1.1\n" "$GW_IP" > /tmp/resolv.conf
+    printf "nameserver %s\nnameserver 77.88.8.8\nnameserver 77.88.8.1\n" "$GW_IP" > /tmp/resolv.conf
     cp -f /tmp/resolv.conf /etc/resolv.conf
     /etc/init.d/network reload
     /etc/init.d/dnsmasq restart
@@ -1156,9 +1469,9 @@ SYS_EOF
     uci set firewall.@defaults[0].flow_offloading_hw='0' 2>/dev/null || true
     uci commit firewall
 
-    sync_dns_firewall "$USE_AGH" "keep"
+    sync_dns_firewall "yes" "keep"
 
-    REQ_PKGS="ca-certificates curl gzip tar kmod-tun kmod-tcp-bbr kmod-nft-tproxy ip-full conntrack"
+    REQ_PKGS="ca-certificates curl gzip tar kmod-tun kmod-tcp-bbr kmod-nft-tproxy ip-full conntrack wireguard-tools"
     [ "$USE_AGH" = "yes" ] && REQ_PKGS="$REQ_PKGS apache-utils"
     NEED_PKGS=""
     for pkg in $REQ_PKGS; do
@@ -1171,6 +1484,11 @@ SYS_EOF
     sysctl -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
     [ -e /dev/net/tun ] || { mkdir -p /dev/net && mknod /dev/net/tun c 10 200; }
 
+    # Если выбран режим бесплатного Amnezia WARP — генерируем пул нод после синхронизации часов и установки пакетов
+    if [ "$PROVIDER_TYPE" = "warp" ]; then
+        generate_amnezia_warp || true
+    fi
+
     # ЭТАП 2: Загрузка/обновление ядер Mihomo и AdGuard Home
     update_cores_only "no"
 
@@ -1178,7 +1496,7 @@ SYS_EOF
     /etc/init.d/mihomo stop 2>/dev/null || true
 
     if [ "$PROVIDER_TYPE" = "http" ] && [ -n "$SAVED_SUB_URL" ] && [ "$SUB_URL" != "$SAVED_SUB_URL" ]; then
-        rm -f "${MIHOMO_PROVIDERS_DIR}/custom_sub.yaml" 2>/dev/null || true
+        rm -f "$CUSTOM_SUB_FILE" 2>/dev/null || true
     fi
 
     INSTALLED_UI_TYPE=""
@@ -1204,10 +1522,11 @@ SYS_EOF
         ADB_PRE="#"
     fi
 
-    if [ "$PROVIDER_TYPE" = "file" ]; then
+    if [ "$PROVIDER_TYPE" = "file" ] || [ "$PROVIDER_TYPE" = "warp" ]; then
+        [ -f "$CUSTOM_SUB_FILE" ] || echo "proxies: []" > "$CUSTOM_SUB_FILE"
         CUSTOM_SUB_BLOCK="  custom_sub:\n    type: file\n    path: ./proxy_providers/custom_sub.yaml"
     else
-        CUSTOM_SUB_BLOCK="  custom_sub:\n    type: http\n    url: \"${SUB_URL}\"\n    path: ./proxy_providers/custom_sub.yaml\n    interval: 86400\n    exclude-filter: \"(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official)\""
+        CUSTOM_SUB_BLOCK="  custom_sub:\n    type: http\n    url: \"${SUB_URL}\"\n    path: ./proxy_providers/custom_sub.yaml\n    interval: 86400\n    exclude-filter: \"${SUB_FILTER_REGEX}\""
     fi
 
     build_device_ip_rules
@@ -1278,6 +1597,7 @@ sniffer:
     - "+.push.apple.com"
     - "+.mtalk.google.com"
     - "+.courier.push.apple.com"
+    - "+.tailscale.com"
 dns:
   enable: true
   listen: ${MIHOMO_DNS_LISTEN}
@@ -1302,12 +1622,21 @@ dns:
     - "+.msftconnecttest.com"
     - "+.msftncsi.com"
     - "+.xboxlive.com"
+    - "xbox.*.microsoft.com"
     - "+.battlenet.com.cn"
     - "+.stun.*.*"
     - "+.stun.*.*.*"
+    - "+.stun.playstation.net"
+    - "+.srv.nintendo.net"
+    - "+.steamcontent.com"
+    - "+.push.apple.com"
+    - "+.courier.push.apple.com"
+    - "time.*.apple.com"
+    - "+.tailscale.com"
     - "rule-set:private_domain"
     - "rule-set:ntp_domain"
     - "rule-set:stun_domain"
+    - "rule-set:torrent_domain"
     - "rule-set:user_direct_domains"
     - "rule-set:ru_domain"
     - "+.market.xiaomi.com"
@@ -1316,8 +1645,8 @@ dns:
     - "+.captive.apple.com"
   default-nameserver:
     - 77.88.8.8
-    - 94.140.14.140
-  nameserver:
+    - 77.88.8.1
+  nameserver: &proxy_dns
     - "https://cloudflare-dns.com/dns-query#⚡ Авто (Самый быстрый)"
     - "https://dns.google/dns-query#⚡ Авто (Самый быстрый)"
     - "https://dns.quad9.net/dns-query#⚡ Авто (Самый быстрый)"
@@ -1330,11 +1659,15 @@ dns:
     "+.internal": "${GW_IP}"
     "+.localdomain": "${GW_IP}"
     "+.in-addr.arpa": "${GW_IP}"
+    "rule-set:user_proxy_domains": *proxy_dns
+    "rule-set:inside_ru_blocked": *proxy_dns
+    "rule-set:refilter_domain": *proxy_dns
+    "rule-set:ru_media_blocked": *proxy_dns
     "rule-set:ntp_domain": &ru_bootstrap_dns
       - "https://common.dot.dns.yandex.net/dns-query#DIRECT"
       - "tls://common.dot.dns.yandex.net#DIRECT"
-      - "https://dns.adguard-dns.com/dns-query#DIRECT"
       - 77.88.8.8
+      - 77.88.8.1
     "+.connectivitycheck.gstatic.com": *ru_bootstrap_dns
     "+.connectivitycheck.android.com": *ru_bootstrap_dns
     "+.msftconnecttest.com": *ru_bootstrap_dns
@@ -1345,13 +1678,13 @@ dns:
   proxy-server-nameserver:
     - "https://common.dot.dns.yandex.net/dns-query#DIRECT"
     - "tls://common.dot.dns.yandex.net#DIRECT"
-    - "https://dns.adguard-dns.com/dns-query#DIRECT"
     - 77.88.8.8
+    - 77.88.8.1
   direct-nameserver:
     - "https://common.dot.dns.yandex.net/dns-query#DIRECT"
     - "tls://common.dot.dns.yandex.net#DIRECT"
-    - "https://dns.adguard-dns.com/dns-query#DIRECT"
     - 77.88.8.8
+    - 77.88.8.1
   direct-nameserver-follow-policy: true
 proxy-providers:
 $(printf '%b' "$CUSTOM_SUB_BLOCK")
@@ -1365,6 +1698,12 @@ $(printf '%b' "$CUSTOM_SUB_BLOCK")
     override:
       udp: true
       client-fingerprint: chrome
+  warp_nodes:
+    type: file
+    path: ./proxy_providers/warp_nodes.yaml
+    health-check: *hc_default
+    override:
+      udp: true
   my_nodes:
     type: file
     path: ./proxy_providers/my_nodes.yaml
@@ -1375,7 +1714,7 @@ $(printf '%b' "$CUSTOM_SUB_BLOCK")
 proxy-groups:
   - name: "⚡ Авто (Самый быстрый)"
     type: url-test
-    use: [custom_sub, my_nodes]
+    use: [custom_sub, my_nodes, warp_nodes]
     url: "https://www.gstatic.com/generate_204"
     interval: 300
     tolerance: 50
@@ -1384,7 +1723,7 @@ proxy-groups:
     expected-status: 204
   - name: "🛡️ Авто-резерв (Fallback)"
     type: fallback
-    use: [custom_sub, my_nodes]
+    use: [custom_sub, my_nodes, warp_nodes]
     url: "https://www.gstatic.com/generate_204"
     interval: 300
     timeout: 5000
@@ -1393,31 +1732,39 @@ proxy-groups:
   - name: "🔓 Обход блокировок"
     type: select
     proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", "🐟 Прочий трафик", DIRECT]
-    use: [custom_sub, my_nodes]
+    use: [custom_sub, my_nodes, warp_nodes]
+  - name: "☁️ Cloudflare & CDN"
+    type: select
+    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", "🔓 Обход блокировок", DIRECT]
+    use: [custom_sub, my_nodes, warp_nodes]
   - name: "▶️ YouTube"
     type: select
     proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)"]
-    use: [custom_sub, my_nodes]
+    use: [custom_sub, my_nodes, warp_nodes]
   - name: "🤖 Нейросети (AI)"
     type: select
     proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)"]
-    use: [custom_sub, my_nodes]
+    use: [custom_sub, my_nodes, warp_nodes]
   - name: "👾 Discord & Игры"
     type: select
     proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
-    use: [custom_sub, my_nodes]
-  - name: "🎵 Spotify"
-    type: select
-    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
-    use: [custom_sub, my_nodes]
-  - name: "🧲 Торренты"
-    type: select
-    proxies: [DIRECT, "⚡ Авто (Самый быстрый)", REJECT]
-    use: [custom_sub, my_nodes]
+    use: [custom_sub, my_nodes, warp_nodes]
   - name: "💬 Мессенджеры & Связь"
     type: select
     proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
-    use: [custom_sub, my_nodes]
+    use: [custom_sub, my_nodes, warp_nodes]
+  - name: "🎵 Spotify"
+    type: select
+    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
+    use: [custom_sub, my_nodes, warp_nodes]
+  - name: "📺 Устройства (Full-VPN)"
+    type: select
+    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", "🔓 Обход блокировок", DIRECT]
+    use: [custom_sub, my_nodes, warp_nodes]
+  - name: "🧲 Торренты"
+    type: select
+    proxies: [DIRECT, "⚡ Авто (Самый быстрый)", REJECT]
+    use: [custom_sub, my_nodes, warp_nodes]
 ${ADB_PRE}  - name: "🛑 Реклама" #ADBLOCK_MIHOMO
 ${ADB_PRE}    type: select #ADBLOCK_MIHOMO
 ${ADB_PRE}    proxies: [REJECT, REJECT-DROP, DIRECT] #ADBLOCK_MIHOMO
@@ -1427,7 +1774,7 @@ ${ADB_PRE}    proxies: [REJECT, REJECT-DROP, DIRECT] #ADBLOCK_MIHOMO
   - name: "🐟 Прочий трафик"
     type: select
     proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
-    use: [custom_sub, my_nodes]
+    use: [custom_sub, my_nodes, warp_nodes]
 rule-providers:
   user_direct_domains:
     type: file
@@ -1505,6 +1852,14 @@ ${ADB_PRE}    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-
     <<: *mrs_ip
     path: ./rule_sets/telegram_ip.mrs
     url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/telegram.mrs"
+  cloudflare_domain:
+    <<: *mrs_domain
+    path: ./rule_sets/cloudflare_domain.mrs
+    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cloudflare.mrs"
+  cloudflare_ip:
+    <<: *mrs_ip
+    path: ./rule_sets/cloudflare_ip.mrs
+    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/cloudflare.mrs"
   refilter_domain:
     <<: *mrs_domain
     path: ./rule_sets/refilter_domain.mrs
@@ -1532,9 +1887,9 @@ ${ADB_PRE}    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-
 rules:
   - RULE-SET,private_domain,DIRECT
   - RULE-SET,private_ip,DIRECT,no-resolve
-$(printf '%b' "$DEVICE_RULES_STR")
+$(printf '%b' "$BYPASS_RULES_STR")
   - RULE-SET,user_direct_domains,DIRECT
-  - RULE-SET,user_proxy_domains,⚡ Авто (Самый быстрый)
+  - RULE-SET,user_proxy_domains,🔓 Обход блокировок
   - DST-PORT,853,REJECT
   - DST-PORT,123,DIRECT
   - RULE-SET,ntp_domain,DIRECT
@@ -1542,6 +1897,7 @@ ${ADB_PRE}  - RULE-SET,ads_domain,🛑 Реклама #ADBLOCK_MIHOMO
 ${ADB_PRE}  - RULE-SET,telemetry_domain,🛑 Реклама #ADBLOCK_MIHOMO
   - RULE-SET,torrent_domain,🧲 Торренты
   - DST-PORT,6881-6889,🧲 Торренты
+$(printf '%b' "$FORCE_PROXY_RULES_STR")
   - RULE-SET,ai_domain,🤖 Нейросети (AI)
   - RULE-SET,spotify_domain,🎵 Spotify
   - AND,((RULE-SET,youtube_domain),(NETWORK,udp),(DST-PORT,443)),REJECT
@@ -1549,17 +1905,20 @@ ${ADB_PRE}  - RULE-SET,telemetry_domain,🛑 Реклама #ADBLOCK_MIHOMO
   - RULE-SET,roblox_domain,👾 Discord & Игры
   - RULE-SET,discord_domain,👾 Discord & Игры
   - RULE-SET,discord_voice_ip,👾 Discord & Игры,no-resolve
-  - RULE-SET,stun_domain,⚡ Авто (Самый быстрый)
-  - AND,((NETWORK,udp),(DST-PORT,3478)),⚡ Авто (Самый быстрый)
-  - AND,((NETWORK,udp),(DST-PORT,5349)),⚡ Авто (Самый быстрый)
-  - AND,((NETWORK,udp),(DST-PORT,19302)),⚡ Авто (Самый быстрый)
-  - AND,((NETWORK,udp),(DST-PORT,50000-65535)),💬 Мессенджеры & Связь
+  - AND,((NETWORK,udp),(DST-PORT,50000-50100)),👾 Discord & Игры
+  - RULE-SET,stun_domain,💬 Мессенджеры & Связь
+  - AND,((NETWORK,udp),(DST-PORT,3478)),💬 Мессенджеры & Связь
+  - AND,((NETWORK,udp),(DST-PORT,5349)),💬 Мессенджеры & Связь
+  - AND,((NETWORK,udp),(DST-PORT,19302)),💬 Мессенджеры & Связь
+  - AND,((NETWORK,udp),(DST-PORT,50101-65535)),💬 Мессенджеры & Связь
   - RULE-SET,communication_domain,💬 Мессенджеры & Связь
   - RULE-SET,telegram_ip,💬 Мессенджеры & Связь,no-resolve
   - RULE-SET,inside_ru_blocked,🔓 Обход блокировок
   - RULE-SET,refilter_domain,🔓 Обход блокировок
   - RULE-SET,ru_media_blocked,🔓 Обход блокировок
   - RULE-SET,refilter_ip,🔓 Обход блокировок,no-resolve
+  - RULE-SET,cloudflare_domain,☁️ Cloudflare & CDN
+  - RULE-SET,cloudflare_ip,☁️ Cloudflare & CDN,no-resolve
   - RULE-SET,ru_domain,🇷🇺 Россия
   - RULE-SET,ru_ip,🇷🇺 Россия,no-resolve
   - MATCH,🐟 Прочий трафик
@@ -1599,7 +1958,7 @@ CONFIG_EOF
                     in_list=1; next
                 }
                 /^[[:space:]]*bootstrap_dns:/ {
-                    print "  bootstrap_dns: [" gw ", 77.88.8.8, 1.1.1.1]"
+                    print "  bootstrap_dns: [" gw ", 77.88.8.8, 77.88.8.1]"
                     in_list=1; next
                 }
                 /^[[:space:]]*local_ptr_upstreams:/ {
@@ -1629,7 +1988,7 @@ dns:
   bind_hosts: [0.0.0.0]
   port: 53
   upstream_dns: [127.0.0.1:1053]
-  bootstrap_dns: [${GW_IP}, 77.88.8.8, 1.1.1.1]
+  bootstrap_dns: [${GW_IP}, 77.88.8.8, 77.88.8.1]
   upstream_mode: load_balance
   cache_enabled: false
   cache_size: 0
@@ -1698,7 +2057,7 @@ INIT_AGH
         /etc/init.d/adguardhome enable 2>/dev/null || true
         /etc/init.d/adguardhome restart 2>/dev/null || /etc/init.d/adguardhome start 2>/dev/null || true
     fi
-    printf "nameserver 127.0.0.1\nnameserver 77.88.8.8\nnameserver 1.1.1.1\n" > /tmp/resolv.conf
+    printf "nameserver 127.0.0.1\nnameserver 77.88.8.8\nnameserver 77.88.8.1\n" > /tmp/resolv.conf
     cp -f /tmp/resolv.conf /etc/resolv.conf
 
     if [ "$ENABLE_AU" = "yes" ]; then
@@ -1739,6 +2098,10 @@ run_self_test() {
         echo "[i] Служба AdGuard Home: ОСТАНОВЛЕНА (DNS обрабатывает Mihomo)"
     fi
 
+    if is_warp_enabled; then
+        echo "[✓] Пул Amnezia WARP: АКТИВЕН (8 бесплатных нод Cloudflare + EU)"
+    fi
+
     detect_adblock_mode
     echo "[✓] Режим антирекламы: ${ADBLOCK_STAT} ${ADBLOCK_DESC}"
 
@@ -1755,7 +2118,7 @@ run_self_test() {
     if is_killswitch_enabled; then
         echo "[✓] Защита от утечек (Kill-Switch): АКТИВНА (строгий запрет обхода TUN)"
     else
-        echo "[✓] Защита от утечек: IPv6 Drop + DoT/DoQ 853 Reject активны"
+        echo "[✓] Защита от утечек: IPv6 Drop + DoT/DoQ 853 Reject + DNS 53 Redirect активны"
     fi
 
     if [ -f "$MIHOMO_CONF" ] && pgrep mihomo >/dev/null 2>&1; then
@@ -1784,6 +2147,7 @@ fi
 # ==============================================================================
 show_menu() {
     init_user_lists
+    ensure_mihomo_config_tags
     refresh_remote_versions
     while true; do
         clear
@@ -1793,7 +2157,7 @@ show_menu() {
         print_gateway_header
         echo "--------------------------------------------------------"
         echo " 1) Статус служб и глубокий тест на утечки (Self-Test)"
-        echo " 2) Управление подпиской и личными ключами (без обрыва)"
+        echo " 2) Подписка, личные ключи и бесплатный Amnezia WARP"
         echo " 3) Обновить ядра Mihomo, AdGuard Home и веб-панель"
         echo " 4) Перезапустить службы + сброс conntrack и Fake-IP кэша"
         echo " 5) Посмотреть живые логи Mihomo (logread)"
@@ -1820,22 +2184,27 @@ show_menu() {
                 read -r _ < /dev/tty
                 ;;
             2)
-                echo "=== Управление подпиской и личными ключами ==="
-                echo " 1) Заменить основную ссылку подписки (или основной ключ)"
-                echo " 2) Добавить дополнительный личный ключ (vless/hy2/ss/tuic/anytls) к подписке"
-                echo " 3) Очистить список дополнительных личных ключей (${CUSTOM_NODES_FILE})"
+                echo "=== Управление подпиской, ключами и Amnezia WARP ==="
+                echo " 1) Заменить основную подписку (http://...), основной ключ или 'warp'"
+                echo " 2) Добавить дополнительный личный ключ (vless/hy2/ss/tuic/anytls) в пул my_nodes"
+                echo " 3) Очистить дополнительные личные ключи (${CUSTOM_NODES_FILE})"
+                echo " 4) Сгенерировать / обновить БЕСПЛАТНЫЙ Amnezia WARP (8 нод: Cloudflare + Европа)"
+                echo " 5) Отключить / очистить ноды Amnezia WARP (${WARP_NODES_FILE})"
                 echo " 0) Назад"
-                printf "Выбор: "
+                printf "Выбор [0-5]: "
                 read -r SUB_ACT < /dev/tty || true
                 case "$SUB_ACT" in
                     1)
-                        printf "Введите новую ссылку (http://...) или прямой ключ (vless/ss/hy2/anytls): "
+                        printf "Введите новую ссылку (http://...), прямой ключ (vless/hy2...) или 'warp': "
                         read -r NEW_SUB < /dev/tty || true
                         NEW_SUB=$(printf "%s" "$NEW_SUB" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                         if [ -n "$NEW_SUB" ] && [ -f "$MIHOMO_CONF" ]; then
                             cp -f "$MIHOMO_CONF" "${MIHOMO_CONF}.bak"
                             apply_subscription_input "$NEW_SUB"
-                            if [ "$PROVIDER_TYPE" = "file" ]; then
+                            if [ "$PROVIDER_TYPE" = "warp" ]; then
+                                generate_amnezia_warp || true
+                            fi
+                            if [ "$PROVIDER_TYPE" = "file" ] || [ "$PROVIDER_TYPE" = "warp" ]; then
                                 awk '
                                     /^  custom_sub:/ {
                                         print "  custom_sub:"
@@ -1848,15 +2217,15 @@ show_menu() {
                                     { print }
                                 ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
                             else
-                                rm -f "${MIHOMO_PROVIDERS_DIR}/custom_sub.yaml" 2>/dev/null || true
-                                awk -v url="$SUB_URL" '
+                                rm -f "$CUSTOM_SUB_FILE" 2>/dev/null || true
+                                awk -v url="$SUB_URL" -v flt="$SUB_FILTER_REGEX" '
                                     /^  custom_sub:/ {
                                         print "  custom_sub:"
                                         print "    type: http"
                                         print "    url: \"" url "\""
                                         print "    path: ./proxy_providers/custom_sub.yaml"
                                         print "    interval: 86400"
-                                        print "    exclude-filter: \"(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official)\""
+                                        print "    exclude-filter: \"" flt "\""
                                         in_sub=1; next
                                     }
                                     in_sub && /^    health-check:/ { in_sub=0 }
@@ -1865,7 +2234,7 @@ show_menu() {
                                 ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
                             fi
                             reload_mihomo_api
-                            echo "[✓] Основная подписка/ключ успешно обновлены на лету!"
+                            echo "[✓] Основной источник прокси успешно обновлен на лету!"
                         else
                             echo "[X] Ошибка: пустой ввод или конфиг не найден."
                         fi
@@ -1876,7 +2245,7 @@ show_menu() {
                         read -r EXTRA_KEY < /dev/tty || true
                         EXTRA_KEY=$(printf "%s" "$EXTRA_KEY" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
                         if [ -n "$EXTRA_KEY" ]; then
-                            printf "%s\n" "$EXTRA_KEY" | tr ' ,' '\n\n' | sed '/^$/d' >> "$CUSTOM_NODES_FILE"
+                            format_uri_keys "$EXTRA_KEY" >> "$CUSTOM_NODES_FILE"
                             reload_mihomo_api
                             echo "[✓] Ключ добавлен в локальный пул my_nodes и подключен к автовыбору!"
                         fi
@@ -1886,6 +2255,20 @@ show_menu() {
                         : > "$CUSTOM_NODES_FILE"
                         reload_mihomo_api
                         echo "[✓] Дополнительные личные ключи очищены."
+                        sleep 2
+                        ;;
+                    4)
+                        if generate_amnezia_warp; then
+                            ensure_mihomo_config_tags
+                            reload_mihomo_api
+                            echo "[✓] 8 нод Amnezia WARP подключены ко всем группам в веб-панели!"
+                        fi
+                        sleep 3
+                        ;;
+                    5)
+                        echo "proxies: []" > "$WARP_NODES_FILE"
+                        reload_mihomo_api
+                        echo "[✓] Пул нод Amnezia WARP отключен и очищен."
                         sleep 2
                         ;;
                 esac
@@ -1987,7 +2370,7 @@ show_menu() {
                         D_IN=$(printf "%s" "$D_IN" | tr -d ' \t\r\n')
                         if [ -n "$D_IN" ]; then
                             case "$D_IN" in +.*) ;; *.*) D_IN="+.$D_IN" ;; esac
-                            echo "$D_IN" >> "$USER_PROXY_FILE"
+                            grep -qxF "$D_IN" "$USER_PROXY_FILE" 2>/dev/null || echo "$D_IN" >> "$USER_PROXY_FILE"
                             reload_mihomo_api
                             echo "[✓] Добавлено в прокси: $D_IN"
                         fi
@@ -1999,7 +2382,7 @@ show_menu() {
                         D_IN=$(printf "%s" "$D_IN" | tr -d ' \t\r\n')
                         if [ -n "$D_IN" ]; then
                             case "$D_IN" in +.*) ;; *.*) D_IN="+.$D_IN" ;; esac
-                            echo "$D_IN" >> "$USER_DIRECT_FILE"
+                            grep -qxF "$D_IN" "$USER_DIRECT_FILE" 2>/dev/null || echo "$D_IN" >> "$USER_DIRECT_FILE"
                             reload_mihomo_api
                             echo "[✓] Добавлено напрямую: $D_IN"
                         fi
@@ -2019,11 +2402,11 @@ show_menu() {
                 echo "Устройства в обходе (всегда DIRECT):"
                 if [ -s "$USER_BYPASS_IPS" ]; then cat "$USER_BYPASS_IPS"; else echo " (пусто)"; fi
                 echo "--------------------------------------------------------"
-                echo "Устройства в Full-VPN (весь трафик в ПРОКСИ — ТВ/PS5/Quest):"
+                echo "Устройства в Full-VPN (группа '📺 Устройства (Full-VPN)' — ТВ/PS5/Quest):"
                 if [ -s "$USER_FORCE_PROXY_IPS" ]; then cat "$USER_FORCE_PROXY_IPS"; else echo " (пусто)"; fi
                 echo "--------------------------------------------------------"
                 echo " 1) Добавить IP устройства в ОБХОД (DIRECT)"
-                echo " 2) Добавить IP устройства в FULL-VPN (весь трафик в прокси)"
+                echo " 2) Добавить IP устройства в FULL-VPN (группа 📺 Устройства (Full-VPN))"
                 echo " 3) Очистить оба списка IP"
                 echo " 0) Назад"
                 printf "Выбор: "
@@ -2051,7 +2434,7 @@ show_menu() {
                             grep -qxF "$IP_IN" "$USER_FORCE_PROXY_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_FORCE_PROXY_IPS"
                             sync_device_ips_in_config
                             conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
-                            echo "[✓] Весь трафик устройства ${IP_IN} направлен через прокси."
+                            echo "[✓] Трафик устройства ${IP_IN} направлен в группу '📺 Устройства (Full-VPN)'."
                         fi
                         sleep 2
                         ;;
@@ -2174,21 +2557,19 @@ show_menu() {
                 echo "Блокирует любую прямую маршрутизацию из br-lan в основной роутер в обход mihomo-tun."
                 echo "Если служба Mihomo упадет, клиенты не «светят» реальный российский IP провайдера."
                 echo "--------------------------------------------------------"
-                USE_AGH_CUR="no"
-                grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null && USE_AGH_CUR="yes"
                 echo " 1) ВКЛЮЧИТЬ строгий Kill-Switch (рекомендуется против утечек)"
-                echo " 2) ВЫКЛЮЧИТЬ строгий Kill-Switch (оставить только защиту IPv6 и DoT 853)"
+                echo " 2) ВЫКЛЮЧИТЬ строгий Kill-Switch (оставить только защиту IPv6, DoT 853 и DNS 53)"
                 echo " 0) Назад"
                 printf "Выбор [0-2]: "
                 read -r KS_ACT < /dev/tty || true
                 case "$KS_ACT" in
                     1)
-                        sync_dns_firewall "$USE_AGH_CUR" "yes"
+                        sync_dns_firewall "yes" "yes"
                         echo "[✓] Аппаратный Kill-Switch ВКЛЮЧЕН."
                         sleep 2
                         ;;
                     2)
-                        sync_dns_firewall "$USE_AGH_CUR" "no"
+                        sync_dns_firewall "yes" "no"
                         echo "[✓] Аппаратный Kill-Switch ВЫКЛЮЧЕН."
                         sleep 2
                         ;;
