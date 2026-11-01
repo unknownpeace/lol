@@ -332,25 +332,20 @@ escape_single_quotes() {
     return 0
 }
 
-# Чтение и сохранение параметров шлюза (gateway.env) с защитой от спецсимволов
+# Чтение и сохранение параметров шлюза (gateway.env) с защитой от перезаписи памяти
 load_gateway_env() {
-    GW_IP=""
-    ADMIN_PASS=""
-    SUB_URL=""
-    WARP_LICENSE=""
-
     if [ -f "$SB_ENV" ]; then
         # shellcheck disable=SC1090
         . "$SB_ENV" 2>/dev/null || true
     fi
 
-    if [ -z "$GW_IP" ] && [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
+    if [ -z "${GW_IP:-}" ] && [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
         GW_IP=$(jq -r '.dns.servers[]? | select(.tag=="dns_local") | .server // empty' "$SB_CONF" 2>/dev/null | head -n 1)
     fi
-    if [ -z "$ADMIN_PASS" ] && [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
+    if [ -z "${ADMIN_PASS:-}" ] && [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
         ADMIN_PASS=$(jq -r '.experimental.clash_api.secret // empty' "$SB_CONF" 2>/dev/null | head -n 1)
     fi
-    if [ -z "$SUB_URL" ] && [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
+    if [ -z "${SUB_URL:-}" ] && [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
         SUB_URL=$(jq -r '[.providers[]? | select(.type=="remote") | .url] | join(" ")' "$SB_CONF" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     fi
 
@@ -359,17 +354,17 @@ load_gateway_env() {
         *) SUB_URL="" ;;
     esac
 
-    [ -z "$GW_IP" ] && GW_IP=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}') || true
-    [ -z "$GW_IP" ] && GW_IP="192.168.1.1" || true
+    [ -z "${GW_IP:-}" ] && GW_IP=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}') || true
+    [ -z "${GW_IP:-}" ] && GW_IP="192.168.1.1" || true
     return 0
 }
 
 save_gateway_env() {
     mkdir -p "$SB_DIR"
     umask 077
-    ESC_GW=$(escape_single_quotes "${GW_IP}")
-    ESC_PASS=$(escape_single_quotes "${ADMIN_PASS}")
-    ESC_SUB=$(escape_single_quotes "${SUB_URL}")
+    ESC_GW=$(escape_single_quotes "${GW_IP:-}")
+    ESC_PASS=$(escape_single_quotes "${ADMIN_PASS:-}")
+    ESC_SUB=$(escape_single_quotes "${SUB_URL:-}")
     ESC_WLIC=$(escape_single_quotes "${WARP_LICENSE:-}")
     cat << ENV_EOF > "$SB_ENV"
 GW_IP='${ESC_GW}'
@@ -423,11 +418,12 @@ get_ip_cidr_json_array() {
     return 0
 }
 
-# Генерация эталонного /etc/sing-box/config.json (5 чистых групп с приоритетом AI)
+# Генерация эталонного /etc/sing-box/config.json (5 чистых групп, 100% на пачках .srs)
 generate_singbox_config() {
     check_github_mirror
     sync_user_domain_rulesets
-    [ -z "$ADMIN_PASS" ] && ADMIN_PASS="admin" || true
+    [ -z "${ADMIN_PASS:-}" ] && load_gateway_env || true
+    [ -z "${ADMIN_PASS:-}" ] && ADMIN_PASS="admin" || true
 
     PROVIDERS_JSON_ARR="[]"
     PROVIDER_TAGS_JSON="[]"
@@ -501,8 +497,7 @@ generate_singbox_config() {
       "tag": "📺 Устройства (Full-VPN)",
       "outbounds": [
         "⚡ Авто (Самый быстрый)",
-        "🛡️ Авто-резерв (Fallback)",
-        "🔓 Обход блокировок",
+        "🌐 Остальной трафик",
         "DIRECT"
       ],
       "providers": ${PROVIDER_TAGS_JSON}
@@ -590,50 +585,10 @@ FORCE_GRP
         "rcode": "NOERROR"
       },
       {
-        "domain_suffix": [
-          ".lan",
-          ".local",
-          ".home.arpa",
-          ".internal",
-          ".localdomain",
-          ".in-addr.arpa"
-        ],
-        "server": "dns_local"
-      },
-      {
         "rule_set": [
           "private_domain"
         ],
         "server": "dns_local"
-      },
-      {
-        "domain_suffix": [
-          "msftconnecttest.com",
-          "msftncsi.com",
-          "connectivitycheck.gstatic.com",
-          "connectivitycheck.android.com",
-          "captive.apple.com",
-          "push.apple.com",
-          "courier.push.apple.com",
-          "tailscale.com",
-          "steamcontent.com",
-          "xboxlive.com",
-          "stun.playstation.net",
-          "srv.nintendo.net",
-          "tbank.ru",
-          "cdn-tinkoff.com",
-          "sberbank.ru",
-          "gosuslugi.ru",
-          "wb.ru",
-          "wbbasket.ru",
-          "ozon.ru",
-          "ozonusercontent.com",
-          "vkvideo.ru",
-          "userapi.com",
-          "mycdn.me",
-          "2gis.com"
-        ],
-        "server": "dns_ru"
       },
       {
         "rule_set": [
@@ -697,49 +652,34 @@ FORCE_GRP
       "idle_timeout": "30m"
     },
     {
-      "type": "urltest",
-      "tag": "🛡️ Авто-резерв (Fallback)",
-      "providers": ${PROVIDER_TAGS_JSON},
-      "url": "https://cp.cloudflare.com/generate_204",
-      "interval": "5m",
-      "tolerance": 150,
-      "idle_timeout": "30m"
-    },
-    {
       "type": "selector",
-      "tag": "🤖 Нейросети (AI)",
+      "tag": "🤖 AI & Google",
       "outbounds": [
-        "⚡ Авто (Самый быстрый)",
-        "🛡️ Авто-резерв (Fallback)"
+        "⚡ Авто (Самый быстрый)"
       ],
       "providers": ${PROVIDER_TAGS_JSON}
     },
     {
       "type": "selector",
-      "tag": "▶️ YouTube & Медиа",
+      "tag": "🎮 Roblox",
       "outbounds": [
-        "⚡ Авто (Самый быстрый)",
-        "🛡️ Авто-резерв (Fallback)"
+        "⚡ Авто (Самый быстрый)"
       ],
       "providers": ${PROVIDER_TAGS_JSON}
     },
     {
       "type": "selector",
-      "tag": "🎮 Игры, Discord & Звонки",
+      "tag": "▶️ YouTube & Spotify",
       "outbounds": [
-        "⚡ Авто (Самый быстрый)",
-        "🛡️ Авто-резерв (Fallback)",
-        "DIRECT"
+        "⚡ Авто (Самый быстрый)"
       ],
       "providers": ${PROVIDER_TAGS_JSON}
     },
     {
       "type": "selector",
-      "tag": "🔓 Обход блокировок",
+      "tag": "💬 Мессенджеры & Discord",
       "outbounds": [
         "⚡ Авто (Самый быстрый)",
-        "🛡️ Авто-резерв (Fallback)",
-        "🐟 Прочий трафик",
         "DIRECT"
       ],
       "providers": ${PROVIDER_TAGS_JSON}
@@ -747,10 +687,9 @@ FORCE_GRP
     ${FORCE_OUTBOUND_GROUP}
     {
       "type": "selector",
-      "tag": "🐟 Прочий трафик",
+      "tag": "🌐 Остальной трафик",
       "outbounds": [
         "⚡ Авто (Самый быстрый)",
-        "🛡️ Авто-резерв (Fallback)",
         "DIRECT"
       ],
       "providers": ${PROVIDER_TAGS_JSON}
@@ -767,7 +706,7 @@ FORCE_GRP
       "server": "dns_ru",
       "strategy": "ipv4_only"
     },
-    "final": "🐟 Прочий трафик",
+    "final": "🌐 Остальной трафик",
     "rules": [
       {
         "inbound": [
@@ -794,35 +733,14 @@ FORCE_GRP
         "ip_is_private": true,
         "outbound": "DIRECT"
       },
-      {
-        "rule_set": [
-          "private_domain",
-          "private_ip"
-        ],
-        "outbound": "DIRECT"
-      },
       ${BYPASS_ROUTE_RULE}
       {
         "rule_set": [
-          "user_direct_domains"
-        ],
-        "outbound": "DIRECT"
-      },
-      {
-        "port": [
-          853
-        ],
-        "action": "reject"
-      },
-      {
-        "port": [
-          123
-        ],
-        "outbound": "DIRECT"
-      },
-      {
-        "rule_set": [
-          "ntp_domain"
+          "private_domain",
+          "private_ip",
+          "user_direct_domains",
+          "ntp_domain",
+          "torrent_domain"
         ],
         "outbound": "DIRECT"
       },
@@ -833,23 +751,23 @@ FORCE_GRP
         "outbound": "DIRECT"
       },
       {
-        "rule_set": [
-          "torrent_domain"
+        "port": [
+          123
         ],
         "outbound": "DIRECT"
       },
       {
-        "port_range": [
-          "6881:6889"
+        "port": [
+          853
         ],
-        "outbound": "DIRECT"
+        "action": "reject"
       },
       ${FORCE_ROUTE_RULE}
       {
         "rule_set": [
           "youtube_domain",
-          "tiktok_domain",
           "ai_domain",
+          "google_domain",
           "ru_bundle"
         ],
         "network": [
@@ -861,63 +779,24 @@ FORCE_GRP
         "action": "reject"
       },
       {
-        "domain_suffix": [
-          "chatgpt.com",
-          "openai.com",
-          "oaistatic.com",
-          "oaiusercontent.com",
-          "sora.com",
-          "claude.ai",
-          "anthropic.com",
-          "claudeusercontent.com",
-          "gemini.google.com",
-          "aistudio.google.com",
-          "makersuite.google.com",
-          "notebooklm.google.com",
-          "notebooklm.google",
-          "bard.google.com",
-          "deepmind.com",
-          "deepmind.google",
-          "generativelanguage.googleapis.com",
-          "alkalimakersuite-pa.clients6.google.com",
-          "proactivebackend-pa.googleapis.com",
-          "aisandbox-pa.googleapis.com",
-          "grok.com",
-          "x.ai",
-          "perplexity.ai",
-          "pplx.ai",
-          "cursor.com",
-          "cursor.sh",
-          "cursorapi.com",
-          "copilot.microsoft.com",
-          "sydney.bing.com",
-          "midjourney.com",
-          "suno.com",
-          "suno.ai",
-          "udio.com",
-          "elevenlabs.io",
-          "openrouter.ai",
-          "huggingface.co",
-          "hf.co",
-          "mistral.ai",
-          "cohere.com",
-          "deepseek.com",
-          "qwenlm.ai",
-          "chat.qwen.ai"
+        "rule_set": [
+          "youtube_domain",
+          "spotify_domain"
         ],
-        "outbound": "🤖 Нейросети (AI)"
+        "outbound": "▶️ YouTube & Spotify"
       },
       {
         "rule_set": [
-          "ai_domain"
+          "ai_domain",
+          "google_domain"
         ],
-        "outbound": "🤖 Нейросети (AI)"
+        "outbound": "🤖 AI & Google"
       },
       {
         "rule_set": [
-          "user_proxy_domains"
+          "roblox_domain"
         ],
-        "outbound": "🔓 Обход блокировок"
+        "outbound": "🎮 Roblox"
       },
       {
         "network": [
@@ -926,7 +805,7 @@ FORCE_GRP
         "port_range": [
           "50000:50100"
         ],
-        "outbound": "🎮 Игры, Discord & Звонки"
+        "outbound": "💬 Мессенджеры & Discord"
       },
       {
         "network": [
@@ -937,36 +816,29 @@ FORCE_GRP
           5349,
           19302
         ],
-        "outbound": "🎮 Игры, Discord & Звонки"
+        "outbound": "💬 Мессенджеры & Discord"
       },
       {
         "rule_set": [
-          "youtube_domain",
-          "tiktok_domain",
-          "spotify_domain"
-        ],
-        "outbound": "▶️ YouTube & Медиа"
-      },
-      {
-        "rule_set": [
-          "roblox_domain",
-          "supercell_domain",
+          "telegram_domain",
+          "telegram_ip",
+          "whatsapp_domain",
+          "facebook_ip",
           "discord_domain",
           "discord_voice_ip",
-          "stun_domain",
-          "communication_domain",
-          "telegram_ip"
+          "stun_domain"
         ],
-        "outbound": "🎮 Игры, Discord & Звонки"
+        "outbound": "💬 Мессенджеры & Discord"
       },
       {
         "rule_set": [
+          "user_proxy_domains",
           "ru_bundle",
           "refilter_ip",
           "cloudflare_domain",
           "cloudflare_ip"
         ],
-        "outbound": "🔓 Обход блокировок"
+        "outbound": "🌐 Остальной трафик"
       },
       {
         "rule_set": [
@@ -1022,22 +894,6 @@ FORCE_GRP
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-stun.srs"
       },
       {
-        "tag": "ai_domain",
-        "type": "remote",
-        "format": "binary",
-        "download_detour": "DIRECT",
-        "update_interval": "24h",
-        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ai-!cn.srs"
-      },
-      {
-        "tag": "spotify_domain",
-        "type": "remote",
-        "format": "binary",
-        "download_detour": "DIRECT",
-        "update_interval": "24h",
-        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/spotify.srs"
-      },
-      {
         "tag": "torrent_domain",
         "type": "remote",
         "format": "binary",
@@ -1054,12 +910,28 @@ FORCE_GRP
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/youtube.srs"
       },
       {
-        "tag": "tiktok_domain",
+        "tag": "spotify_domain",
         "type": "remote",
         "format": "binary",
         "download_detour": "DIRECT",
         "update_interval": "24h",
-        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/tiktok.srs"
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/spotify.srs"
+      },
+      {
+        "tag": "ai_domain",
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "DIRECT",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ai-!cn.srs"
+      },
+      {
+        "tag": "google_domain",
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "DIRECT",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/google.srs"
       },
       {
         "tag": "roblox_domain",
@@ -1070,12 +942,36 @@ FORCE_GRP
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/roblox.srs"
       },
       {
-        "tag": "supercell_domain",
+        "tag": "telegram_domain",
         "type": "remote",
         "format": "binary",
         "download_detour": "DIRECT",
         "update_interval": "24h",
-        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/supercell.srs"
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/telegram.srs"
+      },
+      {
+        "tag": "telegram_ip",
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "DIRECT",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/telegram.srs"
+      },
+      {
+        "tag": "whatsapp_domain",
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "DIRECT",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/whatsapp.srs"
+      },
+      {
+        "tag": "facebook_ip",
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "DIRECT",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/facebook.srs"
       },
       {
         "tag": "discord_domain",
@@ -1092,22 +988,6 @@ FORCE_GRP
         "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/sb-rule-sets/main/discord-voice-ip-list.srs"
-      },
-      {
-        "tag": "communication_domain",
-        "type": "remote",
-        "format": "binary",
-        "download_detour": "DIRECT",
-        "update_interval": "24h",
-        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-communication.srs"
-      },
-      {
-        "tag": "telegram_ip",
-        "type": "remote",
-        "format": "binary",
-        "download_detour": "DIRECT",
-        "update_interval": "24h",
-        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/telegram.srs"
       },
       {
         "tag": "cloudflare_domain",
@@ -1162,7 +1042,7 @@ FORCE_GRP
 }
 CONFIG_EOF
 
-    # Безопасная подстановка секретов и сборка .endpoints, группы "☁️ Amnezia WARP" и фоллбэка на DIRECT
+    # Безопасная подстановка секретов и сборка .endpoints и группы "☁️ Amnezia WARP"
     if command -v jq >/dev/null 2>&1; then
         if is_warp_enabled; then
             if [ "$PROVIDER_TAGS_JSON" != "[]" ]; then
@@ -1170,10 +1050,9 @@ CONFIG_EOF
                     .experimental.clash_api.secret = $secret
                     | (.dns.servers[] | select(.tag=="dns_local") | .server) = $gw
                     | .endpoints = $w[0].outbounds
-                    | (.outbounds[] | select(.tag == "🛡️ Авто-резерв (Fallback)") | .outbounds) = ["☁️ Amnezia WARP"]
                     | (.outbounds[] | select(.type == "selector" and .providers != null) | .outbounds) += ["☁️ Amnezia WARP"]
                     | .outbounds = (
-                        .outbounds[0:2] + [{
+                        [.outbounds[0]] + [{
                             "type": "urltest",
                             "tag": "☁️ Amnezia WARP",
                             "outbounds": ($w[0].outbounds | map(.tag)),
@@ -1181,7 +1060,7 @@ CONFIG_EOF
                             "interval": "3m",
                             "tolerance": 50,
                             "idle_timeout": "30m"
-                        }] + .outbounds[2:]
+                        }] + .outbounds[1:]
                     )
                 ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
             else
@@ -1199,7 +1078,7 @@ CONFIG_EOF
                         | .outbounds = ((.outbounds // []) + ["☁️ Amnezia WARP"] + ($w[0].outbounds | map(.tag)))
                     )
                     | .outbounds = (
-                        .outbounds[0:2] + [{
+                        [.outbounds[0]] + [{
                             "type": "urltest",
                             "tag": "☁️ Amnezia WARP",
                             "outbounds": ($w[0].outbounds | map(.tag)),
@@ -1207,7 +1086,7 @@ CONFIG_EOF
                             "interval": "3m",
                             "tolerance": 50,
                             "idle_timeout": "30m"
-                        }] + .outbounds[2:]
+                        }] + .outbounds[1:]
                     )
                 ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
             fi
@@ -1401,6 +1280,45 @@ apply_and_verify_singbox() {
         restore_gateway_state
         return 1
     fi
+}
+
+# Быстрая смена единого пароля (Sing-Box Zashboard + AdGuard Home)
+change_unified_password() {
+    NEW_PASS="$1"
+    if [ -z "$NEW_PASS" ]; then
+        echo "[X] Ошибка: Пароль не может быть пустым!"
+        return 1
+    fi
+    load_gateway_env
+    ADMIN_PASS="$NEW_PASS"
+    save_gateway_env
+    generate_singbox_config
+
+    if [ -f "$AGH_CONF" ] && command -v htpasswd >/dev/null 2>&1; then
+        CUR_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
+        [ -z "$CUR_AGH_USER" ] && CUR_AGH_USER="admin" || true
+        NEW_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$CUR_AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
+        [ -z "$NEW_HASH" ] && NEW_HASH=$(htpasswd -nbBC 10 "$CUR_AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true) || true
+        if [ -n "$NEW_HASH" ]; then
+            awk -v u="$CUR_AGH_USER" -v h="$NEW_HASH" '
+                /^users:/ {
+                    print "users:"
+                    print "  - name: " u
+                    print "    password: " h
+                    in_users=1; next
+                }
+                in_users && /^[^[:space:]]/ { in_users=0 }
+                in_users { next }
+                { print }
+            ' "$AGH_CONF" > "${AGH_CONF}.tmp" && mv "${AGH_CONF}.tmp" "$AGH_CONF"
+            chmod 600 "$AGH_CONF" 2>/dev/null || true
+        fi
+    fi
+
+    /etc/init.d/sing-box restart 2>/dev/null || true
+    /etc/init.d/adguardhome restart 2>/dev/null || true
+    echo "[✓] Единый пароль успешно обновлен для Sing-Box Zashboard и AdGuard Home!"
+    return 0
 }
 
 # Управление Умным DHCP-сервером на OpenWrt (для залоченных роутеров Ростелеком/МТС/Дом.ру)
@@ -1878,7 +1796,7 @@ scan_best_warp_endpoints() {
 generate_amnezia_warp() {
     OPT_LIC="${1:-}"
     mkdir -p "$SB_PROVIDERS_DIR"
-    load_gateway_env
+    [ -z "${GW_IP:-}" ] && load_gateway_env || true
     [ -n "$OPT_LIC" ] && WARP_LICENSE="$OPT_LIC" || true
 
     if ! command -v wg >/dev/null 2>&1; then
@@ -2458,6 +2376,9 @@ run_installer() {
         exit 1
     fi
 
+    # Немедленно фиксируем введенные пользователем параметры (пароль, роутер, подписку) на диск!
+    save_gateway_env
+
     # 4. Запрос на автообновление («поставил и забыл»)
     if is_autoupdate_enabled; then
         DEF_AU_CHAR="y"
@@ -2480,7 +2401,7 @@ run_installer() {
     echo " - IP шлюза (LAN):  ${TARGET_LAN_IP} (интерфейс $(get_lan_ifname), маска /24)"
     echo " - Основной роутер: ${GW_IP}"
     echo " - DNS и Реклама:   AdGuard Home (0.0.0.0:53) -> Sing-Box (127.0.0.1:1053)"
-    echo " - Группы трафика:  5 селекторов (Приоритет #1: 🤖 Нейросети AI)"
+    echo " - Группы трафика:  5 селекторов (🤖 AI & Google | 🎮 Roblox | ▶️ YouTube & Spotify | 💬 Мессенджеры | 🌐 Остальной)"
     echo " - Веб-панель:      Zashboard"
     echo " - Логин AdGuard:   ${AGH_USER}"
     echo " - Единый пароль:   ${ADMIN_PASS}"
@@ -2894,7 +2815,7 @@ show_menu() {
         echo " 6) Полная перенастройка шлюза (Мастер установки)"
         echo " 7) Свои домены: добавить/очистить (В прокси / Напрямую)"
         echo " 8) Маршрутизация устройств по IP (Обход DIRECT / Full-VPN)"
-        echo " 9) Режим паузы / Бэкап и восстановление настроек"
+        echo " 9) Сервисный режим, смена пароля и резервное копирование"
         echo " 10) Автообновление (04:00) и Авто-Доктор (Watchdog)"
         echo " 11) Аппаратный Kill-Switch (защита от утечек при падении Sing-Box)"
         echo " 12) Сетевые настройки: IP шлюза / роутера + Умный DHCP Sidecar"
@@ -3109,10 +3030,10 @@ show_menu() {
                 ;;
             7)
                 echo "=== Пользовательские правила доменов ==="
-                echo "Домены В ПРОКСИ (${USER_PROXY_FILE}):"
+                echo "Домены В ПРОКСИ (${USER_PROXY_FILE} -> группа 🌐 Остальной трафик):"
                 cat "$USER_PROXY_FILE" 2>/dev/null || true
                 echo "----------------------------------------"
-                echo "Домены НАПРЯМУЮ (${USER_DIRECT_FILE}):"
+                echo "Домены НАПРЯМУЮ (${USER_DIRECT_FILE} -> DIRECT):"
                 cat "$USER_DIRECT_FILE" 2>/dev/null || true
                 echo "----------------------------------------"
                 echo " 1) Добавить домен В ПРОКСИ (например, +.example.com)"
@@ -3220,11 +3141,12 @@ show_menu() {
                 esac
                 ;;
             9)
-                echo "=== Сервисный режим и резервное копирование ==="
+                echo "=== Сервисный режим, смена пароля и резервное копирование ==="
                 echo " 1) Пауза: переключить весь трафик в DIRECT (без остановки DNS)"
                 echo " 2) Возобновить работу по правилам (mode: rule)"
                 echo " 3) Создать бэкап всех настроек и фильтров (${BACKUP_ARCHIVE})"
                 echo " 4) Восстановить настройки из бэкапа (${BACKUP_ARCHIVE})"
+                echo " 5) Сменить единый пароль (Sing-Box Zashboard + AdGuard Home)"
                 echo " 0) Назад"
                 printf "Выбор: "
                 read -r SRV_ACT < /dev/tty || true
@@ -3260,6 +3182,17 @@ show_menu() {
                             fi
                         else
                             echo "[X] Файл бэкапа ${BACKUP_ARCHIVE} не найден!"
+                        fi
+                        sleep 2
+                        ;;
+                    5)
+                        printf "Введите новый единый пароль (для Zashboard и AdGuard Home): "
+                        read -r NEW_P_IN < /dev/tty || true
+                        NEW_P_IN=$(printf "%s" "$NEW_P_IN" | tr -d '\r\n')
+                        if [ -n "$NEW_P_IN" ]; then
+                            change_unified_password "$NEW_P_IN" || true
+                        else
+                            echo "[X] Отмена: пароль не может быть пустым."
                         fi
                         sleep 2
                         ;;
