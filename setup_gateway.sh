@@ -1,31 +1,34 @@
-cat << 'EOF' > /tmp/setup_gateway.sh
 #!/bin/sh
 set -e
 
+# ==================== [ НАЧАЛО ЧАСТИ 1 ИЗ 4 ] ====================
 # ==============================================================================
-# Глобальные пути и переменные (OpenWrt 25.x + APK Edition — Октябрь 2026)
+# Глобальные пути и переменные (OpenWrt 25.x + APK — Sing-Box Extended Ноябрь 2026)
 # ==============================================================================
-MIHOMO_DIR="/etc/mihomo"
-MIHOMO_CONF="${MIHOMO_DIR}/config.yaml"
-MIHOMO_RULES_DIR="${MIHOMO_DIR}/rule_sets"
-MIHOMO_PROVIDERS_DIR="${MIHOMO_DIR}/proxy_providers"
-CUSTOM_SUB_FILE="${MIHOMO_PROVIDERS_DIR}/custom_sub.yaml"
-CUSTOM_NODES_FILE="${MIHOMO_PROVIDERS_DIR}/my_nodes.yaml"
-WARP_NODES_FILE="${MIHOMO_PROVIDERS_DIR}/warp_nodes.yaml"
-USER_DIRECT_FILE="${MIHOMO_RULES_DIR}/user_direct_domains.list"
-USER_PROXY_FILE="${MIHOMO_RULES_DIR}/user_proxy_domains.list"
-USER_BYPASS_IPS="${MIHOMO_DIR}/bypass_devices.conf"
-USER_FORCE_PROXY_IPS="${MIHOMO_DIR}/force_proxy_devices.conf"
+SB_DIR="/etc/sing-box"
+SB_CONF="${SB_DIR}/config.json"
+SB_ENV="${SB_DIR}/gateway.env"
+SB_RULES_DIR="${SB_DIR}/rule_sets"
+SB_PROVIDERS_DIR="${SB_DIR}/providers"
+CUSTOM_SUB_FILE="${SB_PROVIDERS_DIR}/custom_sub.yaml"
+CUSTOM_NODES_FILE="${SB_PROVIDERS_DIR}/my_nodes.yaml"
+WARP_NODES_FILE="${SB_PROVIDERS_DIR}/warp_nodes.json"
+USER_DIRECT_FILE="${SB_RULES_DIR}/user_direct_domains.list"
+USER_PROXY_FILE="${SB_RULES_DIR}/user_proxy_domains.list"
+USER_DIRECT_JSON="${SB_RULES_DIR}/user_direct_domains.json"
+USER_PROXY_JSON="${SB_RULES_DIR}/user_proxy_domains.json"
+USER_BYPASS_IPS="${SB_DIR}/bypass_devices.conf"
+USER_FORCE_PROXY_IPS="${SB_DIR}/force_proxy_devices.conf"
 BACKUP_ARCHIVE="/root/gateway_backup.tar.gz"
 CRON_FILE="/etc/crontabs/root"
 AUTOUPDATE_LOG="/var/log/gateway_autoupdate.log"
-UI_TYPE_FILE="/etc/mihomo/ui/.ui_type"
-UI_VER_FILE="/etc/mihomo/ui/.ui_version"
+UI_TYPE_FILE="${SB_DIR}/ui/.ui_type"
+UI_VER_FILE="${SB_DIR}/ui/.ui_version"
 AGH_CONF="/etc/AdGuardHome/AdGuardHome.yaml"
 SYSUPGRADE_CONF="/etc/sysupgrade.conf"
 SUB_FILTER_REGEX="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|осталось|трафик|истекает|подписк|тариф|инфо|новост|поддержк|канал|бот|t[.]me/)"
 GH_PROXY=""
-LATEST_MIHOMO_TAG=""
+LATEST_SB_TAG=""
 LATEST_AGH_TAG=""
 LATEST_UI_TAG=""
 
@@ -44,15 +47,11 @@ detect_os() {
     ARCH_RAW=$(uname -m)
     case "$ARCH_RAW" in
         x86_64)
-            if grep -q "avx2" /proc/cpuinfo 2>/dev/null; then
-                MIHOMO_ARCH="amd64-v3"
-            else
-                MIHOMO_ARCH="amd64-compatible"
-            fi
+            SB_ARCH="amd64"
             AGH_ARCH="amd64"
             ;;
         aarch64|arm64)
-            MIHOMO_ARCH="arm64"
+            SB_ARCH="arm64"
             AGH_ARCH="arm64"
             ;;
         *)
@@ -67,11 +66,11 @@ ensure_sysupgrade_persistence() {
     touch "$SYSUPGRADE_CONF" 2>/dev/null || return 0
     for item in \
         "/usr/bin/gateway" \
-        "/usr/bin/mihomo" \
+        "/usr/bin/sing-box" \
         "/usr/bin/AdGuardHome" \
-        "/etc/mihomo" \
+        "/etc/sing-box" \
         "/etc/AdGuardHome" \
-        "/etc/init.d/mihomo" \
+        "/etc/init.d/sing-box" \
         "/etc/init.d/adguardhome" \
         "/etc/sysctl.d/99-gateway-forward.conf" \
         "/etc/nftables.d"
@@ -80,14 +79,32 @@ ensure_sysupgrade_persistence() {
     done
 }
 
-# Отключение фонового демона apache (устанавливается как зависимость apache-utils для htpasswd)
-disable_apache_daemon() {
+# Очистка тяжелого веб-сервера apache (устанавливается по зависимостям apache-utils ради htpasswd)
+cleanup_apache_bloat() {
     for srv in apache apache2; do
         if [ -x "/etc/init.d/${srv}" ]; then
             "/etc/init.d/${srv}" stop >/dev/null 2>&1 || true
             "/etc/init.d/${srv}" disable >/dev/null 2>&1 || true
         fi
     done
+    if apk info -e apache >/dev/null 2>&1; then
+        apk del apache apache-utils >/dev/null 2>&1 || true
+    fi
+}
+
+# Отключение старого сервиса Mihomo при миграции на sing-box-extended
+disable_legacy_mihomo() {
+    if [ -x /etc/init.d/mihomo ]; then
+        /etc/init.d/mihomo stop >/dev/null 2>&1 || true
+        /etc/init.d/mihomo disable >/dev/null 2>&1 || true
+    fi
+    rm -f /etc/nftables.d/98-mihomo-mss-clamp.nft /etc/nftables.d/97-mihomo-anti-leak.nft 2>/dev/null || true
+}
+
+# Проверка валидности конфигурации sing-box-extended
+check_singbox_config() {
+    ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true \
+        /usr/bin/sing-box check -c "$SB_CONF" -D "$SB_DIR" >/dev/null 2>&1
 }
 
 # Определение параметров текущей выбранной веб-панели
@@ -95,68 +112,75 @@ detect_current_ui() {
     CUR_UI_TYPE=""
     if [ -f "$UI_TYPE_FILE" ]; then
         CUR_UI_TYPE=$(cat "$UI_TYPE_FILE" 2>/dev/null | tr -d ' \t\r\n')
-    elif grep -qi "zashboard" "$MIHOMO_CONF" 2>/dev/null; then
+    elif grep -qi "zashboard" "$SB_CONF" 2>/dev/null; then
         CUR_UI_TYPE="zashboard"
-    elif [ -f "$MIHOMO_CONF" ]; then
+    elif [ -f "$SB_CONF" ]; then
         CUR_UI_TYPE="metacubexd"
     fi
 
     if [ "$CUR_UI_TYPE" = "zashboard" ]; then
         CUR_UI_NAME="Zashboard"
         CUR_UI_REPO="Zephyruso/zashboard"
+        CUR_UI_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip"
         CUR_UI_TAR_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.tar.gz"
     else
         CUR_UI_TYPE="metacubexd"
         CUR_UI_NAME="MetaCubeXD"
         CUR_UI_REPO="MetaCubeX/metacubexd"
+        CUR_UI_URL="https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
         CUR_UI_TAR_URL="https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.tar.gz"
     fi
 }
 
 # Определение текущего режима блокировки рекламы и роли DNS
 detect_adblock_mode() {
-    MIHOMO_ADBLOCK="no"
+    SB_ADBLOCK="no"
     AGH_ADBLOCK="no"
     AGH_DNS_ACTIVE="no"
 
-    if [ -f "$MIHOMO_CONF" ] && grep -q '^[[:space:]]*- RULE-SET,ads_domain,' "$MIHOMO_CONF" 2>/dev/null; then
-        MIHOMO_ADBLOCK="yes"
+    if [ -f "$SB_CONF" ] && grep -q '"ads_domain"' "$SB_CONF" 2>/dev/null; then
+        SB_ADBLOCK="yes"
     fi
 
-    if grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null && pgrep AdGuardHome >/dev/null 2>&1; then
+    if grep -q '"listen_port": 1053' "$SB_CONF" 2>/dev/null && pgrep AdGuardHome >/dev/null 2>&1; then
         AGH_DNS_ACTIVE="yes"
         if [ -f "$AGH_CONF" ] && grep -q 'filtering_enabled:[[:space:]]*true' "$AGH_CONF" 2>/dev/null; then
             AGH_ADBLOCK="yes"
         fi
     fi
 
-    if [ "$AGH_DNS_ACTIVE" = "yes" ] && [ "$AGH_ADBLOCK" = "yes" ] && [ "$MIHOMO_ADBLOCK" = "yes" ]; then
+    if [ "$AGH_DNS_ACTIVE" = "yes" ] && [ "$AGH_ADBLOCK" = "yes" ] && [ "$SB_ADBLOCK" = "yes" ]; then
         ADBLOCK_MODE="both"
-        ADBLOCK_STAT="[AGH + Mihomo]"
-        ADBLOCK_DESC="двойной щит (DNS AGH + .mrs/SNI)"
+        ADBLOCK_STAT="[AGH + SingBox]"
+        ADBLOCK_DESC="двойной щит (DNS AGH + .srs/SNI)"
     elif [ "$AGH_DNS_ACTIVE" = "yes" ] && [ "$AGH_ADBLOCK" = "yes" ]; then
         ADBLOCK_MODE="agh"
-        ADBLOCK_STAT="[AdGuard Home]"
-        ADBLOCK_DESC="DNS и фильтрация через AGH"
-    elif [ "$MIHOMO_ADBLOCK" = "yes" ]; then
-        ADBLOCK_MODE="mihomo"
-        ADBLOCK_STAT="[Mihomo .mrs] "
-        ADBLOCK_DESC="DNS 0.0.0.0:53 + .mrs/SNI (AGH остановлен)"
+        ADBLOCK_STAT="[AdGuard Home] "
+        ADBLOCK_DESC="DNS и фильтрация через AGH (экономия ОЗУ)"
+    elif [ "$SB_ADBLOCK" = "yes" ]; then
+        ADBLOCK_MODE="singbox"
+        ADBLOCK_STAT="[SingBox .srs] "
+        ADBLOCK_DESC="DNS 0.0.0.0:53 + .srs/SNI (AGH остановлен)"
     else
         ADBLOCK_MODE="off"
-        ADBLOCK_STAT="[ВЫКЛЮЧЕНА]   "
+        ADBLOCK_STAT="[ВЫКЛЮЧЕНА]    "
         ADBLOCK_DESC="реклама и трекеры не режутся"
     fi
 }
 
 # Проверка, активны ли ноды Amnezia WARP
 is_warp_enabled() {
-    [ -f "$WARP_NODES_FILE" ] && grep -q "type: wireguard" "$WARP_NODES_FILE" 2>/dev/null
+    [ -f "$WARP_NODES_FILE" ] && grep -q '"type": "wireguard"' "$WARP_NODES_FILE" 2>/dev/null
+}
+
+# Проверка, есть ли пользовательские ноды в my_nodes.yaml
+has_my_nodes() {
+    [ -s "$CUSTOM_NODES_FILE" ] && ! grep -q '^proxies:[[:space:]]*\[\][[:space:]]*$' "$CUSTOM_NODES_FILE" 2>/dev/null
 }
 
 # Проверка состояния аппаратного Kill-Switch
 is_killswitch_enabled() {
-    [ -f /etc/nftables.d/97-mihomo-anti-leak.nft ] && grep -q "#KILLSWITCH_ACTIVE" /etc/nftables.d/97-mihomo-anti-leak.nft 2>/dev/null
+    [ -f /etc/nftables.d/97-singbox-anti-leak.nft ] && grep -q "#KILLSWITCH_ACTIVE" /etc/nftables.d/97-singbox-anti-leak.nft 2>/dev/null
 }
 
 # Настройка nftables (fw4): TCP MSS Clamping, перехват DNS 53, Блок IPv6/DoT/DoQ и Kill-Switch
@@ -172,21 +196,22 @@ sync_dns_firewall() {
     fi
 
     mkdir -p /etc/nftables.d
+    rm -f /etc/nftables.d/98-mihomo-mss-clamp.nft /etc/nftables.d/97-mihomo-anti-leak.nft 2>/dev/null || true
 
     # 1. Выравнивание TCP MSS (защита от PMTU Blackhole и детекта MTU в Sidecar-схеме)
-    cat << 'NFT_MSS' > /etc/nftables.d/98-mihomo-mss-clamp.nft
-chain mihomo_mss_clamp {
+    cat << 'NFT_MSS' > /etc/nftables.d/98-singbox-mss-clamp.nft
+chain singbox_mss_clamp {
     type filter hook forward priority mangle; policy accept;
-    oifname "mihomo-tun" tcp flags syn tcp option maxseg size set rt mtu
-    iifname "mihomo-tun" tcp flags syn tcp option maxseg size set rt mtu
+    oifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
+    iifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
 }
 NFT_MSS
 
     # 2. Защита от утечек (Anti-Leak): жесткий блок IPv6 форвардинга, DoT/DoQ (853) и опциональный Kill-Switch
     if [ "$KS_STATE" = "yes" ]; then
-        cat << 'NFT_LEAK_KS' > /etc/nftables.d/97-mihomo-anti-leak.nft
+        cat << 'NFT_LEAK_KS' > /etc/nftables.d/97-singbox-anti-leak.nft
 #KILLSWITCH_ACTIVE
-chain mihomo_anti_leak {
+chain singbox_anti_leak {
     type filter hook forward priority filter - 5; policy accept;
     meta nfproto ipv6 drop
     iifname "br-lan" meta l4proto { tcp, udp } th dport 853 reject
@@ -194,8 +219,8 @@ chain mihomo_anti_leak {
 }
 NFT_LEAK_KS
     else
-        cat << 'NFT_LEAK' > /etc/nftables.d/97-mihomo-anti-leak.nft
-chain mihomo_anti_leak {
+        cat << 'NFT_LEAK' > /etc/nftables.d/97-singbox-anti-leak.nft
+chain singbox_anti_leak {
     type filter hook forward priority filter - 5; policy accept;
     meta nfproto ipv6 drop
     iifname "br-lan" meta l4proto { tcp, udp } th dport 853 reject
@@ -203,7 +228,7 @@ chain mihomo_anti_leak {
 NFT_LEAK
     fi
 
-    # 3. Принудительный перехват любых сторонних DNS-запросов (зашитых 8.8.8.8 на Smart TV / IoT и запросов к основному роутеру)
+    # 3. Принудительный перехват любых сторонних DNS-запросов (зашитых 8.8.8.8 на Smart TV / IoT)
     if [ "$USE_DNS_REDIRECT" = "yes" ]; then
         cat << 'NFT_OWRT' > /etc/nftables.d/99-agh-dns-redirect.nft
 chain agh_dns_prerouting {
@@ -257,90 +282,901 @@ set_agh_filtering() {
     fi
 }
 
-# Подготовка и миграция меток #DNS_HIJACK и #ADBLOCK_MIHOMO в существующем config.yaml
-ensure_mihomo_config_tags() {
-    [ -f "$MIHOMO_CONF" ] || return 0
+# Чтение и сохранение параметров шлюза (gateway.env)
+load_gateway_env() {
+    GW_IP=""
+    USE_AGH="yes"
+    SELECTED_ADBLOCK="agh"
+    ADMIN_PASS=""
+    UI_TYPE="metacubexd"
+    PROVIDER_TYPE="http"
+    SUB_URL=""
 
-    # Исправление старого экранирования t\.me/ в существующем конфиге
-    sed -i 's/t\\\.me\//t[.]me\//g' "$MIHOMO_CONF" 2>/dev/null || true
-
-    if ! grep -q "#DNS_HIJACK" "$MIHOMO_CONF" 2>/dev/null; then
-        if grep -q "dns-hijack:" "$MIHOMO_CONF" 2>/dev/null; then
-            sed -i '/dns-hijack:/ s/$/ #DNS_HIJACK/' "$MIHOMO_CONF"
-            sed -i '/- "any:53"/ s/$/ #DNS_HIJACK/' "$MIHOMO_CONF"
-            sed -i '/- "tcp:\/\/any:53"/ s/$/ #DNS_HIJACK/' "$MIHOMO_CONF"
+    if [ -f "$SB_ENV" ]; then
+        # shellcheck disable=SC1090
+        . "$SB_ENV"
+    elif [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
+        GW_IP=$(jq -r '.dns.servers[] | select(.tag=="dns_local") | .server // empty' "$SB_CONF" 2>/dev/null | head -n 1)
+        ADMIN_PASS=$(jq -r '.experimental.clash_api.secret // empty' "$SB_CONF" 2>/dev/null | head -n 1)
+        SUB_URL=$(jq -r '.providers[]? | select(.tag=="custom_sub") | .url // empty' "$SB_CONF" 2>/dev/null | head -n 1)
+        P_TYPE=$(jq -r '.providers[]? | select(.tag=="custom_sub") | .type // empty' "$SB_CONF" 2>/dev/null | head -n 1)
+        if [ -z "$P_TYPE" ] && is_warp_enabled; then
+            PROVIDER_TYPE="warp"
+            SUB_URL="file://warp_nodes.json (Amnezia WARP 2.0)"
+        elif [ "$P_TYPE" = "local" ]; then
+            PROVIDER_TYPE="file"
+            SUB_URL="file://custom_sub.yaml"
         else
-            awk '
-                /^[[:space:]]*udp-timeout:/ {
-                    print
-                    print "#  dns-hijack: #DNS_HIJACK"
-                    print "#    - \"any:53\" #DNS_HIJACK"
-                    print "#    - \"tcp://any:53\" #DNS_HIJACK"
-                    next
-                }
-                { print }
-            ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
+            PROVIDER_TYPE="http"
+        fi
+        if grep -q '"listen_port": 1053' "$SB_CONF" 2>/dev/null; then
+            USE_AGH="yes"
+        else
+            USE_AGH="no"
+        fi
+        detect_adblock_mode
+        SELECTED_ADBLOCK="$ADBLOCK_MODE"
+        detect_current_ui
+        UI_TYPE="$CUR_UI_TYPE"
+    fi
+
+    [ -z "$GW_IP" ] && GW_IP=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}')
+    [ -z "$ADMIN_PASS" ] && ADMIN_PASS="admin"
+}
+
+save_gateway_env() {
+    mkdir -p "$SB_DIR"
+    cat << ENV_EOF > "$SB_ENV"
+GW_IP='${GW_IP}'
+USE_AGH='${USE_AGH}'
+SELECTED_ADBLOCK='${SELECTED_ADBLOCK}'
+ADMIN_PASS='${ADMIN_PASS}'
+UI_TYPE='${UI_TYPE}'
+PROVIDER_TYPE='${PROVIDER_TYPE}'
+SUB_URL='${SUB_URL}'
+ENV_EOF
+}
+
+# Компиляция текстовых пользовательских списков доменов (.list) в JSON rule-set (version 3)
+sync_user_domain_rulesets() {
+    mkdir -p "$SB_RULES_DIR"
+    [ -f "$USER_DIRECT_FILE" ] || echo "+.localdomain" > "$USER_DIRECT_FILE"
+    [ -f "$USER_PROXY_FILE" ] || echo "+.chatgpt.com" > "$USER_PROXY_FILE"
+
+    if command -v jq >/dev/null 2>&1; then
+        sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^+\.//;s/^\.//' "$USER_DIRECT_FILE" 2>/dev/null | grep -v '^$' | \
+            jq -R . | jq -s '{version: 3, rules: [{domain_suffix: (if length > 0 then . else ["localdomain"] end)}]}' > "${USER_DIRECT_JSON}.tmp" && \
+            mv "${USER_DIRECT_JSON}.tmp" "$USER_DIRECT_JSON"
+
+        sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^+\.//;s/^\.//' "$USER_PROXY_FILE" 2>/dev/null | grep -v '^$' | \
+            jq -R . | jq -s '{version: 3, rules: [{domain_suffix: (if length > 0 then . else ["chatgpt.com"] end)}]}' > "${USER_PROXY_JSON}.tmp" && \
+            mv "${USER_PROXY_JSON}.tmp" "$USER_PROXY_JSON"
+    else
+        cat << 'J_DIR' > "$USER_DIRECT_JSON"
+{"version":3,"rules":[{"domain_suffix":["localdomain"]}]}
+J_DIR
+        cat << 'J_PRX' > "$USER_PROXY_JSON"
+{"version":3,"rules":[{"domain_suffix":["chatgpt.com"]}]}
+J_PRX
+    fi
+}
+
+# Сборка JSON-массивов IP-адресов устройств (DIRECT и Full-VPN)
+get_ip_cidr_json_array() {
+    SRC_FILE="$1"
+    if [ ! -s "$SRC_FILE" ] || ! command -v jq >/dev/null 2>&1; then
+        printf "[]"
+        return 0
+    fi
+    awk '{
+        gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", $0);
+        if ($0 != "") {
+            if (index($0, "/") == 0) print $0 "/32";
+            else print $0;
+        }
+    }' "$SRC_FILE" | jq -R . | jq -s .
+}
+# ==================== [ КОНЕЦ ЧАСТИ 1 ИЗ 4 ] =====================
+
+# ==================== [ НАЧАЛО ЧАСТИ 2 ИЗ 4 ] ====================
+# Генерация эталонного /etc/sing-box/config.json для shtorm-7/sing-box-extended (1.14.x)
+generate_singbox_config() {
+    check_github_mirror
+    sync_user_domain_rulesets
+    detect_current_ui
+
+    if [ "$UI_TYPE" = "zashboard" ]; then
+        UI_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip"
+    else
+        UI_URL="https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
+    fi
+
+    if [ "$USE_AGH" = "yes" ]; then
+        DNS_IN_LISTEN="127.0.0.1"
+        DNS_IN_PORT=1053
+    else
+        DNS_IN_LISTEN="0.0.0.0"
+        DNS_IN_PORT=53
+    fi
+
+    # Динамическая сборка провайдеров подписок (custom_sub и my_nodes)
+    PROVIDERS_JSON_ITEMS=""
+    PROVIDER_TAGS_ITEMS=""
+
+    if [ "$PROVIDER_TYPE" = "http" ] && [ -n "$SUB_URL" ]; then
+        CUSTOM_SUB_JSON=$(cat << SUB_REM
+    {
+      "tag": "custom_sub",
+      "type": "remote",
+      "url": "${SUB_URL}",
+      "update_interval": "24h",
+      "download_detour": "DIRECT",
+      "exclude": "${SUB_FILTER_REGEX}",
+      "health_check": {
+        "enabled": true,
+        "url": "https://www.gstatic.com/generate_204",
+        "interval": "3m",
+        "timeout": "5s"
+      }
+    }
+SUB_REM
+)
+        PROVIDERS_JSON_ITEMS="$CUSTOM_SUB_JSON"
+        PROVIDER_TAGS_ITEMS='"custom_sub"'
+    elif [ "$PROVIDER_TYPE" = "file" ]; then
+        CUSTOM_SUB_JSON=$(cat << SUB_LOC
+    {
+      "tag": "custom_sub",
+      "type": "local",
+      "path": "${CUSTOM_SUB_FILE}",
+      "health_check": {
+        "enabled": true,
+        "url": "https://www.gstatic.com/generate_204",
+        "interval": "3m",
+        "timeout": "5s"
+      }
+    }
+SUB_LOC
+)
+        PROVIDERS_JSON_ITEMS="$CUSTOM_SUB_JSON"
+        PROVIDER_TAGS_ITEMS='"custom_sub"'
+    fi
+
+    if has_my_nodes; then
+        MY_NODES_JSON=$(cat << MY_LOC
+    {
+      "tag": "my_nodes",
+      "type": "local",
+      "path": "${CUSTOM_NODES_FILE}",
+      "health_check": {
+        "enabled": true,
+        "url": "https://www.gstatic.com/generate_204",
+        "interval": "3m",
+        "timeout": "5s"
+      }
+    }
+MY_LOC
+)
+        if [ -n "$PROVIDERS_JSON_ITEMS" ]; then
+            PROVIDERS_JSON_ITEMS="${PROVIDERS_JSON_ITEMS},
+${MY_NODES_JSON}"
+            PROVIDER_TAGS_ITEMS="${PROVIDER_TAGS_ITEMS}, \"my_nodes\""
+        else
+            PROVIDERS_JSON_ITEMS="$MY_NODES_JSON"
+            PROVIDER_TAGS_ITEMS='"my_nodes"'
         fi
     fi
 
-    if ! grep -q "#ADBLOCK_MIHOMO" "$MIHOMO_CONF" 2>/dev/null; then
-        if grep -q "ads_domain:" "$MIHOMO_CONF" 2>/dev/null; then
-            awk '
-                /^  - name: "🛑 Реклама"/ { in_ag=3 }
-                in_ag > 0 { print $0 " #ADBLOCK_MIHOMO"; in_ag--; next }
-                /^  ads_domain:/ { in_ap=4 }
-                in_ap > 0 { print $0 " #ADBLOCK_MIHOMO"; in_ap--; next }
-                /^  telemetry_domain:/ { in_tp=4 }
-                in_tp > 0 { print $0 " #ADBLOCK_MIHOMO"; in_tp--; next }
-                /RULE-SET,(ads_domain|telemetry_domain),/ { print $0 " #ADBLOCK_MIHOMO"; next }
-                { print }
-            ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
-        else
-            check_github_mirror
-            awk -v gh="$GH_PROXY" '
-                /^  - name: "🇷🇺 Россия"/ {
-                    print "#  - name: \"🛑 Реклама\" #ADBLOCK_MIHOMO"
-                    print "#    type: select #ADBLOCK_MIHOMO"
-                    print "#    proxies: [REJECT, REJECT-DROP, DIRECT] #ADBLOCK_MIHOMO"
-                }
-                /^  ai_domain:/ {
-                    print "#  ads_domain: #ADBLOCK_MIHOMO"
-                    print "#    <<: *mrs_domain #ADBLOCK_MIHOMO"
-                    print "#    path: ./rule_sets/category-ads-all.mrs #ADBLOCK_MIHOMO"
-                    print "#    url: \"" gh "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ads-all.mrs\" #ADBLOCK_MIHOMO"
-                    print "#  telemetry_domain: #ADBLOCK_MIHOMO"
-                    print "#    <<: *mrs_domain #ADBLOCK_MIHOMO"
-                    print "#    path: ./rule_sets/category-telemetry.mrs #ADBLOCK_MIHOMO"
-                    print "#    url: \"" gh "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-telemetry.mrs\" #ADBLOCK_MIHOMO"
-                }
-                /^  - RULE-SET,private_ip,DIRECT,no-resolve/ {
-                    print
-                    print "#  - RULE-SET,ads_domain,🛑 Реклама #ADBLOCK_MIHOMO"
-                    print "#  - RULE-SET,telemetry_domain,🛑 Реклама #ADBLOCK_MIHOMO"
-                    next
-                }
-                { print }
-            ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
-        fi
+    PROVIDER_TAGS_JSON="[${PROVIDER_TAGS_ITEMS}]"
+
+    BYPASS_IPS_ARR=$(get_ip_cidr_json_array "$USER_BYPASS_IPS")
+    FORCE_IPS_ARR=$(get_ip_cidr_json_array "$USER_FORCE_PROXY_IPS")
+
+    BYPASS_ROUTE_RULE=""
+    if [ "$BYPASS_IPS_ARR" != "[]" ]; then
+        BYPASS_ROUTE_RULE="{\"source_ip_cidr\": ${BYPASS_IPS_ARR}, \"outbound\": \"DIRECT\"},"
     fi
 
-    # Авто-миграция конфига для поддержки пула warp_nodes, если конфиг от старой версии
-    if ! grep -q "warp_nodes:" "$MIHOMO_CONF" 2>/dev/null; then
-        awk '
-            /^  my_nodes:/ {
-                print "  warp_nodes:"
-                print "    type: file"
-                print "    path: ./proxy_providers/warp_nodes.yaml"
-                print "    health-check: *hc_default"
-                print "    override:"
-                print "      udp: true"
-            }
-            {
-                gsub(/use: \[custom_sub, my_nodes\]/, "use: [custom_sub, my_nodes, warp_nodes]")
-                print
-            }
-        ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
+    FORCE_ROUTE_RULE=""
+    if [ "$FORCE_IPS_ARR" != "[]" ]; then
+        FORCE_ROUTE_RULE="{\"source_ip_cidr\": ${FORCE_IPS_ARR}, \"outbound\": \"📺 Устройства (Full-VPN)\"},"
     fi
+
+    if [ "$SELECTED_ADBLOCK" = "singbox" ] || [ "$SELECTED_ADBLOCK" = "both" ]; then
+        DNS_ADBLOCK_RULE='{"rule_set": ["ads_domain", "telemetry_domain"], "action": "reject"},'
+        ROUTE_ADBLOCK_RULE='{"rule_set": ["ads_domain", "telemetry_domain"], "action": "reject"},'
+        RULESET_ADBLOCK_JSON=$(cat << ADB_RS
+      {
+        "tag": "ads_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ads-all.srs"
+      },
+      {
+        "tag": "telemetry_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-telemetry.srs"
+      },
+ADB_RS
+)
+    else
+        DNS_ADBLOCK_RULE=""
+        ROUTE_ADBLOCK_RULE=""
+        RULESET_ADBLOCK_JSON=""
+    fi
+
+    [ -f "$SB_CONF" ] && cp -f "$SB_CONF" "${SB_CONF}.bak"
+
+    cat << CONFIG_EOF > "${SB_CONF}.tmp"
+{
+  "log": {
+    "level": "warn",
+    "timestamp": true
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "/etc/sing-box/cache.db",
+      "store_fakeip": true
+    },
+    "clash_api": {
+      "external_controller": "0.0.0.0:9090",
+      "external_ui": "/etc/sing-box/ui",
+      "external_ui_download_url": "${GH_PROXY}${UI_URL}",
+      "secret": "${ADMIN_PASS}",
+      "default_mode": "rule"
+    },
+    "unified_delay": {
+      "enabled": true
+    }
+  },
+  "http_clients": [
+    {
+      "tag": "default"
+    }
+  ],
+  "dns": {
+    "servers": [
+      {
+        "tag": "dns_proxy",
+        "type": "https",
+        "server": "1.1.1.1",
+        "server_port": 443,
+        "path": "/dns-query",
+        "detour": "⚡ Авто (Самый быстрый)"
+      },
+      {
+        "tag": "dns_ru",
+        "type": "udp",
+        "server": "77.88.8.8",
+        "server_port": 53
+      },
+      {
+        "tag": "dns_local",
+        "type": "udp",
+        "server": "${GW_IP}",
+        "server_port": 53
+      },
+      {
+        "tag": "dns_fakeip",
+        "type": "fakeip",
+        "inet4_range": "198.18.0.0/15"
+      }
+    ],
+    "rules": [
+      ${DNS_ADBLOCK_RULE}
+      {
+        "clash_mode": "direct",
+        "server": "dns_ru"
+      },
+      {
+        "domain_suffix": [
+          ".lan",
+          ".local",
+          ".home.arpa",
+          ".internal",
+          ".localdomain",
+          ".in-addr.arpa"
+        ],
+        "server": "dns_local"
+      },
+      {
+        "rule_set": [
+          "private_domain"
+        ],
+        "server": "dns_local"
+      },
+      {
+        "domain_suffix": [
+          "msftconnecttest.com",
+          "msftncsi.com",
+          "connectivitycheck.gstatic.com",
+          "connectivitycheck.android.com",
+          "captive.apple.com",
+          "push.apple.com",
+          "courier.push.apple.com",
+          "tailscale.com",
+          "steamcontent.com",
+          "xboxlive.com",
+          "stun.playstation.net",
+          "srv.nintendo.net"
+        ],
+        "server": "dns_ru"
+      },
+      {
+        "rule_set": [
+          "ntp_domain",
+          "stun_domain",
+          "torrent_domain",
+          "user_direct_domains",
+          "ru_domain"
+        ],
+        "server": "dns_ru"
+      },
+      {
+        "query_type": [
+          "A"
+        ],
+        "server": "dns_fakeip",
+        "rewrite_ttl": 1
+      }
+    ],
+    "final": "dns_proxy",
+    "strategy": "ipv4_only",
+    "reverse_mapping": true
+  },
+  "inbounds": [
+    {
+      "type": "direct",
+      "tag": "dns-in",
+      "listen": "${DNS_IN_LISTEN}",
+      "listen_port": ${DNS_IN_PORT}
+    },
+    {
+      "type": "mixed",
+      "tag": "mixed-in",
+      "listen": "0.0.0.0",
+      "listen_port": 7890
+    },
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "singbox-tun",
+      "address": [
+        "172.19.0.1/30"
+      ],
+      "mtu": 1492,
+      "auto_route": true,
+      "auto_redirect": true,
+      "strict_route": true,
+      "stack": "mixed",
+      "udp_timeout": "5m"
+    }
+  ],
+  "providers": [
+${PROVIDERS_JSON_ITEMS}
+  ],
+  "outbounds": [
+    {
+      "type": "urltest",
+      "tag": "⚡ Авто (Самый быстрый)",
+      "providers": ${PROVIDER_TAGS_JSON},
+      "url": "https://www.gstatic.com/generate_204",
+      "interval": "3m",
+      "tolerance": 35,
+      "idle_timeout": "30m"
+    },
+    {
+      "type": "urltest",
+      "tag": "🛡️ Авто-резерв (Fallback)",
+      "providers": ${PROVIDER_TAGS_JSON},
+      "url": "https://cp.cloudflare.com/generate_204",
+      "interval": "5m",
+      "tolerance": 150,
+      "idle_timeout": "30m"
+    },
+    {
+      "type": "selector",
+      "tag": "🔓 Обход блокировок",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "🛡️ Авто-резерв (Fallback)",
+        "🐟 Прочий трафик",
+        "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "☁️ Cloudflare & CDN",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "🛡️ Авто-резерв (Fallback)",
+        "🔓 Обход блокировок",
+        "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "▶️ YouTube",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "🛡️ Авто-резерв (Fallback)"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "🤖 Нейросети (AI)",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "🛡️ Авто-резерв (Fallback)"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "👾 Discord & Игры",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "🛡️ Авто-резерв (Fallback)",
+        "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "💬 Мессенджеры & Связь",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "🛡️ Авто-резерв (Fallback)",
+        "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "🎵 Spotify",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "🛡️ Авто-резерв (Fallback)",
+        "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "📺 Устройства (Full-VPN)",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "🛡️ Авто-резерв (Fallback)",
+        "🔓 Обход блокировок",
+        "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "🧲 Торренты",
+      "outbounds": [
+        "DIRECT",
+        "⚡ Авто (Самый быстрый)"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "🇷🇺 Россия",
+      "outbounds": [
+        "DIRECT",
+        "⚡ Авто (Самый быстрый)"
+      ]
+    },
+    {
+      "type": "selector",
+      "tag": "🐟 Прочий трафик",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "🛡️ Авто-резерв (Fallback)",
+        "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "direct",
+      "tag": "DIRECT"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_http_client": "default",
+    "default_domain_resolver": {
+      "server": "dns_ru",
+      "strategy": "ipv4_only"
+    },
+    "final": "🐟 Прочий трафик",
+    "rules": [
+      {
+        "inbound": [
+          "dns-in"
+        ],
+        "action": "hijack-dns"
+      },
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "clash_mode": "direct",
+        "outbound": "DIRECT"
+      },
+      {
+        "clash_mode": "global",
+        "outbound": "⚡ Авто (Самый быстрый)"
+      },
+      {
+        "ip_is_private": true,
+        "outbound": "DIRECT"
+      },
+      {
+        "rule_set": [
+          "private_domain",
+          "private_ip"
+        ],
+        "outbound": "DIRECT"
+      },
+      ${BYPASS_ROUTE_RULE}
+      {
+        "rule_set": [
+          "user_direct_domains"
+        ],
+        "outbound": "DIRECT"
+      },
+      {
+        "rule_set": [
+          "user_proxy_domains"
+        ],
+        "outbound": "🔓 Обход блокировок"
+      },
+      {
+        "port": [
+          853
+        ],
+        "action": "reject"
+      },
+      {
+        "port": [
+          123
+        ],
+        "outbound": "DIRECT"
+      },
+      {
+        "rule_set": [
+          "ntp_domain"
+        ],
+        "outbound": "DIRECT"
+      },
+      ${ROUTE_ADBLOCK_RULE}
+      {
+        "protocol": [
+          "bittorrent"
+        ],
+        "outbound": "🧲 Торренты"
+      },
+      {
+        "rule_set": [
+          "torrent_domain"
+        ],
+        "outbound": "🧲 Торренты"
+      },
+      {
+        "port_range": [
+          "6881:6889"
+        ],
+        "outbound": "🧲 Торренты"
+      },
+      ${FORCE_ROUTE_RULE}
+      {
+        "rule_set": [
+          "youtube_domain",
+          "ai_domain",
+          "ru_bundle"
+        ],
+        "network": [
+          "udp"
+        ],
+        "port": [
+          443
+        ],
+        "action": "reject"
+      },
+      {
+        "rule_set": [
+          "ai_domain"
+        ],
+        "outbound": "🤖 Нейросети (AI)"
+      },
+      {
+        "rule_set": [
+          "spotify_domain"
+        ],
+        "outbound": "🎵 Spotify"
+      },
+      {
+        "rule_set": [
+          "youtube_domain"
+        ],
+        "outbound": "▶️ YouTube"
+      },
+      {
+        "rule_set": [
+          "roblox_domain",
+          "discord_domain",
+          "discord_voice_ip"
+        ],
+        "outbound": "👾 Discord & Игры"
+      },
+      {
+        "rule_set": [
+          "stun_domain",
+          "communication_domain",
+          "telegram_ip"
+        ],
+        "outbound": "💬 Мессенджеры & Связь"
+      },
+      {
+        "rule_set": [
+          "ru_bundle",
+          "refilter_ip"
+        ],
+        "outbound": "🔓 Обход блокировок"
+      },
+      {
+        "rule_set": [
+          "cloudflare_domain",
+          "cloudflare_ip"
+        ],
+        "outbound": "☁️ Cloudflare & CDN"
+      },
+      {
+        "rule_set": [
+          "ru_domain",
+          "ru_ip"
+        ],
+        "outbound": "🇷🇺 Россия"
+      },
+      {
+        "network": [
+          "udp"
+        ],
+        "port_range": [
+          "50000:50100"
+        ],
+        "outbound": "👾 Discord & Игры"
+      },
+      {
+        "network": [
+          "udp"
+        ],
+        "port": [
+          3478,
+          5349,
+          19302
+        ],
+        "outbound": "💬 Мессенджеры & Связь"
+      }
+    ],
+    "rule_set": [
+      {
+        "tag": "user_direct_domains",
+        "type": "local",
+        "format": "source",
+        "path": "${USER_DIRECT_JSON}"
+      },
+      {
+        "tag": "user_proxy_domains",
+        "type": "local",
+        "format": "source",
+        "path": "${USER_PROXY_JSON}"
+      },
+      {
+        "tag": "private_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/private.srs"
+      },
+      {
+        "tag": "private_ip",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/private.srs"
+      },
+      {
+        "tag": "ntp_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ntp.srs"
+      },
+      {
+        "tag": "stun_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-stun.srs"
+      },
+${RULESET_ADBLOCK_JSON}
+      {
+        "tag": "ai_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ai-!cn.srs"
+      },
+      {
+        "tag": "spotify_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/spotify.srs"
+      },
+      {
+        "tag": "torrent_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/tracker.srs"
+      },
+      {
+        "tag": "youtube_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/youtube.srs"
+      },
+      {
+        "tag": "roblox_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/roblox.srs"
+      },
+      {
+        "tag": "discord_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/discord.srs"
+      },
+      {
+        "tag": "discord_voice_ip",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/sb-rule-sets/main/discord-voice-ip-list.srs"
+      },
+      {
+        "tag": "communication_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-communication.srs"
+      },
+      {
+        "tag": "telegram_ip",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/telegram.srs"
+      },
+      {
+        "tag": "cloudflare_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cloudflare.srs"
+      },
+      {
+        "tag": "cloudflare_ip",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cloudflare.srs"
+      },
+      {
+        "tag": "ru_bundle",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/sb-rule-sets/main/ru-bundle.srs"
+      },
+      {
+        "tag": "refilter_ip",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/sb-rule-sets/main/rknasnblock.srs"
+      },
+      {
+        "tag": "ru_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ru.srs"
+      },
+      {
+        "tag": "ru_ip",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/ru.srs"
+      }
+    ]
+  }
+}
+CONFIG_EOF
+
+    # Подключение секции .endpoints и отдельной группы "☁️ Amnezia WARP" для полной совместимости с подписками
+    if command -v jq >/dev/null 2>&1; then
+        if is_warp_enabled; then
+            if [ -n "$PROVIDER_TAGS_ITEMS" ]; then
+                jq --slurpfile w "$WARP_NODES_FILE" '
+                    .endpoints = $w[0].outbounds
+                    | (.outbounds[] | select(.type == "selector" and .providers != null) | .outbounds) += ["☁️ Amnezia WARP"]
+                    | .outbounds = (
+                        .outbounds[0:2] + [{
+                            "type": "urltest",
+                            "tag": "☁️ Amnezia WARP",
+                            "outbounds": ($w[0].outbounds | map(.tag)),
+                            "url": "https://cp.cloudflare.com/generate_204",
+                            "interval": "3m",
+                            "tolerance": 50,
+                            "idle_timeout": "30m"
+                        }] + .outbounds[2:]
+                    )
+                ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
+            else
+                jq --slurpfile w "$WARP_NODES_FILE" '
+                    del(.providers)
+                    | .endpoints = $w[0].outbounds
+                    | (.outbounds[] | select(.providers != null)) |= (
+                        del(.providers)
+                        | .outbounds = ((.outbounds // []) + ($w[0].outbounds | map(.tag)))
+                    )
+                    | .outbounds = (
+                        .outbounds[0:2] + [{
+                            "type": "urltest",
+                            "tag": "☁️ Amnezia WARP",
+                            "outbounds": ($w[0].outbounds | map(.tag)),
+                            "url": "https://cp.cloudflare.com/generate_204",
+                            "interval": "3m",
+                            "tolerance": 50,
+                            "idle_timeout": "30m"
+                        }] + .outbounds[2:]
+                    )
+                ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
+            fi
+        elif [ -z "$PROVIDER_TAGS_ITEMS" ]; then
+            jq '
+                del(.providers)
+                | (.outbounds[] | select(.providers != null)) |= del(.providers)
+            ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
+        else
+            jq . "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
+        fi
+    else
+        mv -f "${SB_CONF}.tmp" "$SB_CONF"
+    fi
+    save_gateway_env
 }
 
 # Автоустановка и инициализация AdGuard Home
@@ -351,20 +1187,16 @@ ensure_agh_installed() {
     fi
 
     if [ ! -f "$AGH_CONF" ]; then
-        GW_IP_CUR=$(sed -n 's/^[[:space:]]*"+\.lan":[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" 2>/dev/null | head -n 1 | tr -d ' \t\r\n')
-        [ -z "$GW_IP_CUR" ] && GW_IP_CUR=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}')
-        PASS_CUR=$(sed -n 's/^secret:[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" 2>/dev/null | head -n 1 | tr -d '\r\n')
-        [ -z "$PASS_CUR" ] && PASS_CUR="admin"
-
+        load_gateway_env
         if ! command -v htpasswd >/dev/null 2>&1; then
             apk update --allow-untrusted >/dev/null 2>&1 || true
             apk add --allow-untrusted apache-utils >/dev/null 2>&1 || true
-            disable_apache_daemon
         fi
 
-        AGH_PASS_HASH=$(printf "%s\n" "$PASS_CUR" | htpasswd -inBC 10 "admin" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
-        [ -z "$AGH_PASS_HASH" ] && AGH_PASS_HASH=$(htpasswd -nbBC 10 "admin" "$PASS_CUR" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
+        AGH_PASS_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "admin" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
+        [ -z "$AGH_PASS_HASH" ] && AGH_PASS_HASH=$(htpasswd -nbBC 10 "admin" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
         [ -z "$AGH_PASS_HASH" ] && AGH_PASS_HASH='$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi'
+        cleanup_apache_bloat
 
         mkdir -p /etc/AdGuardHome/data
         cat << AGH_EOF > "$AGH_CONF"
@@ -382,14 +1214,14 @@ dns:
   bind_hosts: [0.0.0.0]
   port: 53
   upstream_dns: [127.0.0.1:1053]
-  bootstrap_dns: [${GW_IP_CUR}, 77.88.8.8, 77.88.8.1]
+  bootstrap_dns: [${GW_IP}, 77.88.8.8, 77.88.8.1]
   upstream_mode: load_balance
   cache_enabled: false
   cache_size: 0
   aaaa_disabled: true
   enable_dnssec: false
   use_private_ptr_resolvers: true
-  local_ptr_upstreams: [${GW_IP_CUR}:53]
+  local_ptr_upstreams: [${GW_IP}:53]
   serve_plain_dns: true
   pending_requests: { enabled: true }
 tls: { enabled: false }
@@ -425,30 +1257,27 @@ INIT_AGH
     fi
 }
 
-# Применение выбранного режима блокировки рекламы и роли DNS (agh | mihomo | both | off)
+# Применение выбранного режима блокировки рекламы и роли DNS (agh | singbox | both | off)
 apply_adblock_mode() {
     MODE="$1"
-    [ -f "$MIHOMO_CONF" ] || return 0
-    cp -f "$MIHOMO_CONF" "${MIHOMO_CONF}.bak"
-    ensure_mihomo_config_tags
+    [ -f "$SB_CONF" ] || return 0
+    load_gateway_env
 
     case "$MODE" in
-        mihomo)
-            echo "Остановка AdGuard Home и передача роли DNS (0.0.0.0:53) в Mihomo..."
+        singbox)
+            echo "Остановка AdGuard Home и передача роли DNS (0.0.0.0:53) в Sing-Box Extended..."
             /etc/init.d/adguardhome stop 2>/dev/null || true
             /etc/init.d/adguardhome disable 2>/dev/null || true
-            sync_dns_firewall "yes" "keep"
-
-            sed -i 's/^[[:space:]]*listen:[[:space:]]*127\.0\.0\.1:1053/  listen: 0.0.0.0:53/' "$MIHOMO_CONF"
-            sed -i '/#DNS_HIJACK$/ s/^#*//' "$MIHOMO_CONF"
-            sed -i '/#ADBLOCK_MIHOMO$/ s/^#*//' "$MIHOMO_CONF"
-
-            if /usr/bin/mihomo -d "$MIHOMO_DIR" -t >/dev/null 2>&1; then
-                /etc/init.d/mihomo restart 2>/dev/null || true
-                echo "[✓] AdGuard Home остановлен. Mihomo принял на себя роль DNS (0.0.0.0:53) и блокировку рекламы (.mrs + SNI)."
+            USE_AGH="no"
+            SELECTED_ADBLOCK="singbox"
+            generate_singbox_config
+            if check_singbox_config; then
+                /etc/init.d/sing-box restart 2>/dev/null || true
+                sync_dns_firewall "yes" "keep"
+                echo "[✓] AdGuard Home остановлен. Sing-Box принял на себя роль DNS (0.0.0.0:53) и блокировку рекламы (.srs + SNI)."
             else
-                mv "${MIHOMO_CONF}.bak" "$MIHOMO_CONF"
-                echo "[X] Ошибка проверки конфига Mihomo! Выполнен авто-откат."
+                mv "${SB_CONF}.bak" "$SB_CONF"
+                echo "[X] Ошибка проверки конфига Sing-Box! Выполнен авто-откат."
                 return 1
             fi
             ;;
@@ -456,41 +1285,39 @@ apply_adblock_mode() {
         agh)
             echo "Переключение DNS и фильтрации рекламы на AdGuard Home..."
             ensure_agh_installed
-            sed -i 's/^[[:space:]]*listen:[[:space:]]*0\.0\.0\.0:53/  listen: 127.0.0.1:1053/' "$MIHOMO_CONF"
-            sed -i '/#DNS_HIJACK$/ s/^#*/#/' "$MIHOMO_CONF"
-            sed -i '/#ADBLOCK_MIHOMO$/ s/^#*/#/' "$MIHOMO_CONF"
-
-            if /usr/bin/mihomo -d "$MIHOMO_DIR" -t >/dev/null 2>&1; then
-                /etc/init.d/mihomo restart 2>/dev/null || true
+            USE_AGH="yes"
+            SELECTED_ADBLOCK="agh"
+            generate_singbox_config
+            if check_singbox_config; then
+                /etc/init.d/sing-box restart 2>/dev/null || true
                 set_agh_filtering "true"
                 /etc/init.d/adguardhome enable 2>/dev/null || true
                 /etc/init.d/adguardhome restart 2>/dev/null || true
                 sync_dns_firewall "yes" "keep"
-                echo "[✓] Роль DNS (0.0.0.0:53) и фильтрация рекламы переданы AdGuard Home (Mihomo переведен на 127.0.0.1:1053)."
+                echo "[✓] Роль DNS (0.0.0.0:53) и фильтрация переданы AdGuard Home (списки рекламы в Sing-Box выгружены для экономии ОЗУ)."
             else
-                mv "${MIHOMO_CONF}.bak" "$MIHOMO_CONF"
-                echo "[X] Ошибка проверки конфига Mihomo! Выполнен авто-откат."
+                mv "${SB_CONF}.bak" "$SB_CONF"
+                echo "[X] Ошибка проверки конфига Sing-Box! Выполнен авто-откат."
                 return 1
             fi
             ;;
 
         both)
-            echo "Включение режима двойного щита (DNS AdGuard Home + правила .mrs в Mihomo)..."
+            echo "Включение режима двойного щита (DNS AdGuard Home + правила .srs в Sing-Box)..."
             ensure_agh_installed
-            sed -i 's/^[[:space:]]*listen:[[:space:]]*0\.0\.0\.0:53/  listen: 127.0.0.1:1053/' "$MIHOMO_CONF"
-            sed -i '/#DNS_HIJACK$/ s/^#*/#/' "$MIHOMO_CONF"
-            sed -i '/#ADBLOCK_MIHOMO$/ s/^#*//' "$MIHOMO_CONF"
-
-            if /usr/bin/mihomo -d "$MIHOMO_DIR" -t >/dev/null 2>&1; then
-                /etc/init.d/mihomo restart 2>/dev/null || true
+            USE_AGH="yes"
+            SELECTED_ADBLOCK="both"
+            generate_singbox_config
+            if check_singbox_config; then
+                /etc/init.d/sing-box restart 2>/dev/null || true
                 set_agh_filtering "true"
                 /etc/init.d/adguardhome enable 2>/dev/null || true
                 /etc/init.d/adguardhome restart 2>/dev/null || true
                 sync_dns_firewall "yes" "keep"
-                echo "[✓] Включен двойной щит: AdGuard Home (DNS 0.0.0.0:53) + Mihomo (.mrs + SNI)."
+                echo "[✓] Включен двойной щит: AdGuard Home (DNS 0.0.0.0:53) + Sing-Box (.srs + SNI)."
             else
-                mv "${MIHOMO_CONF}.bak" "$MIHOMO_CONF"
-                echo "[X] Ошибка проверки конфига Mihomo! Выполнен авто-откат."
+                mv "${SB_CONF}.bak" "$SB_CONF"
+                echo "[X] Ошибка проверки конфига Sing-Box! Выполнен авто-откат."
                 return 1
             fi
             ;;
@@ -500,19 +1327,22 @@ apply_adblock_mode() {
             if pgrep AdGuardHome >/dev/null 2>&1; then
                 set_agh_filtering "false"
             fi
-            sed -i '/#ADBLOCK_MIHOMO$/ s/^#*/#/' "$MIHOMO_CONF"
-            if /usr/bin/mihomo -d "$MIHOMO_DIR" -t >/dev/null 2>&1; then
-                reload_mihomo_api
+            SELECTED_ADBLOCK="off"
+            generate_singbox_config
+            if check_singbox_config; then
+                /etc/init.d/sing-box restart 2>/dev/null || true
                 echo "[✓] Блокировка рекламы полностью отключена (текущая схема DNS сохранена)."
             else
-                mv "${MIHOMO_CONF}.bak" "$MIHOMO_CONF"
-                echo "[X] Ошибка проверки конфига Mihomo! Выполнен авто-откат."
+                mv "${SB_CONF}.bak" "$SB_CONF"
+                echo "[X] Ошибка проверки конфига Sing-Box! Выполнен авто-откат."
                 return 1
             fi
             ;;
     esac
 }
+# ==================== [ КОНЕЦ ЧАСТИ 2 ИЗ 4 ] =====================
 
+# ==================== [ НАЧАЛО ЧАСТИ 3 ИЗ 4 ] ====================
 # Проверка, включено ли автообновление в cron
 is_autoupdate_enabled() {
     grep -q "/usr/bin/gateway autoupdate" "$CRON_FILE" 2>/dev/null
@@ -540,15 +1370,15 @@ disable_autoupdate() {
 run_autoupdate() {
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Запуск автообновления шлюза ==="
     update_cores_only "yes"
-    if ! pgrep mihomo >/dev/null 2>&1; then
-        /etc/init.d/mihomo start 2>/dev/null || true
+    if ! pgrep sing-box >/dev/null 2>&1; then
+        /etc/init.d/sing-box start 2>/dev/null || true
     fi
-    if grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null && [ -x /usr/bin/AdGuardHome ]; then
+    if grep -q '"listen_port": 1053' "$SB_CONF" 2>/dev/null && [ -x /usr/bin/AdGuardHome ]; then
         if ! pgrep AdGuardHome >/dev/null 2>&1; then
             /etc/init.d/adguardhome start 2>/dev/null || true
         fi
     fi
-    reload_mihomo_api
+    reload_singbox_api
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Автообновление завершено ==="
 }
 
@@ -566,11 +1396,11 @@ fetch_latest_github_tag() {
 # Кэширование актуальных версий с GitHub для быстрого отображения в меню
 refresh_remote_versions() {
     detect_current_ui
-    LATEST_MIHOMO_TAG=$(fetch_latest_github_tag "MetaCubeX/mihomo")
-    if [ -x /usr/bin/AdGuardHome ] || grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null; then
+    LATEST_SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
+    if [ -x /usr/bin/AdGuardHome ] || grep -q '"listen_port": 1053' "$SB_CONF" 2>/dev/null; then
         LATEST_AGH_TAG=$(fetch_latest_github_tag "AdguardTeam/AdGuardHome")
     fi
-    if [ -f /etc/mihomo/ui/index.html ]; then
+    if [ -f "${SB_DIR}/ui/index.html" ]; then
         LATEST_UI_TAG=$(fetch_latest_github_tag "$CUR_UI_REPO")
         if [ ! -f "$UI_VER_FILE" ] && [ -n "$LATEST_UI_TAG" ]; then
             echo "$LATEST_UI_TAG" > "$UI_VER_FILE"
@@ -583,32 +1413,32 @@ print_gateway_header() {
     detect_current_ui
     detect_adblock_mode
 
-    if pgrep mihomo >/dev/null 2>&1; then
-        M_STAT="[ЗАПУЩЕН]     "
+    if pgrep sing-box >/dev/null 2>&1; then
+        S_STAT="[ЗАПУЩЕН]     "
     else
-        M_STAT="[ОСТАНОВЛЕН]  "
+        S_STAT="[ОСТАНОВЛЕН]  "
     fi
 
-    if [ -x /usr/bin/mihomo ]; then
-        M_VER=$(/usr/bin/mihomo -v 2>/dev/null | head -n 1 | awk '{print $3}' || true)
-        [ -z "$M_VER" ] && M_VER="неизвестно"
+    if [ -x /usr/bin/sing-box ]; then
+        S_VER_RAW=$(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || true)
+        [ -n "$S_VER_RAW" ] && S_VER="v${S_VER_RAW#v}" || S_VER="неизвестно"
     else
-        M_VER="не установлен"
+        S_VER="не установлен"
     fi
 
-    if [ -n "$LATEST_MIHOMO_TAG" ] && [ "$M_VER" != "не установлен" ]; then
-        if [ "$M_VER" = "$LATEST_MIHOMO_TAG" ]; then
-            M_VER_INFO="${M_VER} (актуальна)"
+    if [ -n "$LATEST_SB_TAG" ] && [ "$S_VER" != "не установлен" ]; then
+        if [ "$S_VER" = "$LATEST_SB_TAG" ]; then
+            S_VER_INFO="${S_VER} (актуальна)"
         else
-            M_VER_INFO="${M_VER} -> ДОСТУПНА ${LATEST_MIHOMO_TAG}!"
+            S_VER_INFO="${S_VER} -> ДОСТУПНА ${LATEST_SB_TAG}!"
         fi
     else
-        M_VER_INFO="${M_VER}"
+        S_VER_INFO="${S_VER}"
     fi
 
     if pgrep AdGuardHome >/dev/null 2>&1; then
         A_STAT="[ЗАПУЩЕН]     "
-    elif grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null; then
+    elif grep -q '"listen_port": 1053' "$SB_CONF" 2>/dev/null; then
         A_STAT="[ОСТАНОВЛЕН]  "
     else
         A_STAT="[ОТКЛЮЧЕН]    "
@@ -633,13 +1463,13 @@ print_gateway_header() {
 
     if is_warp_enabled; then
         W_STAT="[АКТИВЕН]     "
-        W_INFO="8 бесплатных нод (Cloudflare + Европа 🇳🇱🇫🇮🇩🇪🇵🇱)"
+        W_INFO="4 бесплатные ноды AWG 2.0 (Cloudflare Anycast)"
     else
         W_STAT="[ВЫКЛЮЧЕН]    "
         W_INFO="можно включить бесплатно в пункте 2"
     fi
 
-    if [ -f /etc/mihomo/ui/index.html ]; then
+    if [ -f "${SB_DIR}/ui/index.html" ]; then
         if [ "$CUR_UI_TYPE" = "zashboard" ]; then
             UI_STAT="[Zashboard]   "
         else
@@ -665,7 +1495,7 @@ print_gateway_header() {
 
     if is_killswitch_enabled; then
         KS_STAT="[АКТИВЕН]     "
-        KS_INFO="строгая блокировка трафика мимо mihomo-tun"
+        KS_INFO="строгая блокировка трафика мимо singbox-tun"
     else
         KS_STAT="[СТАНДАРТ]    "
         KS_INFO="защита IPv6 + DoT/DoQ + перехват DNS 53"
@@ -679,7 +1509,7 @@ print_gateway_header() {
         AU_INFO="только вручную"
     fi
 
-    echo " Mihomo:        ${M_STAT}${M_VER_INFO}"
+    echo " Sing-Box Ext:  ${S_STAT}${S_VER_INFO}"
     echo " AdGuard Home:  ${A_STAT}${A_VER_INFO}"
     echo " Amnezia WARP:  ${W_STAT}${W_INFO}"
     echo " Антиреклама:   ${ADBLOCK_STAT}${ADBLOCK_DESC}"
@@ -690,7 +1520,7 @@ print_gateway_header() {
 
 # Каскадный выбор зеркала GitHub при блокировках ТСПУ
 check_github_mirror() {
-    TEST_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/private.mrs"
+    TEST_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/private.srs"
     if curl -fsSL --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null; then
         GH_PROXY=""
         return 0
@@ -717,25 +1547,27 @@ download_file() {
     return 1
 }
 
-# Инициализация пользовательских списков и файлов провайдеров (с защитой от 0-байтовых YAML)
+# Инициализация пользовательских списков и файлов провайдеров
 init_user_lists() {
-    mkdir -p "$MIHOMO_RULES_DIR" "$MIHOMO_PROVIDERS_DIR"
+    mkdir -p "$SB_RULES_DIR" "$SB_PROVIDERS_DIR"
     [ -f "$USER_DIRECT_FILE" ] || echo "+.localdomain" > "$USER_DIRECT_FILE"
     [ -f "$USER_PROXY_FILE" ] || echo "+.chatgpt.com" > "$USER_PROXY_FILE"
     [ -f "$USER_BYPASS_IPS" ] || : > "$USER_BYPASS_IPS"
     [ -f "$USER_FORCE_PROXY_IPS" ] || : > "$USER_FORCE_PROXY_IPS"
+    [ -s "$CUSTOM_SUB_FILE" ] || echo "proxies: []" > "$CUSTOM_SUB_FILE"
     [ -s "$CUSTOM_NODES_FILE" ] || echo "proxies: []" > "$CUSTOM_NODES_FILE"
-    [ -s "$WARP_NODES_FILE" ] || echo "proxies: []" > "$WARP_NODES_FILE"
+    [ -s "$WARP_NODES_FILE" ] || echo '{"outbounds": []}' > "$WARP_NODES_FILE"
+    sync_user_domain_rulesets
 }
 
 # Безопасное разделение нескольких URI-ключей без повреждения alpn=h2,http/1.1 и пробелов в #Названии
 format_uri_keys() {
-    printf "%s\n" "$1" | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
+    printf "%s\n" "$1" | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|hysteria|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
 }
 
-# Автоматическая бесплатная генерация Amnezia WARP (Cloudflare WARP + AmneziaWG 2.0)
+# Автоматическая бесплатная генерация Amnezia WARP 2.0 (4 чистых ноды Cloudflare Anycast)
 generate_amnezia_warp() {
-    mkdir -p "$MIHOMO_PROVIDERS_DIR"
+    mkdir -p "$SB_PROVIDERS_DIR"
     if ! command -v wg >/dev/null 2>&1; then
         echo "Установка генератора ключей wireguard-tools..."
         apk update --allow-untrusted >/dev/null 2>&1 || true
@@ -755,22 +1587,23 @@ generate_amnezia_warp() {
     if [ -n "$PUB_KEY" ]; then
         TOS_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
         REG_PAYLOAD="{\"key\":\"${PUB_KEY}\",\"install_id\":\"\",\"warp_enabled\":true,\"tos\":\"${TOS_DATE}\",\"type\":\"Android\",\"locale\":\"en_US\"}"
-        echo "Бесплатная регистрация нового аккаунта Cloudflare WARP..."
+        echo "Бесплатная регистрация личного аккаунта Cloudflare WARP (API 2026)..."
 
+        # 1. Пробив через новый незаблокированный эндпоинт Cloudflare 2026 (api.devices.cloudflare.com/v0a4471/reg)
         for CURL_OPT in \
-            "-x http://127.0.0.1:7890" \
             "" \
-            "--connect-to api.cloudflareclient.com:443:104.16.80.230:443" \
-            "--connect-to api.cloudflareclient.com:443:104.17.143.163:443" \
-            "--connect-to api.cloudflareclient.com:443:162.159.138.105:443" \
-            "--connect-to api.cloudflareclient.com:443:162.159.137.105:443" \
-            "--connect-to api.cloudflareclient.com:443:172.67.73.32:443"
+            "-x http://127.0.0.1:7890" \
+            "--connect-to api.devices.cloudflare.com:443:104.24.4.6:443" \
+            "--connect-to api.devices.cloudflare.com:443:104.18.0.6:443" \
+            "--connect-to api.devices.cloudflare.com:443:162.159.137.105:443" \
+            "--connect-to api.devices.cloudflare.com:443:162.159.138.105:443" \
+            "--connect-to api.devices.cloudflare.com:443:104.16.80.230:443"
         do
             # shellcheck disable=SC2086
-            RESP=$(curl -fsSL --connect-timeout 4 -m 7 $CURL_OPT \
+            RESP=$(curl -fsSL --connect-timeout 4 -m 6 $CURL_OPT \
                 -H "User-Agent: okhttp/3.12.1" \
                 -H "Content-Type: application/json" \
-                -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
+                -X POST "https://api.devices.cloudflare.com/v0a4471/reg" \
                 -d "$REG_PAYLOAD" 2>/dev/null || true)
             if printf "%s" "$RESP" | grep -q '"v4"'; then
                 WARP_IPV4=$(printf "%s" "$RESP" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
@@ -778,27 +1611,25 @@ generate_amnezia_warp() {
                 break
             fi
         done
-    fi
 
-    # Фоллбэк на публичные зеркала генератора WARP, если провайдер глушит все IP api.cloudflareclient.com
-    if [ "$REG_OK" = "no" ]; then
-        for MIRROR_API in "https://warp.llimonix.pw/api/warp" "https://warp-reg.vercel.app/api/warp"; do
-            RESP_M=$(curl -fsSL --connect-timeout 4 -m 7 "$MIRROR_API" 2>/dev/null || true)
-            M_PRIV=$(printf "%s" "$RESP_M" | sed -n 's/.*"private_key":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-            M_IPV4=$(printf "%s" "$RESP_M" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
-            if [ -n "$M_PRIV" ]; then
-                PRIV_KEY="$M_PRIV"
-                [ -n "$M_IPV4" ] && WARP_IPV4="$M_IPV4"
+        # 2. Резервный эндпоинт Zero-Trust Client
+        if [ "$REG_OK" = "no" ]; then
+            RESP=$(curl -fsSL --connect-timeout 4 -m 6 \
+                -H "User-Agent: okhttp/3.12.1" \
+                -H "Content-Type: application/json" \
+                -X POST "https://zero-trust-client.cloudflareclient.com/v0a4471/reg" \
+                -d "$REG_PAYLOAD" 2>/dev/null || true)
+            if printf "%s" "$RESP" | grep -q '"v4"'; then
+                WARP_IPV4=$(printf "%s" "$RESP" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
                 REG_OK="yes"
-                break
             fi
-        done
+        fi
     fi
 
-    # Если уже есть рабочий ключ в warp_nodes.yaml и API недоступен — сохраняем существующий ключ
+    # 3. Если уже есть рабочий ключ в warp_nodes.json и API недоступен — сохраняем существующий ключ
     if [ "$REG_OK" = "no" ] && is_warp_enabled; then
-        OLD_PRIV=$(sed -n 's/^[[:space:]]*private-key:[[:space:]]*"\([^"]*\)".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
-        OLD_IP=$(sed -n 's/^[[:space:]]*ip:[[:space:]]*\([0-9.]*\).*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+        OLD_PRIV=$(sed -n 's/.*"private_key":[[:space:]]*"\([^"]*\)".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+        OLD_IP=$(sed -n 's/.*"\([0-9.]*\)\/32".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
         if [ -n "$OLD_PRIV" ]; then
             PRIV_KEY="$OLD_PRIV"
             WARP_IPV4="${OLD_IP:-172.16.0.2}"
@@ -807,7 +1638,7 @@ generate_amnezia_warp() {
         fi
     fi
 
-    # Ручной ввод PrivateKey, если регистрация полностью заблокирована на линии провайдера
+    # 4. Ручной ввод PrivateKey, если регистрация полностью заблокирована на линии провайдера
     if [ "$REG_OK" = "no" ]; then
         echo "[!] Провайдер блокирует прямой доступ к API регистрации Cloudflare."
         printf "Вставьте готовый WARP PrivateKey (например, из @warp_generator_bot) [Enter = отмена]: "
@@ -825,173 +1656,179 @@ generate_amnezia_warp() {
 
     [ -z "$WARP_IPV4" ] && WARP_IPV4="172.16.0.2"
 
+    # Рандомизация числа мусорных пакетов jc (4..7) для уникальности сигнатуры роутера
+    RAND_BYTE=$(od -An -N1 -tu1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "5")
+    AWG_JC=$(( (RAND_BYTE % 4) + 4 ))
+
     cat << WARP_EOF > "$WARP_NODES_FILE"
-proxies:
-  - name: "☁️ WARP Fast (162.159.192.1:4500)"
-    type: wireguard
-    server: 162.159.192.1
-    port: 4500
-    ip: ${WARP_IPV4}
-    private-key: "${PRIV_KEY}"
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    allowed-ips: ["0.0.0.0/0"]
-    udp: true
-    mtu: 1280
-    remote-dns-resolve: true
-    dns: [1.1.1.1, 8.8.8.8]
-    amnezia-wg-option: &awg_warp
-      jc: 4
-      jmin: 40
-      jmax: 70
-      s1: 0
-      s2: 0
-      h1: 1
-      h2: 2
-      h3: 3
-      h4: 4
-      i1: "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
-
-  - name: "☁️ WARP Reserve (188.114.97.1:500)"
-    type: wireguard
-    server: 188.114.97.1
-    port: 500
-    ip: ${WARP_IPV4}
-    private-key: "${PRIV_KEY}"
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    allowed-ips: ["0.0.0.0/0"]
-    udp: true
-    mtu: 1280
-    remote-dns-resolve: true
-    dns: [1.1.1.1, 8.8.8.8]
-    amnezia-wg-option: *awg_warp
-
-  - name: "☁️ WARP Alt (188.114.99.224:1002)"
-    type: wireguard
-    server: 188.114.99.224
-    port: 1002
-    ip: ${WARP_IPV4}
-    private-key: "${PRIV_KEY}"
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    allowed-ips: ["0.0.0.0/0"]
-    udp: true
-    mtu: 1280
-    remote-dns-resolve: true
-    dns: [1.1.1.1, 8.8.8.8]
-    amnezia-wg-option: *awg_warp
-
-  - name: "☁️ WARP Engage (2408)"
-    type: wireguard
-    server: engage.cloudflareclient.com
-    port: 2408
-    ip: ${WARP_IPV4}
-    private-key: "${PRIV_KEY}"
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    allowed-ips: ["0.0.0.0/0"]
-    udp: true
-    mtu: 1280
-    remote-dns-resolve: true
-    dns: [1.1.1.1, 8.8.8.8]
-    amnezia-wg-option: *awg_warp
-
-  - name: "🇳🇱 WARP Нидерланды (AI / ChatGPT)"
-    type: wireguard
-    server: nl.tribukvy.ltd
-    port: 4500
-    ip: ${WARP_IPV4}
-    private-key: "${PRIV_KEY}"
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    allowed-ips: ["0.0.0.0/0"]
-    udp: true
-    mtu: 1280
-    remote-dns-resolve: true
-    dns: [1.1.1.1, 8.8.8.8]
-    amnezia-wg-option: *awg_warp
-
-  - name: "🇫🇮 WARP Финляндия (AI / ChatGPT)"
-    type: wireguard
-    server: fi.tribukvy.ltd
-    port: 4500
-    ip: ${WARP_IPV4}
-    private-key: "${PRIV_KEY}"
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    allowed-ips: ["0.0.0.0/0"]
-    udp: true
-    mtu: 1280
-    remote-dns-resolve: true
-    dns: [1.1.1.1, 8.8.8.8]
-    amnezia-wg-option: *awg_warp
-
-  - name: "🇩🇪 WARP Германия (AI / ChatGPT)"
-    type: wireguard
-    server: de.tribukvy.ltd
-    port: 4500
-    ip: ${WARP_IPV4}
-    private-key: "${PRIV_KEY}"
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    allowed-ips: ["0.0.0.0/0"]
-    udp: true
-    mtu: 1280
-    remote-dns-resolve: true
-    dns: [1.1.1.1, 8.8.8.8]
-    amnezia-wg-option: *awg_warp
-
-  - name: "🇵🇱 WARP Польша (AI / ChatGPT)"
-    type: wireguard
-    server: pl.tribukvy.ltd
-    port: 4500
-    ip: ${WARP_IPV4}
-    private-key: "${PRIV_KEY}"
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    allowed-ips: ["0.0.0.0/0"]
-    udp: true
-    mtu: 1280
-    remote-dns-resolve: true
-    dns: [1.1.1.1, 8.8.8.8]
-    amnezia-wg-option: *awg_warp
+{
+  "outbounds": [
+    {
+      "type": "wireguard",
+      "tag": "☁️ WARP Fast (162.159.192.1:4500)",
+      "mtu": 1280,
+      "address": [
+        "${WARP_IPV4}/32"
+      ],
+      "private_key": "${PRIV_KEY}",
+      "peers": [
+        {
+          "address": "162.159.192.1",
+          "port": 4500,
+          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+          "allowed_ips": [
+            "0.0.0.0/0"
+          ]
+        }
+      ],
+      "amnezia": {
+        "jc": ${AWG_JC},
+        "jmin": 40,
+        "jmax": 70,
+        "s1": 0,
+        "s2": 0,
+        "h1": 1,
+        "h2": 2,
+        "h3": 3,
+        "h4": 4,
+        "i1": "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
+      }
+    },
+    {
+      "type": "wireguard",
+      "tag": "☁️ WARP Reserve (188.114.97.1:500)",
+      "mtu": 1280,
+      "address": [
+        "${WARP_IPV4}/32"
+      ],
+      "private_key": "${PRIV_KEY}",
+      "peers": [
+        {
+          "address": "188.114.97.1",
+          "port": 500,
+          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+          "allowed_ips": [
+            "0.0.0.0/0"
+          ]
+        }
+      ],
+      "amnezia": {
+        "jc": ${AWG_JC},
+        "jmin": 40,
+        "jmax": 70,
+        "s1": 0,
+        "s2": 0,
+        "h1": 1,
+        "h2": 2,
+        "h3": 3,
+        "h4": 4,
+        "i1": "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
+      }
+    },
+    {
+      "type": "wireguard",
+      "tag": "☁️ WARP Alt (188.114.99.224:1002)",
+      "mtu": 1280,
+      "address": [
+        "${WARP_IPV4}/32"
+      ],
+      "private_key": "${PRIV_KEY}",
+      "peers": [
+        {
+          "address": "188.114.99.224",
+          "port": 1002,
+          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+          "allowed_ips": [
+            "0.0.0.0/0"
+          ]
+        }
+      ],
+      "amnezia": {
+        "jc": ${AWG_JC},
+        "jmin": 40,
+        "jmax": 70,
+        "s1": 0,
+        "s2": 0,
+        "h1": 1,
+        "h2": 2,
+        "h3": 3,
+        "h4": 4,
+        "i1": "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
+      }
+    },
+    {
+      "type": "wireguard",
+      "tag": "☁️ WARP Engage (2408)",
+      "mtu": 1280,
+      "address": [
+        "${WARP_IPV4}/32"
+      ],
+      "private_key": "${PRIV_KEY}",
+      "peers": [
+        {
+          "address": "162.159.192.1",
+          "port": 2408,
+          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+          "allowed_ips": [
+            "0.0.0.0/0"
+          ]
+        }
+      ],
+      "amnezia": {
+        "jc": ${AWG_JC},
+        "jmin": 40,
+        "jmax": 70,
+        "s1": 0,
+        "s2": 0,
+        "h1": 1,
+        "h2": 2,
+        "h3": 3,
+        "h4": 4,
+        "i1": "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
+      }
+    }
+  ]
+}
 WARP_EOF
 
-    echo "[✓] Бесплатный пул Amnezia WARP (8 нод: Cloudflare + Европа) успешно создан (IP: ${WARP_IPV4})!"
+    echo "[✓] Личный пул Amnezia WARP 2.0 (4 ноды Cloudflare Anycast, jc=${AWG_JC}) создан (IP: ${WARP_IPV4})!"
     return 0
 }
 
-# Горячая перезагрузка конфигурации и провайдеров Mihomo через REST API + сброс Fake-IP кэша
-reload_mihomo_api() {
-    if ! pgrep mihomo >/dev/null 2>&1; then
+# Горячая перезагрузка провайдеров и сброс Fake-IP кэша через Clash API Sing-Box
+reload_singbox_api() {
+    if ! pgrep sing-box >/dev/null 2>&1; then
         return 0
     fi
-    API_SECRET=""
-    [ -f "$MIHOMO_CONF" ] && API_SECRET=$(sed -n 's/^secret:[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" | head -n 1 | tr -d '\r\n')
-    curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" -H "Content-Type: application/json" \
-        -d "{\"path\":\"${MIHOMO_CONF}\"}" "http://127.0.0.1:9090/configs?force=true" >/dev/null 2>&1 || true
-    curl -fsS -X POST -H "Authorization: Bearer ${API_SECRET}" \
+    load_gateway_env
+    curl -fsS -X POST -H "Authorization: Bearer ${ADMIN_PASS}" \
         "http://127.0.0.1:9090/cache/fakeip/flush" >/dev/null 2>&1 || true
-    curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
+    curl -fsS -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
         "http://127.0.0.1:9090/providers/proxies/custom_sub" >/dev/null 2>&1 || true
-    curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
+    curl -fsS -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
         "http://127.0.0.1:9090/providers/proxies/my_nodes" >/dev/null 2>&1 || true
-    curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
-        "http://127.0.0.1:9090/providers/proxies/warp_nodes" >/dev/null 2>&1 || true
-    curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
-        "http://127.0.0.1:9090/providers/rules/user_direct_domains" >/dev/null 2>&1 || true
-    curl -fsS -X PUT -H "Authorization: Bearer ${API_SECRET}" \
-        "http://127.0.0.1:9090/providers/rules/user_proxy_domains" >/dev/null 2>&1 || true
 }
 
 # Обработка подписки, одиночных ключей или режима бесплатного Amnezia WARP
 apply_subscription_input() {
     RAW_INPUT="$1"
-    mkdir -p "$MIHOMO_PROVIDERS_DIR"
+    mkdir -p "$SB_PROVIDERS_DIR"
     case "$RAW_INPUT" in
-        warp|WARP|amnezia|free)
+        warp|WARP|amnezia|masque|free)
             echo "proxies: []" > "$CUSTOM_SUB_FILE"
-            SUB_URL="file://warp_nodes.yaml (Amnezia WARP)"
+            SUB_URL="file://warp_nodes.json (Amnezia WARP 2.0)"
             PROVIDER_TYPE="warp"
             ;;
         http://*|https://*)
-            SUB_URL="$RAW_INPUT"
+            # Автоматическая очистка хвостов fmt=best / fmt=xray, которые отдают массив Xray вместо стандартной подписки
+            CLEAN_SUB_URL=$(printf "%s" "$RAW_INPUT" | sed -E 's/([?&])fmt=(best|xray|v2ray)(&|$)/\1/; s/[?&]$//')
+            if [ "$CLEAN_SUB_URL" != "$RAW_INPUT" ]; then
+                echo "[i] Параметр fmt=... автоматически убран из ссылки для совместимости с Sing-Box."
+            fi
+            SUB_URL="$CLEAN_SUB_URL"
             PROVIDER_TYPE="http"
             ;;
-        vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|xhttp://*|splithttp://*|socks5://*)
+        vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|hysteria://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|xhttp://*|splithttp://*|socks5://*)
             format_uri_keys "$RAW_INPUT" > "$CUSTOM_SUB_FILE"
             SUB_URL="file://custom_sub.yaml"
             PROVIDER_TYPE="file"
@@ -1007,8 +1844,8 @@ apply_subscription_input() {
     esac
 }
 
-# Загрузка и установка веб-панели Mihomo с сохранением версии
-install_mihomo_ui() {
+# Загрузка и установка веб-панели (MetaCubeXD / Zashboard) с сохранением версии
+install_singbox_ui() {
     TARGET_UI_TYPE="$1"
     TARGET_UI_NAME="$2"
     TARGET_UI_TAR_URL="$3"
@@ -1023,61 +1860,67 @@ install_mihomo_ui() {
     fi
 
     echo "Загрузка и установка веб-панели ${TARGET_UI_NAME} ${TARGET_UI_VER}..."
-    rm -rf /tmp/mihomo_ui.tar.gz /tmp/mihomo_ui_extract
-    mkdir -p /tmp/mihomo_ui_extract
+    rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
+    mkdir -p /tmp/sb_ui_extract
 
-    if download_file "$TARGET_UI_TAR_URL" "/tmp/mihomo_ui.tar.gz" && tar -xzf /tmp/mihomo_ui.tar.gz -C /tmp/mihomo_ui_extract 2>/dev/null; then
-        rm -rf /etc/mihomo/ui
-        mkdir -p /etc/mihomo/ui
-        cp -rf /tmp/mihomo_ui_extract/*/* /etc/mihomo/ui/ 2>/dev/null || cp -rf /tmp/mihomo_ui_extract/* /etc/mihomo/ui/
+    if download_file "$TARGET_UI_TAR_URL" "/tmp/sb_ui.tar.gz" && tar -xzf /tmp/sb_ui.tar.gz -C /tmp/sb_ui_extract 2>/dev/null; then
+        rm -rf "${SB_DIR}/ui"
+        mkdir -p "${SB_DIR}/ui"
+        cp -rf /tmp/sb_ui_extract/*/* "${SB_DIR}/ui/" 2>/dev/null || cp -rf /tmp/sb_ui_extract/* "${SB_DIR}/ui/"
         echo "$TARGET_UI_TYPE" > "$UI_TYPE_FILE"
         [ -n "$TARGET_UI_VER" ] && echo "$TARGET_UI_VER" > "$UI_VER_FILE"
         LATEST_UI_TAG="$TARGET_UI_VER"
-        rm -rf /tmp/mihomo_ui.tar.gz /tmp/mihomo_ui_extract
-        echo "[✓] Веб-панель ${TARGET_UI_NAME} ${TARGET_UI_VER} успешно установлена в /etc/mihomo/ui."
+        rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
+        echo "[✓] Веб-панель ${TARGET_UI_NAME} ${TARGET_UI_VER} успешно установлена в ${SB_DIR}/ui."
     else
-        rm -rf /tmp/mihomo_ui.tar.gz /tmp/mihomo_ui_extract
+        rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
         echo "[X] Ошибка загрузки или распаковки веб-панели ${TARGET_UI_NAME}!"
         return 1
     fi
 }
 
-# Атомарное обновление бинарников Mihomo, AdGuard Home и UI (с проверкой целостности до замены)
+# Атомарное обновление бинарников Sing-Box Extended, AdGuard Home и UI
 update_cores_only() {
     CHECK_UI_UPDATE="${1:-no}"
     detect_os
     check_github_mirror
 
-    MIHOMO_TAG=$(fetch_latest_github_tag "MetaCubeX/mihomo")
-    [ -z "$MIHOMO_TAG" ] && MIHOMO_TAG="v1.19.33"
-    LATEST_MIHOMO_TAG="$MIHOMO_TAG"
-    INSTALLED_MIHOMO_VER=""
-    [ -x /usr/bin/mihomo ] && INSTALLED_MIHOMO_VER=$(/usr/bin/mihomo -v 2>/dev/null | head -n 1 | awk '{print $3}' || true)
+    SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
+    [ -z "$SB_TAG" ] && SB_TAG="v1.14.3-extended-2.7.3"
+    LATEST_SB_TAG="$SB_TAG"
+    SB_VER_NO_V="${SB_TAG#v}"
 
-    if [ "$INSTALLED_MIHOMO_VER" = "$MIHOMO_TAG" ]; then
-        echo "[✓] Ядро Mihomo ${INSTALLED_MIHOMO_VER} (${MIHOMO_ARCH}) актуально."
+    INSTALLED_SB_VER=""
+    if [ -x /usr/bin/sing-box ]; then
+        RAW_V=$(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || true)
+        [ -n "$RAW_V" ] && INSTALLED_SB_VER="v${RAW_V#v}"
+    fi
+
+    if [ "$INSTALLED_SB_VER" = "$SB_TAG" ]; then
+        echo "[✓] Ядро Sing-Box Extended ${INSTALLED_SB_VER} (${SB_ARCH}) актуально."
     else
-        echo "Загрузка Mihomo ${MIHOMO_TAG} (${MIHOMO_ARCH})..."
-        rm -f /tmp/mihomo.gz /tmp/mihomo.new
-        MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_TAG}/mihomo-linux-${MIHOMO_ARCH}-${MIHOMO_TAG}.gz"
-        if ! download_file "$MIHOMO_URL" "/tmp/mihomo.gz" && [ "$MIHOMO_ARCH" = "amd64-v3" ]; then
-            MIHOMO_URL="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_TAG}/mihomo-linux-amd64-${MIHOMO_TAG}.gz"
-            download_file "$MIHOMO_URL" "/tmp/mihomo.gz" || true
-        fi
-        if [ -f "/tmp/mihomo.gz" ] && gunzip -c /tmp/mihomo.gz > /tmp/mihomo.new 2>/dev/null; then
-            chmod +x /tmp/mihomo.new
-            if /tmp/mihomo.new -v >/dev/null 2>&1; then
-                /etc/init.d/mihomo stop 2>/dev/null || true
-                mv -f /tmp/mihomo.new /usr/bin/mihomo
-                rm -f /tmp/mihomo.gz
-                echo "[✓] Mihomo безопасно обновлен до ${MIHOMO_TAG}."
-            else
-                rm -f /tmp/mihomo.gz /tmp/mihomo.new
-                echo "[X] Ошибка: скачанный бинарник Mihomo поврежден, оставлена текущая версия."
+        echo "Загрузка Sing-Box Extended ${SB_TAG} (${SB_ARCH})..."
+        rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+        SB_URL="https://github.com/shtorm-7/sing-box-extended/releases/download/${SB_TAG}/sing-box-${SB_VER_NO_V}-linux-${SB_ARCH}.tar.gz"
+        if download_file "$SB_URL" "/tmp/sing-box.tar.gz"; then
+            mkdir -p /tmp/sb_extract
+            if tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb_extract 2>/dev/null; then
+                SB_BIN=$(find /tmp/sb_extract -type f -name "sing-box" | head -n 1)
+                if [ -n "$SB_BIN" ] && [ -f "$SB_BIN" ]; then
+                    chmod +x "$SB_BIN"
+                    if "$SB_BIN" version >/dev/null 2>&1; then
+                        /etc/init.d/sing-box stop 2>/dev/null || true
+                        mv -f "$SB_BIN" /usr/bin/sing-box
+                        echo "[✓] Sing-Box Extended безопасно обновлен до ${SB_TAG}."
+                    else
+                        echo "[X] Ошибка: скачанный бинарник sing-box поврежден, оставлена текущая версия."
+                    fi
+                fi
             fi
+            rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
         else
-            rm -f /tmp/mihomo.gz /tmp/mihomo.new
-            echo "[X] Не удалось скачать Mihomo ${MIHOMO_TAG}."
+            rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+            echo "[X] Не удалось скачать Sing-Box Extended ${SB_TAG}."
         fi
     fi
 
@@ -1120,120 +1963,36 @@ update_cores_only() {
         INSTALLED_UI_VER=""
         [ -f "$UI_VER_FILE" ] && INSTALLED_UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n')
 
-        if [ -f /etc/mihomo/ui/index.html ] && [ -n "$UI_TAG" ] && [ "$INSTALLED_UI_VER" = "$UI_TAG" ]; then
+        if [ -f "${SB_DIR}/ui/index.html" ] && [ -n "$UI_TAG" ] && [ "$INSTALLED_UI_VER" = "$UI_TAG" ]; then
             echo "[✓] Веб-панель ${CUR_UI_NAME} ${INSTALLED_UI_VER} актуальна."
         else
-            install_mihomo_ui "$CUR_UI_TYPE" "$CUR_UI_NAME" "$CUR_UI_TAR_URL" "$UI_TAG"
+            install_singbox_ui "$CUR_UI_TYPE" "$CUR_UI_NAME" "$CUR_UI_TAR_URL" "$UI_TAG"
         fi
     fi
 }
+# ==================== [ КОНЕЦ ЧАСТИ 3 ИЗ 4 ] =====================
 
-# Сборка правил локальных IP-адресов (DIRECT и FULL-VPN) с метками #DEVICE_IP_RULE
-build_device_ip_rules() {
-    BYPASS_RULES_STR=""
-    FORCE_PROXY_RULES_STR=""
-    if [ -f "$USER_BYPASS_IPS" ]; then
-        while IFS= read -r line || [ -n "$line" ]; do
-            CLEAN_IP=$(printf "%s" "$line" | tr -d ' \t\r\n')
-            if [ -n "$CLEAN_IP" ]; then
-                case "$CLEAN_IP" in
-                    */*) BYPASS_CIDR="$CLEAN_IP" ;;
-                    *)   BYPASS_CIDR="${CLEAN_IP}/32" ;;
-                esac
-                BYPASS_RULES_STR="${BYPASS_RULES_STR}  - SRC-IP-CIDR,${BYPASS_CIDR},DIRECT #DEVICE_IP_RULE\n"
-            fi
-        done < "$USER_BYPASS_IPS"
-    fi
-    if [ -f "$USER_FORCE_PROXY_IPS" ]; then
-        while IFS= read -r line || [ -n "$line" ]; do
-            CLEAN_IP=$(printf "%s" "$line" | tr -d ' \t\r\n')
-            if [ -n "$CLEAN_IP" ]; then
-                case "$CLEAN_IP" in
-                    */*) FORCE_CIDR="$CLEAN_IP" ;;
-                    *)   FORCE_CIDR="${CLEAN_IP}/32" ;;
-                esac
-                FORCE_PROXY_RULES_STR="${FORCE_PROXY_RULES_STR}  - SRC-IP-CIDR,${FORCE_CIDR},📺 Устройства (Full-VPN) #DEVICE_IP_RULE\n"
-            fi
-        done < "$USER_FORCE_PROXY_IPS"
-    fi
-}
-
-# Пересборка списка SRC-IP-CIDR в существующем config.yaml
-sync_device_ips_in_config() {
-    [ -f "$MIHOMO_CONF" ] || return 0
-    cp -f "$MIHOMO_CONF" "${MIHOMO_CONF}.bak"
-    sed -i '/#DEVICE_IP_RULE$/d' "$MIHOMO_CONF"
-    sed -i '/- SRC-IP-CIDR,.*,\(DIRECT\|⚡ Авто (Самый быстрый)\|📺 Устройства (Full-VPN)\)/d' "$MIHOMO_CONF"
-    build_device_ip_rules
-
-    awk -v bypass="$BYPASS_RULES_STR" -v force="$FORCE_PROXY_RULES_STR" '
-        /^  - RULE-SET,private_ip,DIRECT,no-resolve/ {
-            print
-            if (bypass != "") printf "%s", bypass
-            next
-        }
-        /^  - DST-PORT,6881-6889,/ {
-            print
-            if (force != "") printf "%s", force
-            next
-        }
-        { print }
-    ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
-
-    if /usr/bin/mihomo -d "$MIHOMO_DIR" -t >/dev/null 2>&1; then
-        reload_mihomo_api
-    else
-        mv "${MIHOMO_CONF}.bak" "$MIHOMO_CONF"
-        echo "[X] Ошибка синтаксиса IP! Выполнен авто-откат."
-    fi
-}
-
+# ==================== [ НАЧАЛО ЧАСТИ 4 ИЗ 4 ] ====================
 # ==============================================================================
-# Главный мастер установки и настройки
+# Главный мастер установки и настройки (Sing-Box Extended + AdGuard Home)
 # ==============================================================================
 run_installer() {
     detect_os
-    init_user_lists
+    disable_legacy_mihomo
 
     echo "========================================================"
-    echo "  Установщик шлюза Mihomo + AdGuard Home (OpenWrt 2026) "
+    echo " Установщик Sing-Box Extended + AdGuard Home (OpenWrt)  "
     echo "========================================================"
-    echo "Система: ${OS_NAME} [${ARCH_RAW} -> ${MIHOMO_ARCH}]"
+    echo "Система: ${OS_NAME} [${ARCH_RAW} -> ${SB_ARCH}]"
     echo "--------------------------------------------------------"
 
-    SAVED_SUB_URL=""
-    SAVED_GW_IP=""
-    SAVED_USE_AGH=""
+    load_gateway_env
+    SAVED_SUB_URL="$SUB_URL"
+    SAVED_GW_IP="$GW_IP"
+    SAVED_USE_AGH="$USE_AGH"
+    SAVED_PASS="$ADMIN_PASS"
+    SAVED_UI_TYPE="$UI_TYPE"
     SAVED_AGH_USER=""
-    SAVED_PASS=""
-    SAVED_UI_TYPE=""
-
-    if [ -f "$MIHOMO_CONF" ]; then
-        SAVED_SUB_URL=$(sed -n '/custom_sub:/,/health-check:/ s/^[[:space:]]*url:[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" | head -n 1 | tr -d ' \t\r\n')
-        if [ -z "$SAVED_SUB_URL" ]; then
-            if is_warp_enabled; then
-                SAVED_SUB_URL="warp"
-            elif [ -f "$CUSTOM_SUB_FILE" ]; then
-                SAVED_SUB_URL="file://custom_sub.yaml"
-            fi
-        fi
-        SAVED_GW_IP=$(sed -n 's/^[[:space:]]*"+\.lan":[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" | head -n 1 | tr -d ' \t\r\n')
-        SAVED_PASS=$(sed -n 's/^secret:[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" | head -n 1 | tr -d '\r\n')
-        if grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null; then
-            SAVED_USE_AGH="yes"
-        else
-            SAVED_USE_AGH="no"
-        fi
-        if grep -qi "zashboard" "$MIHOMO_CONF" 2>/dev/null; then
-            SAVED_UI_TYPE="zashboard"
-        elif grep -qi "metacubexd" "$MIHOMO_CONF" 2>/dev/null; then
-            SAVED_UI_TYPE="metacubexd"
-        fi
-    fi
-
-    if [ -z "$SAVED_GW_IP" ]; then
-        SAVED_GW_IP=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}')
-    fi
 
     if [ -f "$AGH_CONF" ]; then
         SAVED_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
@@ -1243,7 +2002,7 @@ run_installer() {
     if [ -n "$SAVED_SUB_URL" ]; then
         printf "Введите подписку, ключ (vless/hy2...) или 'warp' [Enter = оставить %s]: " "$SAVED_SUB_URL"
     else
-        printf "Введите подписку (http://...), ключ (vless://...) или 'warp' (бесплатный Amnezia WARP): "
+        printf "Введите подписку (http://...), ключ (vless://...) или 'warp' (бесплатный Amnezia WARP 2.0): "
     fi
     read -r INPUT_SUB_URL < /dev/tty || true
     INPUT_SUB_URL=$(printf "%s" "$INPUT_SUB_URL" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -1255,7 +2014,7 @@ run_installer() {
     fi
 
     if [ -z "$RAW_SUB_CHOICE" ]; then
-        printf "Подписка не указана. Сгенерировать бесплатный безлимитный Amnezia WARP? (y/n) [Enter = y]: "
+        printf "Подписка не указана. Сгенерировать бесплатный безлимитный Amnezia WARP 2.0? (y/n) [Enter = y]: "
         read -r WARP_FALLBACK < /dev/tty || true
         WARP_FALLBACK=$(printf "%s" "$WARP_FALLBACK" | tr -d ' \t\r\n')
         [ -z "$WARP_FALLBACK" ] && WARP_FALLBACK="y"
@@ -1293,9 +2052,9 @@ run_installer() {
 
     # 3. Выбор режима DNS и блокировки рекламы
     echo "Кто будет обрабатывать DNS и блокировать рекламу?"
-    echo "  1) Только AdGuard Home (DNS 0.0.0.0:53 + блок-листы AGH, Mihomo на 1053)"
-    echo "  2) Только Mihomo (.mrs списки + SNI, Mihomo берет DNS 0.0.0.0:53, AGH остановлен)"
-    echo "  3) Оба: AdGuard Home + Mihomo (двойной щит: DNS AGH + .mrs в Mihomo)"
+    echo "  1) Только AdGuard Home (DNS 0.0.0.0:53 + блок-листы AGH, Sing-Box на 1053)"
+    echo "  2) Только Sing-Box (.srs списки + SNI, Sing-Box берет DNS 0.0.0.0:53, AGH остановлен)"
+    echo "  3) Оба: AdGuard Home + Sing-Box (двойной щит: DNS AGH + .srs в Sing-Box)"
     echo "  4) Выключить блокировку рекламы (AGH как чистый DNS без фильтрации)"
     DEF_ADB_CHOICE="1"
     [ "$SAVED_USE_AGH" = "no" ] && DEF_ADB_CHOICE="2"
@@ -1307,27 +2066,27 @@ run_installer() {
     case "$INPUT_ADB_CHOICE" in
         2)
             USE_AGH="no"
-            SELECTED_ADBLOCK="mihomo"
-            ADBLOCK_SUMMARY="Только Mihomo (.mrs + SNI, DNS 0.0.0.0:53)"
-            DNS_MODE_DESC="Mihomo напрямую (0.0.0.0:53 + DNAT/dns-hijack, AGH остановлен)"
+            SELECTED_ADBLOCK="singbox"
+            ADBLOCK_SUMMARY="Только Sing-Box (.srs + SNI, DNS 0.0.0.0:53)"
+            DNS_MODE_DESC="Sing-Box напрямую (0.0.0.0:53 + hijack-dns, AGH остановлен)"
             ;;
         3)
             USE_AGH="yes"
             SELECTED_ADBLOCK="both"
-            ADBLOCK_SUMMARY="AdGuard Home + Mihomo (двойной щит)"
-            DNS_MODE_DESC="AdGuard Home (0.0.0.0:53 + DNAT) -> Mihomo (127.0.0.1:1053)"
+            ADBLOCK_SUMMARY="AdGuard Home + Sing-Box (двойной щит)"
+            DNS_MODE_DESC="AdGuard Home (0.0.0.0:53 + DNAT) -> Sing-Box (127.0.0.1:1053)"
             ;;
         4)
             USE_AGH="yes"
             SELECTED_ADBLOCK="off"
             ADBLOCK_SUMMARY="Выключена (режим отладки)"
-            DNS_MODE_DESC="AdGuard Home (0.0.0.0:53 + DNAT) -> Mihomo (127.0.0.1:1053)"
+            DNS_MODE_DESC="AdGuard Home (0.0.0.0:53 + DNAT) -> Sing-Box (127.0.0.1:1053)"
             ;;
         *)
             USE_AGH="yes"
             SELECTED_ADBLOCK="agh"
             ADBLOCK_SUMMARY="Только AdGuard Home (DNS)"
-            DNS_MODE_DESC="AdGuard Home (0.0.0.0:53 + DNAT) -> Mihomo (127.0.0.1:1053)"
+            DNS_MODE_DESC="AdGuard Home (0.0.0.0:53 + DNAT) -> Sing-Box (127.0.0.1:1053)"
             ;;
     esac
 
@@ -1340,18 +2099,18 @@ run_installer() {
         AGH_USER="${INPUT_AGH_USER:-$DEF_AGH_USER}"
 
         if [ -n "$SAVED_PASS" ]; then
-            printf "Введите единый пароль (AdGuard + Mihomo) [Enter = оставить текущий]: "
+            printf "Введите единый пароль (AdGuard + Sing-Box) [Enter = оставить текущий]: "
         else
-            printf "Введите единый пароль (для панели AdGuard Home и secret в Mihomo): "
+            printf "Введите единый пароль (для панели AdGuard Home и secret в Sing-Box): "
         fi
         read -r INPUT_PASS < /dev/tty || true
         INPUT_PASS=$(printf "%s" "$INPUT_PASS" | tr -d '\r\n')
     else
         AGH_USER="${SAVED_AGH_USER:-admin}"
         if [ -n "$SAVED_PASS" ]; then
-            printf "Введите пароль (secret) для Mihomo [Enter = оставить текущий]: "
+            printf "Введите пароль (secret) для Sing-Box [Enter = оставить текущий]: "
         else
-            printf "Введите пароль (secret) для веб-панели Mihomo: "
+            printf "Введите пароль (secret) для веб-панели Sing-Box: "
         fi
         read -r INPUT_PASS < /dev/tty || true
         INPUT_PASS=$(printf "%s" "$INPUT_PASS" | tr -d '\r\n')
@@ -1363,11 +2122,11 @@ run_installer() {
         exit 1
     fi
 
-    # 5. Выбор веб-панели управления Mihomo
+    # 5. Выбор веб-панели управления
     DEF_UI_CHOICE="1"
     [ "$SAVED_UI_TYPE" = "zashboard" ] && DEF_UI_CHOICE="2"
 
-    echo "Выберите веб-панель для Mihomo:"
+    echo "Выберите веб-панель для Sing-Box Extended:"
     echo "  1) MetaCubeXD"
     echo "  2) Zashboard"
     if [ -n "$SAVED_UI_TYPE" ]; then
@@ -1408,6 +2167,7 @@ run_installer() {
     echo "--------------------------------------------------------"
     echo "Итоговая конфигурация развертывания:"
     echo " - ОС:              ${OS_NAME}"
+    echo " - Ядро:            shtorm-7/sing-box-extended (${SB_ARCH})"
     echo " - Основной роутер: ${GW_IP}"
     echo " - Схема DNS:       ${DNS_MODE_DESC}"
     echo " - Антиреклама:     ${ADBLOCK_SUMMARY}"
@@ -1504,30 +2264,32 @@ SYS_EOF
 
     sync_dns_firewall "yes" "keep"
 
-    REQ_PKGS="ca-certificates curl gzip tar kmod-tun kmod-tcp-bbr kmod-nft-tproxy ip-full conntrack wireguard-tools"
+    REQ_PKGS="ca-certificates curl gzip tar jq kmod-tun kmod-tcp-bbr kmod-nft-tproxy kmod-nft-queue ip-full conntrack wireguard-tools"
     [ "$USE_AGH" = "yes" ] && REQ_PKGS="$REQ_PKGS apache-utils"
     NEED_PKGS=""
     for pkg in $REQ_PKGS; do
         apk info -e "$pkg" >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS $pkg"
     done
     [ -n "$NEED_PKGS" ] && { apk update --allow-untrusted || true; apk add --allow-untrusted $NEED_PKGS || true; }
-    disable_apache_daemon
+
+    init_user_lists
 
     modprobe tun 2>/dev/null || true
     modprobe tcp_bbr 2>/dev/null || true
+    modprobe nft_queue 2>/dev/null || true
     sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
     [ -e /dev/net/tun ] || { mkdir -p /dev/net && mknod /dev/net/tun c 10 200; }
 
-    # Если выбран режим бесплатного Amnezia WARP — генерируем пул нод после синхронизации часов и установки пакетов
+    # Если выбран режим бесплатного Amnezia WARP — генерируем пул нод
     if [ "$PROVIDER_TYPE" = "warp" ]; then
         generate_amnezia_warp || true
     fi
 
-    # ЭТАП 2: Загрузка/обновление ядер Mihomo и AdGuard Home
+    # ЭТАП 2: Загрузка/обновление ядер Sing-Box Extended и AdGuard Home
     update_cores_only "no"
 
-    # ЭТАП 3: Генерация конфига Mihomo и установка веб-панели
-    /etc/init.d/mihomo stop 2>/dev/null || true
+    # ЭТАП 3: Генерация конфига Sing-Box Extended и установка веб-панели
+    /etc/init.d/sing-box stop 2>/dev/null || true
 
     if [ "$PROVIDER_TYPE" = "http" ] && [ -n "$SAVED_SUB_URL" ] && [ "$SUB_URL" != "$SAVED_SUB_URL" ]; then
         rm -f "$CUSTOM_SUB_FILE" 2>/dev/null || true
@@ -1536,438 +2298,26 @@ SYS_EOF
     INSTALLED_UI_TYPE=""
     [ -f "$UI_TYPE_FILE" ] && INSTALLED_UI_TYPE=$(cat "$UI_TYPE_FILE" 2>/dev/null | tr -d ' \t\r\n')
 
-    if [ "$INSTALLED_UI_TYPE" != "$UI_TYPE" ] || [ ! -f /etc/mihomo/ui/index.html ]; then
-        install_mihomo_ui "$UI_TYPE" "$UI_NAME" "$UI_TAR_URL"
+    if [ "$INSTALLED_UI_TYPE" != "$UI_TYPE" ] || [ ! -f "${SB_DIR}/ui/index.html" ]; then
+        install_singbox_ui "$UI_TYPE" "$UI_NAME" "$UI_TAR_URL"
     else
         echo "[✓] Веб-панель ${UI_NAME} уже установлена."
     fi
 
-    if [ "$USE_AGH" = "yes" ]; then
-        MIHOMO_DNS_LISTEN="127.0.0.1:1053"
-        HIJACK_PRE="#"
-    else
-        MIHOMO_DNS_LISTEN="0.0.0.0:53"
-        HIJACK_PRE=""
-    fi
+    generate_singbox_config
 
-    if [ "$SELECTED_ADBLOCK" = "mihomo" ] || [ "$SELECTED_ADBLOCK" = "both" ]; then
-        ADB_PRE=""
-    else
-        ADB_PRE="#"
-    fi
-
-    if [ "$PROVIDER_TYPE" = "file" ] || [ "$PROVIDER_TYPE" = "warp" ]; then
-        [ -s "$CUSTOM_SUB_FILE" ] || echo "proxies: []" > "$CUSTOM_SUB_FILE"
-        CUSTOM_SUB_BLOCK="  custom_sub:\n    type: file\n    path: ./proxy_providers/custom_sub.yaml"
-    else
-        CUSTOM_SUB_BLOCK="  custom_sub:\n    type: http\n    url: \"${SUB_URL}\"\n    path: ./proxy_providers/custom_sub.yaml\n    interval: 86400\n    exclude-filter: \"${SUB_FILTER_REGEX}\""
-    fi
-
-    build_device_ip_rules
-    [ -f "$MIHOMO_CONF" ] && cp -f "$MIHOMO_CONF" "${MIHOMO_CONF}.bak"
-
-    cat << CONFIG_EOF > "$MIHOMO_CONF"
-mixed-port: 7890
-allow-lan: true
-bind-address: "*"
-mode: rule
-log-level: warning
-ipv6: false
-unified-delay: true
-tcp-concurrent: true
-global-client-fingerprint: chrome
-keep-alive-interval: 15
-keep-alive-idle: 600
-disable-keep-alive: false
-find-process-mode: off
-geodata-mode: false
-geodata-loader: memconservative
-geo-auto-update: true
-geo-update-interval: 24
-geox-url:
-  mmdb: "${GH_PROXY}https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb"
-  asn: "${GH_PROXY}https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
-external-controller: 0.0.0.0:9090
-secret: "${ADMIN_PASS}"
-external-ui: ui
-external-ui-url: "${GH_PROXY}${UI_URL}"
-profile:
-  store-selected: true
-  store-fake-ip: true
-tun:
-  enable: true
-  stack: mixed
-  device: mihomo-tun
-  auto-route: true
-  auto-detect-interface: true
-  auto-redirect: true
-  strict-route: true
-  endpoint-independent-nat: true
-  gso: true
-  gso-max-size: 65536
-  udp-timeout: 300
-${HIJACK_PRE}  dns-hijack: #DNS_HIJACK
-${HIJACK_PRE}    - "any:53" #DNS_HIJACK
-${HIJACK_PRE}    - "tcp://any:53" #DNS_HIJACK
-sniffer:
-  enable: true
-  force-dns-mapping: true
-  parse-pure-ip: true
-  override-destination: false
-  sniff:
-    HTTP:
-      ports: [80, 8080-8880]
-      override-destination: true
-    TLS:
-      ports: [443, 8443]
-    QUIC:
-      ports: [443, 8443]
-  skip-domain:
-    - "Mijia Cloud"
-    - "+.lan"
-    - "+.local"
-    - "+.home.arpa"
-    - "+.internal"
-    - "+.push.apple.com"
-    - "+.mtalk.google.com"
-    - "+.courier.push.apple.com"
-    - "+.tailscale.com"
-dns:
-  enable: true
-  listen: ${MIHOMO_DNS_LISTEN}
-  ipv6: false
-  prefer-h3: false
-  cache-algorithm: arc
-  use-hosts: true
-  use-system-hosts: true
-  respect-rules: true
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/16
-  fake-ip-filter-mode: blacklist
-  fake-ip-filter:
-    - "*"
-    - "+.lan"
-    - "+.local"
-    - "+.home.arpa"
-    - "+.internal"
-    - "+.localdomain"
-    - "localhost"
-    - "+.localhost"
-    - "+.msftconnecttest.com"
-    - "+.msftncsi.com"
-    - "+.xboxlive.com"
-    - "xbox.*.microsoft.com"
-    - "+.battlenet.com.cn"
-    - "+.stun.*.*"
-    - "+.stun.*.*.*"
-    - "+.stun.playstation.net"
-    - "+.srv.nintendo.net"
-    - "+.steamcontent.com"
-    - "+.push.apple.com"
-    - "+.courier.push.apple.com"
-    - "time.*.apple.com"
-    - "+.tailscale.com"
-    - "rule-set:private_domain"
-    - "rule-set:ntp_domain"
-    - "rule-set:stun_domain"
-    - "rule-set:torrent_domain"
-    - "rule-set:user_direct_domains"
-    - "rule-set:ru_domain"
-    - "+.market.xiaomi.com"
-    - "+.connectivitycheck.gstatic.com"
-    - "+.connectivitycheck.android.com"
-    - "+.captive.apple.com"
-  default-nameserver:
-    - 77.88.8.8
-    - 77.88.8.1
-  nameserver: &proxy_dns
-    - "https://cloudflare-dns.com/dns-query#⚡ Авто (Самый быстрый)"
-    - "https://dns.google/dns-query#⚡ Авто (Самый быстрый)"
-    - "https://dns.quad9.net/dns-query#⚡ Авто (Самый быстрый)"
-  nameserver-policy:
-    "rule-set:private_domain": "${GW_IP}"
-    "*": "${GW_IP}"
-    "+.lan": "${GW_IP}"
-    "+.local": "${GW_IP}"
-    "+.home.arpa": "${GW_IP}"
-    "+.internal": "${GW_IP}"
-    "+.localdomain": "${GW_IP}"
-    "+.in-addr.arpa": "${GW_IP}"
-    "rule-set:user_proxy_domains": *proxy_dns
-    "rule-set:inside_ru_blocked": *proxy_dns
-    "rule-set:refilter_domain": *proxy_dns
-    "rule-set:ru_media_blocked": *proxy_dns
-    "rule-set:ntp_domain": &ru_bootstrap_dns
-      - "https://common.dot.dns.yandex.net/dns-query#DIRECT"
-      - "tls://common.dot.dns.yandex.net#DIRECT"
-      - 77.88.8.8
-      - 77.88.8.1
-    "+.connectivitycheck.gstatic.com": *ru_bootstrap_dns
-    "+.connectivitycheck.android.com": *ru_bootstrap_dns
-    "+.msftconnecttest.com": *ru_bootstrap_dns
-    "+.msftncsi.com": *ru_bootstrap_dns
-    "+.captive.apple.com": *ru_bootstrap_dns
-    "rule-set:user_direct_domains": *ru_bootstrap_dns
-    "rule-set:ru_domain": *ru_bootstrap_dns
-  proxy-server-nameserver:
-    - "https://common.dot.dns.yandex.net/dns-query#DIRECT"
-    - "tls://common.dot.dns.yandex.net#DIRECT"
-    - 77.88.8.8
-    - 77.88.8.1
-  direct-nameserver:
-    - "https://common.dot.dns.yandex.net/dns-query#DIRECT"
-    - "tls://common.dot.dns.yandex.net#DIRECT"
-    - 77.88.8.8
-    - 77.88.8.1
-  direct-nameserver-follow-policy: true
-proxy-providers:
-$(printf '%b' "$CUSTOM_SUB_BLOCK")
-    health-check: &hc_default
-      enable: true
-      url: "https://www.gstatic.com/generate_204"
-      interval: 180
-      timeout: 5000
-      lazy: true
-      expected-status: 204
-    override:
-      udp: true
-      client-fingerprint: chrome
-  warp_nodes:
-    type: file
-    path: ./proxy_providers/warp_nodes.yaml
-    health-check: *hc_default
-    override:
-      udp: true
-  my_nodes:
-    type: file
-    path: ./proxy_providers/my_nodes.yaml
-    health-check: *hc_default
-    override:
-      udp: true
-      client-fingerprint: chrome
-proxy-groups:
-  - name: "⚡ Авто (Самый быстрый)"
-    type: url-test
-    use: [custom_sub, my_nodes, warp_nodes]
-    url: "https://www.gstatic.com/generate_204"
-    interval: 180
-    tolerance: 35
-    timeout: 5000
-    lazy: true
-    expected-status: 204
-  - name: "🛡️ Авто-резерв (Fallback)"
-    type: fallback
-    use: [custom_sub, my_nodes, warp_nodes]
-    url: "https://www.gstatic.com/generate_204"
-    interval: 180
-    timeout: 5000
-    lazy: true
-    expected-status: 204
-  - name: "🔓 Обход блокировок"
-    type: select
-    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", "🐟 Прочий трафик", DIRECT]
-    use: [custom_sub, my_nodes, warp_nodes]
-  - name: "☁️ Cloudflare & CDN"
-    type: select
-    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", "🔓 Обход блокировок", DIRECT]
-    use: [custom_sub, my_nodes, warp_nodes]
-  - name: "▶️ YouTube"
-    type: select
-    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)"]
-    use: [custom_sub, my_nodes, warp_nodes]
-  - name: "🤖 Нейросети (AI)"
-    type: select
-    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)"]
-    use: [custom_sub, my_nodes, warp_nodes]
-    exclude-filter: "(?i)^☁️ WARP"
-  - name: "👾 Discord & Игры"
-    type: select
-    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
-    use: [custom_sub, my_nodes, warp_nodes]
-  - name: "💬 Мессенджеры & Связь"
-    type: select
-    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
-    use: [custom_sub, my_nodes, warp_nodes]
-  - name: "🎵 Spotify"
-    type: select
-    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
-    use: [custom_sub, my_nodes, warp_nodes]
-    exclude-filter: "(?i)^☁️ WARP"
-  - name: "📺 Устройства (Full-VPN)"
-    type: select
-    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", "🔓 Обход блокировок", DIRECT]
-    use: [custom_sub, my_nodes, warp_nodes]
-  - name: "🧲 Торренты"
-    type: select
-    proxies: [DIRECT, "⚡ Авто (Самый быстрый)", REJECT]
-    use: [custom_sub, my_nodes, warp_nodes]
-${ADB_PRE}  - name: "🛑 Реклама" #ADBLOCK_MIHOMO
-${ADB_PRE}    type: select #ADBLOCK_MIHOMO
-${ADB_PRE}    proxies: [REJECT, REJECT-DROP, DIRECT] #ADBLOCK_MIHOMO
-  - name: "🇷🇺 Россия"
-    type: select
-    proxies: [DIRECT, "⚡ Авто (Самый быстрый)"]
-  - name: "🐟 Прочий трафик"
-    type: select
-    proxies: ["⚡ Авто (Самый быстрый)", "🛡️ Авто-резерв (Fallback)", DIRECT]
-    use: [custom_sub, my_nodes, warp_nodes]
-rule-providers:
-  user_direct_domains:
-    type: file
-    behavior: domain
-    format: text
-    path: ./rule_sets/user_direct_domains.list
-  user_proxy_domains:
-    type: file
-    behavior: domain
-    format: text
-    path: ./rule_sets/user_proxy_domains.list
-  private_domain: &mrs_domain
-    type: http
-    behavior: domain
-    format: mrs
-    interval: 86400
-    path: ./rule_sets/private_domain.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/private.mrs"
-  private_ip: &mrs_ip
-    type: http
-    behavior: ipcidr
-    format: mrs
-    interval: 86400
-    path: ./rule_sets/private_ip.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/private.mrs"
-  ntp_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/category-ntp.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ntp.mrs"
-  stun_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/category-stun.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-stun.mrs"
-${ADB_PRE}  ads_domain: #ADBLOCK_MIHOMO
-${ADB_PRE}    <<: *mrs_domain #ADBLOCK_MIHOMO
-${ADB_PRE}    path: ./rule_sets/category-ads-all.mrs #ADBLOCK_MIHOMO
-${ADB_PRE}    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ads-all.mrs" #ADBLOCK_MIHOMO
-${ADB_PRE}  telemetry_domain: #ADBLOCK_MIHOMO
-${ADB_PRE}    <<: *mrs_domain #ADBLOCK_MIHOMO
-${ADB_PRE}    path: ./rule_sets/category-telemetry.mrs #ADBLOCK_MIHOMO
-${ADB_PRE}    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-telemetry.mrs" #ADBLOCK_MIHOMO
-  ai_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/category-ai-!cn.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.mrs"
-  spotify_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/spotify_domain.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/spotify.mrs"
-  torrent_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/tracker.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/tracker.mrs"
-  youtube_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/youtube_domain.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/youtube.mrs"
-  roblox_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/roblox_domain.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/roblox.mrs"
-  discord_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/discord_domain.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/discord.mrs"
-  discord_voice_ip:
-    <<: *mrs_ip
-    path: ./rule_sets/discord_voice_ip.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/mihomo-rule-sets/main/other/discord-voice-ip-list.mrs"
-  communication_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/communication_domain.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-communication.mrs"
-  telegram_ip:
-    <<: *mrs_ip
-    path: ./rule_sets/telegram_ip.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/telegram.mrs"
-  cloudflare_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/cloudflare_domain.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cloudflare.mrs"
-  cloudflare_ip:
-    <<: *mrs_ip
-    path: ./rule_sets/cloudflare_ip.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/cloudflare.mrs"
-  refilter_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/refilter_domain.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/mihomo-rule-sets/main/re-filter/domain-rule.mrs"
-  refilter_ip:
-    <<: *mrs_ip
-    path: ./rule_sets/refilter_ip.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/mihomo-rule-sets/main/re-filter/ip-rule.mrs"
-  inside_ru_blocked:
-    <<: *mrs_domain
-    path: ./rule_sets/inside_ru_blocked.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/mihomo-rule-sets/main/ru-bundle/itdoginfo-inside-russia.mrs"
-  ru_media_blocked:
-    <<: *mrs_domain
-    path: ./rule_sets/category-media-ru-blocked.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-media-ru-blocked.mrs"
-  ru_domain:
-    <<: *mrs_domain
-    path: ./rule_sets/ru_domain.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ru.mrs"
-  ru_ip:
-    <<: *mrs_ip
-    path: ./rule_sets/ru_ip.mrs
-    url: "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/ru.mrs"
-rules:
-  - RULE-SET,private_domain,DIRECT
-  - RULE-SET,private_ip,DIRECT,no-resolve
-$(printf '%b' "$BYPASS_RULES_STR")
-  - RULE-SET,user_direct_domains,DIRECT
-  - RULE-SET,user_proxy_domains,🔓 Обход блокировок
-  - DST-PORT,853,REJECT
-  - DST-PORT,123,DIRECT
-  - RULE-SET,ntp_domain,DIRECT
-${ADB_PRE}  - RULE-SET,ads_domain,🛑 Реклама #ADBLOCK_MIHOMO
-${ADB_PRE}  - RULE-SET,telemetry_domain,🛑 Реклама #ADBLOCK_MIHOMO
-  - RULE-SET,torrent_domain,🧲 Торренты
-  - DST-PORT,6881-6889,🧲 Торренты
-$(printf '%b' "$FORCE_PROXY_RULES_STR")
-  - RULE-SET,ai_domain,🤖 Нейросети (AI)
-  - RULE-SET,spotify_domain,🎵 Spotify
-  - AND,((RULE-SET,youtube_domain),(NETWORK,udp),(DST-PORT,443)),REJECT
-  - RULE-SET,youtube_domain,▶️ YouTube
-  - RULE-SET,roblox_domain,👾 Discord & Игры
-  - RULE-SET,discord_domain,👾 Discord & Игры
-  - RULE-SET,discord_voice_ip,👾 Discord & Игры,no-resolve
-  - RULE-SET,stun_domain,💬 Мессенджеры & Связь
-  - RULE-SET,communication_domain,💬 Мессенджеры & Связь
-  - RULE-SET,telegram_ip,💬 Мессенджеры & Связь,no-resolve
-  - RULE-SET,inside_ru_blocked,🔓 Обход блокировок
-  - RULE-SET,refilter_domain,🔓 Обход блокировок
-  - RULE-SET,ru_media_blocked,🔓 Обход блокировок
-  - RULE-SET,refilter_ip,🔓 Обход блокировок,no-resolve
-  - RULE-SET,cloudflare_domain,☁️ Cloudflare & CDN
-  - RULE-SET,cloudflare_ip,☁️ Cloudflare & CDN,no-resolve
-  - RULE-SET,ru_domain,🇷🇺 Россия
-  - RULE-SET,ru_ip,🇷🇺 Россия,no-resolve
-  - AND,((NETWORK,udp),(DST-PORT,50000-50100)),👾 Discord & Игры
-  - AND,((NETWORK,udp),(DST-PORT,3478)),💬 Мессенджеры & Связь
-  - AND,((NETWORK,udp),(DST-PORT,5349)),💬 Мессенджеры & Связь
-  - AND,((NETWORK,udp),(DST-PORT,19302)),💬 Мессенджеры & Связь
-  - AND,((NETWORK,udp),(DST-PORT,50101-65535)),💬 Мессенджеры & Связь
-  - MATCH,🐟 Прочий трафик
-CONFIG_EOF
-
-    # ЭТАП 4: Настройка AdGuard Home с сохранением пользовательских фильтров и обновлением пароля
+    # ЭТАП 4: Настройка AdGuard Home с сохранением пользовательских фильтров и авто-очисткой apache
     if [ "$USE_AGH" = "yes" ]; then
         echo "Генерация bcrypt-хэша пароля..."
         AGH_PASS_HASH=""
+        if ! command -v htpasswd >/dev/null 2>&1; then
+            apk add --allow-untrusted apache-utils >/dev/null 2>&1 || true
+        fi
         if command -v htpasswd >/dev/null 2>&1; then
             AGH_PASS_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
             [ -z "$AGH_PASS_HASH" ] && AGH_PASS_HASH=$(htpasswd -nbBC 10 "$AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
         fi
+        cleanup_apache_bloat
         [ -z "$AGH_PASS_HASH" ] && { echo "[X] Ошибка генерации bcrypt-хэша!"; exit 1; }
 
         if [ "$SELECTED_ADBLOCK" = "agh" ] || [ "$SELECTED_ADBLOCK" = "both" ]; then
@@ -2046,30 +2396,32 @@ schema_version: 34
 AGH_EOF
         fi
     else
+        cleanup_apache_bloat
         /etc/init.d/adguardhome stop 2>/dev/null || true
         /etc/init.d/adguardhome disable 2>/dev/null || true
     fi
 
-    # ЭТАП 5: Регистрация служб procd (OpenWrt) и защита от удаления при sysupgrade
-    cat << 'INIT_MIHOMO' > /etc/init.d/mihomo
+    # ЭТАП 5: Регистрация служб procd (с лимитом памяти Go GOMEMLIMIT=200MiB) и защита при sysupgrade
+    cat << 'INIT_SB' > /etc/init.d/sing-box
 #!/bin/sh /etc/rc.common
 USE_PROCD=1
 START=95
 STOP=10
 start_service() {
     procd_open_instance
-    procd_set_param command /usr/bin/mihomo -d /etc/mihomo
-    procd_set_param file /etc/mihomo/config.yaml
+    procd_set_param command /usr/bin/sing-box run -c /etc/sing-box/config.json -D /etc/sing-box
+    procd_set_param env GOGC=50 GOMEMLIMIT=200MiB ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true
+    procd_set_param file /etc/sing-box/config.json
     procd_set_param stdout 1
     procd_set_param stderr 1
     procd_set_param respawn
     procd_set_param limits nofile="65535 65535"
     procd_close_instance
 }
-INIT_MIHOMO
-    chmod +x /etc/init.d/mihomo
-    /etc/init.d/mihomo enable 2>/dev/null || true
-    /etc/init.d/mihomo restart 2>/dev/null || /etc/init.d/mihomo start 2>/dev/null || true
+INIT_SB
+    chmod +x /etc/init.d/sing-box
+    /etc/init.d/sing-box enable 2>/dev/null || true
+    /etc/init.d/sing-box restart 2>/dev/null || /etc/init.d/sing-box start 2>/dev/null || true
 
     if [ "$USE_AGH" = "yes" ]; then
         sleep 2
@@ -2112,7 +2464,7 @@ INIT_AGH
     echo " - IP-адрес шлюза:     ${CURRENT_IP}"
     echo " - Основной роутер:    ${GW_IP}"
     echo " - Антиреклама:        ${ADBLOCK_SUMMARY}"
-    echo " - Панель Mihomo:      http://${CURRENT_IP}:9090/ui [${UI_NAME}] (пароль: ${ADMIN_PASS})"
+    echo " - Панель Sing-Box:    http://${CURRENT_IP}:9090/ui [${UI_NAME}] (пароль: ${ADMIN_PASS})"
     if [ "$USE_AGH" = "yes" ]; then
         echo " - Панель AdGuard:     http://${CURRENT_IP}:3000 (логин: ${AGH_USER} / пароль: ${ADMIN_PASS})"
     fi
@@ -2120,42 +2472,41 @@ INIT_AGH
     echo "========================================================"
 }
 
-# Расширенная диагностика шлюза и проверка на утечки (Self-Test + Anti-Leak)
+# Расширенная диагностика шлюза, замер задержки (Ping) и проверка на утечки (Self-Test + Anti-Leak)
 run_self_test() {
-    echo "=== [Self-Test] Диагностика прозрачного шлюза и Anti-Leak ==="
-    # Ожидание первичной загрузки подписки и инициализации интерфейса mihomo-tun (до 12 сек)
+    echo "=== [Self-Test] Диагностика прозрачного шлюза Sing-Box Extended ==="
     WAIT_CNT=0
     while [ "$WAIT_CNT" -lt 12 ]; do
-        if pgrep mihomo >/dev/null 2>&1 && ip link show mihomo-tun >/dev/null 2>&1; then
+        if pgrep sing-box >/dev/null 2>&1 && ip link show singbox-tun >/dev/null 2>&1; then
             break
         fi
         sleep 1
         WAIT_CNT=$((WAIT_CNT + 1))
     done
 
-    if pgrep mihomo >/dev/null 2>&1; then
-        echo "[✓] Служба Mihomo: ЗАПУЩЕНА"
+    if pgrep sing-box >/dev/null 2>&1; then
+        echo "[✓] Служба Sing-Box Extended: ЗАПУЩЕНА"
     else
-        echo "[X] Служба Mihomo: ОСТАНОВЛЕНА"
+        echo "[X] Служба Sing-Box Extended: ОСТАНОВЛЕНА"
     fi
 
     if pgrep AdGuardHome >/dev/null 2>&1; then
         echo "[✓] Служба AdGuard Home: ЗАПУЩЕНА"
     else
-        echo "[i] Служба AdGuard Home: ОСТАНОВЛЕНА (DNS обрабатывает Mihomo)"
+        echo "[i] Служба AdGuard Home: ОСТАНОВЛЕНА (DNS обрабатывает Sing-Box)"
     fi
 
     if is_warp_enabled; then
-        echo "[✓] Пул Amnezia WARP: АКТИВЕН (8 бесплатных нод Cloudflare + EU)"
+        echo "[✓] Пул Amnezia WARP 2.0: АКТИВЕН (4 бесплатные ноды Cloudflare Anycast)"
     fi
 
     detect_adblock_mode
     echo "[✓] Режим антирекламы: ${ADBLOCK_STAT} ${ADBLOCK_DESC}"
 
-    if ip link show mihomo-tun >/dev/null 2>&1; then
-        echo "[✓] TUN-интерфейс (mihomo-tun): АКТИВЕН"
+    if ip link show singbox-tun >/dev/null 2>&1; then
+        echo "[✓] TUN-интерфейс (singbox-tun): АКТИВЕН"
     else
-        echo "[X] TUN-интерфейс (mihomo-tun): НЕ НАЙДЕН"
+        echo "[X] TUN-интерфейс (singbox-tun): НЕ НАЙДЕН"
     fi
 
     RP_STAT=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo "unknown")
@@ -2168,13 +2519,17 @@ run_self_test() {
         echo "[✓] Защита от утечек: IPv6 Drop + DoT/DoQ 853 Reject + DNS 53 Redirect активны"
     fi
 
-    if [ -f "$MIHOMO_CONF" ] && pgrep mihomo >/dev/null 2>&1; then
-        SECRET=$(sed -n 's/^secret:[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" | head -n 1 | tr -d '\r\n')
-        ACTIVE_NODE=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${SECRET}" "http://127.0.0.1:9090/proxies" 2>/dev/null | sed -n 's/.*"⚡ Авто (Самый быстрый)".*"now":"\([^"]*\)".*/\1/p' | head -n 1)
+    if [ -f "$SB_CONF" ] && pgrep sing-box >/dev/null 2>&1; then
+        load_gateway_env
+        ACTIVE_NODE=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null | sed -n 's/.*"⚡ Авто (Самый быстрый)".*"now":"\([^"]*\)".*/\1/p' | head -n 1)
         [ -n "$ACTIVE_NODE" ] && echo "[✓] Активная нода (Авто): ${ACTIVE_NODE}"
         CF_TRACE=$(curl -fsS --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
         if [ -n "$CF_TRACE" ]; then
             echo "[✓] Внешний выход через туннель (Cloudflare Trace): ${CF_TRACE}"
+            PING_RU=$(curl -o /dev/null -fsS --connect-timeout 2 -w '%{time_connect}' "http://ya.ru" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
+            PING_CF=$(curl -o /dev/null -fsS --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://cp.cloudflare.com/generate_204" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
+            PING_GG=$(curl -o /dev/null -fsS --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://www.gstatic.com/generate_204" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
+            echo "[✓] Задержка (HTTP Ping): РФ Напрямую: ${PING_RU} | Туннель CF: ${PING_CF} | Google: ${PING_GG}"
         else
             echo "[!] Туннель еще прогревается или подписка недоступна."
         fi
@@ -2192,33 +2547,32 @@ if [ -f "$0" ] && [ "$0" != "$INSTALL_PATH" ] && [ "$SCRIPT_BASE" != "sh" ] && [
 fi
 
 # ==============================================================================
-# Интерактивное меню управления (OpenWrt 25.x)
+# Интерактивное меню управления (OpenWrt 25.x — Sing-Box Extended)
 # ==============================================================================
 show_menu() {
     init_user_lists
-    ensure_mihomo_config_tags
     ensure_sysupgrade_persistence
     refresh_remote_versions
     while true; do
         clear
         echo "========================================================"
-        echo "     Панель управления шлюзом (OpenWrt APK Edition)     "
+        echo "  Панель управления шлюзом (Sing-Box Extended Edition)  "
         echo "========================================================"
         print_gateway_header
         echo "--------------------------------------------------------"
-        echo " 1) Статус служб и глубокий тест на утечки (Self-Test)"
-        echo " 2) Подписка, личные ключи и бесплатный Amnezia WARP"
-        echo " 3) Обновить ядра Mihomo, AdGuard Home и веб-панель"
+        echo " 1) Статус служб, пинг туннеля и тест на утечки (Self-Test)"
+        echo " 2) Подписка, личные ключи и бесплатный Amnezia WARP 2.0"
+        echo " 3) Обновить ядра Sing-Box Extended, AdGuard Home и UI"
         echo " 4) Перезапустить службы + сброс conntrack и Fake-IP кэша"
-        echo " 5) Посмотреть живые логи Mihomo (logread)"
+        echo " 5) Посмотреть живые логи Sing-Box (logread)"
         echo " 6) Полная перенастройка шлюза (Мастер установки)"
-        echo " 7) Сменить веб-панель Mihomo (MetaCubeXD / Zashboard)"
+        echo " 7) Сменить веб-панель (MetaCubeXD / Zashboard)"
         echo " 8) Свои домены: добавить/очистить (В прокси / Напрямую)"
         echo " 9) Маршрутизация устройств по IP (Обход DIRECT / Full-VPN)"
         echo " 10) Режим паузы / Бэкап и восстановление настроек"
         echo " 11) Автообновление (поставил и забыл) — Бро я думаю ты осознаешь последствия ,_,"
-        echo " 12) Блокировка рекламы и DNS: переключить (AGH / Mihomo / Оба / Выкл)"
-        echo " 13) Аппаратный Kill-Switch (защита от утечек при падении Mihomo)"
+        echo " 12) Блокировка рекламы и DNS: переключить (AGH / SingBox / Оба / Выкл)"
+        echo " 13) Аппаратный Kill-Switch (защита от утечек при падении Sing-Box)"
         echo " 0) Выход"
         echo "--------------------------------------------------------"
         printf "Выберите действие [0-13]: "
@@ -2234,12 +2588,12 @@ show_menu() {
                 read -r _ < /dev/tty
                 ;;
             2)
-                echo "=== Управление подпиской, ключами и Amnezia WARP ==="
+                echo "=== Управление подпиской, ключами и Amnezia WARP 2.0 ==="
                 echo " 1) Заменить основную подписку (http://...), основной ключ или 'warp'"
-                echo " 2) Добавить дополнительный личный ключ (vless/hy2/ss/tuic/anytls) в пул my_nodes"
+                echo " 2) Добавить дополнительный личный ключ (vless/hy2/ss/tuic/anytls/xhttp) в пул my_nodes"
                 echo " 3) Очистить дополнительные личные ключи (${CUSTOM_NODES_FILE})"
-                echo " 4) Сгенерировать / обновить БЕСПЛАТНЫЙ Amnezia WARP (8 нод: Cloudflare + Европа)"
-                echo " 5) Отключить / очистить ноды Amnezia WARP (${WARP_NODES_FILE})"
+                echo " 4) Сгенерировать / обновить БЕСПЛАТНЫЙ Amnezia WARP 2.0 (4 ноды Cloudflare Anycast)"
+                echo " 5) Отключить / очистить ноды Amnezia WARP 2.0 (${WARP_NODES_FILE})"
                 echo " 0) Назад"
                 printf "Выбор [0-5]: "
                 read -r SUB_ACT < /dev/tty || true
@@ -2248,43 +2602,22 @@ show_menu() {
                         printf "Введите новую ссылку (http://...), прямой ключ (vless/hy2...) или 'warp': "
                         read -r NEW_SUB < /dev/tty || true
                         NEW_SUB=$(printf "%s" "$NEW_SUB" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                        if [ -n "$NEW_SUB" ] && [ -f "$MIHOMO_CONF" ]; then
-                            cp -f "$MIHOMO_CONF" "${MIHOMO_CONF}.bak"
+                        if [ -n "$NEW_SUB" ] && [ -f "$SB_CONF" ]; then
+                            load_gateway_env
                             apply_subscription_input "$NEW_SUB"
                             if [ "$PROVIDER_TYPE" = "warp" ]; then
                                 generate_amnezia_warp || true
-                            fi
-                            if [ "$PROVIDER_TYPE" = "file" ] || [ "$PROVIDER_TYPE" = "warp" ]; then
-                                awk '
-                                    /^  custom_sub:/ {
-                                        print "  custom_sub:"
-                                        print "    type: file"
-                                        print "    path: ./proxy_providers/custom_sub.yaml"
-                                        in_sub=1; next
-                                    }
-                                    in_sub && /^    health-check:/ { in_sub=0 }
-                                    in_sub { next }
-                                    { print }
-                                ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
-                            else
+                            elif [ "$PROVIDER_TYPE" = "http" ]; then
                                 rm -f "$CUSTOM_SUB_FILE" 2>/dev/null || true
-                                awk -v url="$SUB_URL" -v flt="$SUB_FILTER_REGEX" '
-                                    /^  custom_sub:/ {
-                                        print "  custom_sub:"
-                                        print "    type: http"
-                                        print "    url: \"" url "\""
-                                        print "    path: ./proxy_providers/custom_sub.yaml"
-                                        print "    interval: 86400"
-                                        print "    exclude-filter: \"" flt "\""
-                                        in_sub=1; next
-                                    }
-                                    in_sub && /^    health-check:/ { in_sub=0 }
-                                    in_sub { next }
-                                    { print }
-                                ' "$MIHOMO_CONF" > "${MIHOMO_CONF}.tmp" && mv "${MIHOMO_CONF}.tmp" "$MIHOMO_CONF"
                             fi
-                            reload_mihomo_api
-                            echo "[✓] Основной источник прокси успешно обновлен на лету!"
+                            generate_singbox_config
+                            if check_singbox_config; then
+                                /etc/init.d/sing-box restart 2>/dev/null || true
+                                echo "[✓] Основной источник прокси успешно обновлен!"
+                            else
+                                mv "${SB_CONF}.bak" "$SB_CONF"
+                                echo "[X] Ошибка проверки конфига! Выполнен авто-откат."
+                            fi
                         else
                             echo "[X] Ошибка: пустой ввод или конфиг не найден."
                         fi
@@ -2297,29 +2630,38 @@ show_menu() {
                         if [ -n "$EXTRA_KEY" ]; then
                             sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
                             format_uri_keys "$EXTRA_KEY" >> "$CUSTOM_NODES_FILE"
-                            reload_mihomo_api
+                            load_gateway_env
+                            generate_singbox_config
+                            /etc/init.d/sing-box restart 2>/dev/null || true
+                            reload_singbox_api
                             echo "[✓] Ключ добавлен в локальный пул my_nodes и подключен к автовыбору!"
                         fi
                         sleep 2
                         ;;
                     3)
                         echo "proxies: []" > "$CUSTOM_NODES_FILE"
-                        reload_mihomo_api
+                        load_gateway_env
+                        generate_singbox_config
+                        /etc/init.d/sing-box restart 2>/dev/null || true
                         echo "[✓] Дополнительные личные ключи очищены."
                         sleep 2
                         ;;
                     4)
                         if generate_amnezia_warp; then
-                            ensure_mihomo_config_tags
-                            reload_mihomo_api
-                            echo "[✓] 8 нод Amnezia WARP подключены ко всем группам в веб-панели!"
+                            load_gateway_env
+                            generate_singbox_config
+                            /etc/init.d/sing-box restart 2>/dev/null || true
+                            reload_singbox_api
+                            echo "[✓] Группа '☁️ Amnezia WARP' (4 ноды Cloudflare Anycast) добавлена в веб-панель!"
                         fi
                         sleep 3
                         ;;
                     5)
-                        echo "proxies: []" > "$WARP_NODES_FILE"
-                        reload_mihomo_api
-                        echo "[✓] Пул нод Amnezia WARP отключен и очищен."
+                        echo '{"outbounds": []}' > "$WARP_NODES_FILE"
+                        load_gateway_env
+                        generate_singbox_config
+                        /etc/init.d/sing-box restart 2>/dev/null || true
+                        echo "[✓] Пул нод Amnezia WARP 2.0 отключен и очищен."
                         sleep 2
                         ;;
                 esac
@@ -2327,8 +2669,8 @@ show_menu() {
             3)
                 echo "Проверка и тихое обновление ядер и веб-панели..."
                 update_cores_only "yes"
-                /etc/init.d/mihomo restart 2>/dev/null || true
-                if grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null && [ -x /usr/bin/AdGuardHome ]; then
+                /etc/init.d/sing-box restart 2>/dev/null || true
+                if grep -q '"listen_port": 1053' "$SB_CONF" 2>/dev/null && [ -x /usr/bin/AdGuardHome ]; then
                     /etc/init.d/adguardhome restart 2>/dev/null || true
                 fi
                 refresh_remote_versions
@@ -2336,26 +2678,29 @@ show_menu() {
                 read -r _ < /dev/tty
                 ;;
             4)
-                echo "Проверка синтаксиса конфигурации Mihomo..."
-                if /usr/bin/mihomo -d "$MIHOMO_DIR" -t; then
-                    reload_mihomo_api
+                echo "Проверка синтаксиса конфигурации Sing-Box Extended..."
+                if check_singbox_config; then
+                    reload_singbox_api
                     conntrack -F >/dev/null 2>&1 || true
-                    /etc/init.d/mihomo restart 2>/dev/null || true
-                    if grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null; then
+                    /etc/init.d/sing-box restart 2>/dev/null || true
+                    if grep -q '"listen_port": 1053' "$SB_CONF" 2>/dev/null; then
                         /etc/init.d/adguardhome restart 2>/dev/null || true
                     fi
                     echo "[✓] Кэш Fake-IP и таблица conntrack очищены, службы успешно перезапущены."
                 else
-                    echo "[X] Конфигурация повреждена! Проверьте ошибки выше."
+                    echo "[X] Конфигурация повреждена! Подробности:"
+                    ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true \
+                        /usr/bin/sing-box check -c "$SB_CONF" -D "$SB_DIR" || true
                 fi
                 sleep 2
                 ;;
             5)
-                echo "=== Последние записи лога Mihomo ==="
+                echo "=== Последние записи лога Sing-Box Extended ==="
                 if command -v logread >/dev/null 2>&1; then
-                    logread -e mihomo | tail -n 45
+                    logread -e sing-box | tail -n 45
                 else
-                    /usr/bin/mihomo -d "$MIHOMO_DIR" -t
+                    ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true \
+                        /usr/bin/sing-box check -c "$SB_CONF" -D "$SB_DIR"
                 fi
                 printf "\nНажмите Enter для возврата в меню..."
                 read -r _ < /dev/tty
@@ -2367,36 +2712,34 @@ show_menu() {
                 read -r _ < /dev/tty
                 ;;
             7)
-                if [ ! -f "$MIHOMO_CONF" ]; then
+                if [ ! -f "$SB_CONF" ]; then
                     echo "[X] Конфигурация не найдена. Запустите пункт 6."
                     sleep 2
                     continue
                 fi
-                check_github_mirror
-                echo "Выберите веб-панель Mihomo:"
+                load_gateway_env
+                echo "Выберите веб-панель Sing-Box:"
                 echo " 1) MetaCubeXD"
                 echo " 2) Zashboard"
                 printf "Ваш выбор [1-2]: "
                 read -r UI_SEL < /dev/tty || true
                 case "$UI_SEL" in
                     2)
-                        NEW_UI_TYPE="zashboard"
+                        UI_TYPE="zashboard"
                         NEW_UI_NAME="Zashboard"
-                        NEW_UI_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip"
                         NEW_UI_TAR_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.tar.gz"
                         ;;
                     1)
-                        NEW_UI_TYPE="metacubexd"
+                        UI_TYPE="metacubexd"
                         NEW_UI_NAME="MetaCubeXD"
-                        NEW_UI_URL="https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
                         NEW_UI_TAR_URL="https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.tar.gz"
                         ;;
                     *)
                         continue
                         ;;
                 esac
-                sed -i "s|^external-ui-url:.*|external-ui-url: \"${GH_PROXY}${NEW_UI_URL}\"|" "$MIHOMO_CONF"
-                install_mihomo_ui "$NEW_UI_TYPE" "$NEW_UI_NAME" "$NEW_UI_TAR_URL"
+                generate_singbox_config
+                install_singbox_ui "$UI_TYPE" "$NEW_UI_NAME" "$NEW_UI_TAR_URL"
                 echo "[✓] Панель переключена на ${NEW_UI_NAME}! Обновите страницу в браузере (Ctrl+F5)."
                 sleep 2
                 ;;
@@ -2422,7 +2765,8 @@ show_menu() {
                         if [ -n "$D_IN" ]; then
                             case "$D_IN" in +.*) ;; *.*) D_IN="+.$D_IN" ;; esac
                             grep -qxF "$D_IN" "$USER_PROXY_FILE" 2>/dev/null || echo "$D_IN" >> "$USER_PROXY_FILE"
-                            reload_mihomo_api
+                            sync_user_domain_rulesets
+                            /etc/init.d/sing-box restart 2>/dev/null || true
                             echo "[✓] Добавлено в прокси: $D_IN"
                         fi
                         sleep 2
@@ -2434,7 +2778,8 @@ show_menu() {
                         if [ -n "$D_IN" ]; then
                             case "$D_IN" in +.*) ;; *.*) D_IN="+.$D_IN" ;; esac
                             grep -qxF "$D_IN" "$USER_DIRECT_FILE" 2>/dev/null || echo "$D_IN" >> "$USER_DIRECT_FILE"
-                            reload_mihomo_api
+                            sync_user_domain_rulesets
+                            /etc/init.d/sing-box restart 2>/dev/null || true
                             echo "[✓] Добавлено напрямую: $D_IN"
                         fi
                         sleep 2
@@ -2442,7 +2787,8 @@ show_menu() {
                     3)
                         echo "+.localdomain" > "$USER_DIRECT_FILE"
                         echo "+.chatgpt.com" > "$USER_PROXY_FILE"
-                        reload_mihomo_api
+                        sync_user_domain_rulesets
+                        /etc/init.d/sing-box restart 2>/dev/null || true
                         echo "[✓] Пользовательские списки доменов сброшены."
                         sleep 2
                         ;;
@@ -2470,9 +2816,16 @@ show_menu() {
                         if [ -n "$IP_IN" ]; then
                             sed -i "\|^${IP_IN}$|d" "$USER_FORCE_PROXY_IPS" 2>/dev/null || true
                             grep -qxF "$IP_IN" "$USER_BYPASS_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_BYPASS_IPS"
-                            sync_device_ips_in_config
-                            conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
-                            echo "[✓] Устройство ${IP_IN} теперь идет мимо прокси (DIRECT)."
+                            load_gateway_env
+                            generate_singbox_config
+                            if check_singbox_config; then
+                                /etc/init.d/sing-box restart 2>/dev/null || true
+                                conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
+                                echo "[✓] Устройство ${IP_IN} теперь идет мимо прокси (DIRECT)."
+                            else
+                                mv "${SB_CONF}.bak" "$SB_CONF"
+                                echo "[X] Ошибка синтаксиса IP! Выполнен авто-откат."
+                            fi
                         fi
                         sleep 2
                         ;;
@@ -2483,16 +2836,25 @@ show_menu() {
                         if [ -n "$IP_IN" ]; then
                             sed -i "\|^${IP_IN}$|d" "$USER_BYPASS_IPS" 2>/dev/null || true
                             grep -qxF "$IP_IN" "$USER_FORCE_PROXY_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_FORCE_PROXY_IPS"
-                            sync_device_ips_in_config
-                            conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
-                            echo "[✓] Трафик устройства ${IP_IN} направлен в группу '📺 Устройства (Full-VPN)'."
+                            load_gateway_env
+                            generate_singbox_config
+                            if check_singbox_config; then
+                                /etc/init.d/sing-box restart 2>/dev/null || true
+                                conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
+                                echo "[✓] Трафик устройства ${IP_IN} направлен в группу '📺 Устройства (Full-VPN)'."
+                            else
+                                mv "${SB_CONF}.bak" "$SB_CONF"
+                                echo "[X] Ошибка синтаксиса IP! Выполнен авто-откат."
+                            fi
                         fi
                         sleep 2
                         ;;
                     3)
                         : > "$USER_BYPASS_IPS"
                         : > "$USER_FORCE_PROXY_IPS"
-                        sync_device_ips_in_config
+                        load_gateway_env
+                        generate_singbox_config
+                        /etc/init.d/sing-box restart 2>/dev/null || true
                         conntrack -F >/dev/null 2>&1 || true
                         echo "[✓] Списки маршрутизации по IP очищены."
                         sleep 2
@@ -2508,31 +2870,31 @@ show_menu() {
                 echo " 0) Назад"
                 printf "Выбор: "
                 read -r SRV_ACT < /dev/tty || true
-                SECRET=$(sed -n 's/^secret:[[:space:]]*"\([^"]*\)".*/\1/p' "$MIHOMO_CONF" 2>/dev/null | head -n 1 | tr -d '\r\n')
+                load_gateway_env
                 case "$SRV_ACT" in
                     1)
-                        curl -fsS -X PATCH -H "Authorization: Bearer ${SECRET}" -H "Content-Type: application/json" \
+                        curl -fsS -X PATCH -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
                             -d '{"mode":"direct"}' "http://127.0.0.1:9090/configs" >/dev/null 2>&1 || true
                         echo "[✓] Шлюз переведен в режим паузы (весь трафик идет напрямую в DIRECT)."
                         sleep 2
                         ;;
                     2)
-                        curl -fsS -X PATCH -H "Authorization: Bearer ${SECRET}" -H "Content-Type: application/json" \
+                        curl -fsS -X PATCH -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
                             -d '{"mode":"rule"}' "http://127.0.0.1:9090/configs" >/dev/null 2>&1 || true
                         echo "[✓] Режим маршрутизации по правилам (rule) восстановлен."
                         sleep 2
                         ;;
                     3)
-                        tar -czf "$BACKUP_ARCHIVE" /etc/mihomo /etc/AdGuardHome/AdGuardHome.yaml 2>/dev/null || \
-                        tar -czf "$BACKUP_ARCHIVE" /etc/mihomo 2>/dev/null
+                        tar -czf "$BACKUP_ARCHIVE" /etc/sing-box /etc/AdGuardHome/AdGuardHome.yaml 2>/dev/null || \
+                        tar -czf "$BACKUP_ARCHIVE" /etc/sing-box 2>/dev/null
                         echo "[✓] Архив сохранен в ${BACKUP_ARCHIVE}"
                         sleep 2
                         ;;
                     4)
                         if [ -f "$BACKUP_ARCHIVE" ]; then
                             tar -xzf "$BACKUP_ARCHIVE" -C /
-                            /etc/init.d/mihomo restart 2>/dev/null || true
-                            if grep -q "listen: 127.0.0.1:1053" "$MIHOMO_CONF" 2>/dev/null; then
+                            /etc/init.d/sing-box restart 2>/dev/null || true
+                            if grep -q '"listen_port": 1053' "$SB_CONF" 2>/dev/null; then
                                 /etc/init.d/adguardhome restart 2>/dev/null || true
                             else
                                 /etc/init.d/adguardhome stop 2>/dev/null || true
@@ -2546,7 +2908,7 @@ show_menu() {
                 esac
                 ;;
             11)
-                echo "=== Автообновление Mihomo, AdGuard Home и веб-панелей ==="
+                echo "=== Автообновление Sing-Box Extended, AdGuard Home и веб-панелей ==="
                 echo " ⚠️  Бро я думаю ты осознаешь последствия ,_,"
                 echo "--------------------------------------------------------"
                 if is_autoupdate_enabled; then
@@ -2589,24 +2951,24 @@ show_menu() {
                 echo "=== Управление блокировкой рекламы и ролью DNS ==="
                 echo " Текущий режим: ${ADBLOCK_STAT} (${ADBLOCK_DESC})"
                 echo "--------------------------------------------------------"
-                echo " 1) Только AdGuard Home (DNS 0.0.0.0:53 + фильтрация AGH, Mihomo на 1053)"
-                echo " 2) Только Mihomo (.mrs списки + SNI, AGH останавливается, DNS 0.0.0.0:53 берет Mihomo)"
-                echo " 3) Оба: AdGuard Home + Mihomo (двойной щит: DNS AGH + .mrs/SNI в Mihomo)"
+                echo " 1) Только AdGuard Home (DNS 0.0.0.0:53 + фильтрация AGH, Sing-Box на 1053)"
+                echo " 2) Только Sing-Box (.srs списки + SNI, AGH останавливается, DNS 0.0.0.0:53 берет Sing-Box)"
+                echo " 3) Оба: AdGuard Home + Sing-Box (двойной щит: DNS AGH + .srs/SNI в Sing-Box)"
                 echo " 4) Выключить блокировку рекламы (режим отладки)"
                 echo " 0) Назад"
                 printf "Выбор [0-4]: "
                 read -r ADB_ACT < /dev/tty || true
                 case "$ADB_ACT" in
-                    1) apply_adblock_mode "agh";    sleep 2 ;;
-                    2) apply_adblock_mode "mihomo"; sleep 2 ;;
-                    3) apply_adblock_mode "both";   sleep 2 ;;
-                    4) apply_adblock_mode "off";    sleep 2 ;;
+                    1) apply_adblock_mode "agh";     sleep 2 ;;
+                    2) apply_adblock_mode "singbox"; sleep 2 ;;
+                    3) apply_adblock_mode "both";    sleep 2 ;;
+                    4) apply_adblock_mode "off";     sleep 2 ;;
                 esac
                 ;;
             13)
                 echo "=== Аппаратный Kill-Switch (fw4 / nftables) ==="
-                echo "Блокирует любую прямую маршрутизацию из br-lan в основной роутер в обход mihomo-tun."
-                echo "Если служба Mihomo упадет, клиенты не «светят» реальный российский IP провайдера."
+                echo "Блокирует любую прямую маршрутизацию из br-lan в основной роутер в обход singbox-tun."
+                echo "Если служба Sing-Box упадет, клиенты не «светят» реальный российский IP провайдера."
                 echo "--------------------------------------------------------"
                 echo " 1) ВКЛЮЧИТЬ строгий Kill-Switch (рекомендуется против утечек)"
                 echo " 2) ВЫКЛЮЧИТЬ строгий Kill-Switch (оставить только защиту IPv6, DoT 853 и DNS 53)"
@@ -2636,14 +2998,9 @@ show_menu() {
 # Маршрутизация аргументов командной строки
 if [ "${1:-}" = "autoupdate" ]; then
     run_autoupdate
-elif [ ! -f "$MIHOMO_CONF" ] || [ "${1:-}" = "install" ]; then
+elif [ ! -f "$SB_CONF" ] || [ "${1:-}" = "install" ]; then
     run_installer
 else
     show_menu
 fi
-EOF
-
-chmod +x /tmp/setup_gateway.sh
-cp -f /tmp/setup_gateway.sh /usr/bin/gateway
-chmod +x /usr/bin/gateway
-gateway install
+# ==================== [ КОНЕЦ ЧАСТИ 4 ИЗ 4 ] =====================
