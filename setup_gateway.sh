@@ -291,7 +291,7 @@ check_singbox_config() {
         /usr/bin/sing-box check -c "$SB_CONF" -D "$SB_DIR" >/dev/null 2>&1
 }
 
-# Проверка 3 независимых слотов прокси: Слот 1 (Подписки HTTP), Слот 2 (my_nodes), Слот 3 (WARP)
+# Проверка 3 независимых слотов прокси: Слот 1 (Подписки HTTP), Слот 2 (my_nodes), Слот 3 (WARP + MASQUE)
 is_sub_enabled() {
     case "${SUB_URL:-}" in
         *http://* | *https://*) return 0 ;;
@@ -323,7 +323,7 @@ count_my_nodes() {
 }
 
 is_warp_enabled() {
-    [ -f "$WARP_NODES_FILE" ] && grep -q '"type":[[:space:]]*"wireguard"' "$WARP_NODES_FILE" 2>/dev/null
+    [ -f "$WARP_NODES_FILE" ] && grep -Eq '"type":[[:space:]]*"(wireguard|masque)"' "$WARP_NODES_FILE" 2>/dev/null
 }
 
 is_telegram_configured() {
@@ -1028,7 +1028,6 @@ FORCE_GRP
         ],
         "action": "reject"
       },
-      ${FORCE_ROUTE_RULE}
       {
         "rule_set": [
           "youtube_domain",
@@ -1044,6 +1043,7 @@ FORCE_GRP
         ],
         "action": "reject"
       },
+      ${FORCE_ROUTE_RULE}
       {
         "rule_set": [
           "youtube_domain",
@@ -1286,51 +1286,101 @@ FORCE_GRP
 }
 CONFIG_EOF
 
-    # Безопасная подстановка секретов и сборка .endpoints и группы "☁️ Amnezia WARP"
+    # Безопасная подстановка секретов и сборка гибридного пула "☁️ Amnezia WARP" (4 UDP AWG 2.0 + 1 TCP MASQUE H2)
     if command -v jq >/dev/null 2>&1; then
         if is_warp_enabled; then
             if [ "$PROVIDER_TAGS_JSON" != "[]" ]; then
-                jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" --slurpfile w "$WARP_NODES_FILE" '
-                    .experimental.clash_api.secret = $secret
+                jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
+                    ($w[0].masque // {
+                        "type": "masque",
+                        "tag": "☁️ WARP MASQUE (TCP/H2)",
+                        "use_http2": true,
+                        "use_ipv6": false,
+                        "profile": {
+                            "detour": "DIRECT",
+                            "id": "",
+                            "auth_token": "",
+                            "license_key": $wlic
+                        },
+                        "address": "162.159.198.2",
+                        "port": 443,
+                        "udp_timeout": "5m0s",
+                        "udp_keepalive_period": "30s",
+                        "reconnect_delay": "5s",
+                        "congestion_controller": "bbr",
+                        "tls": {
+                            "server_name": "www.cloudflare.com",
+                            "insecure": false,
+                            "fragment": true,
+                            "fragment_fallback_delay": "500ms"
+                        }
+                    }) as $msq
+                    | (($w[0].outbounds | map(.tag)) + [$msq.tag]) as $warp_tags
+                    | .experimental.clash_api.secret = $secret
                     | (.dns.servers[] | select(.tag=="dns_local") | .server) = $gw
-                    | .endpoints = $w[0].outbounds
-                    | (.outbounds[] | select(.type == "selector" and .providers != null) | .outbounds) += ["☁️ Amnezia WARP"]
+                    | .endpoints = ($w[0].outbounds // [])
+                    | (.outbounds[] | select(.type == "selector" and .providers != null) | .outbounds) += ["☁️ Amnezia WARP", $msq.tag]
                     | .outbounds = (
                         [.outbounds[0]] + [{
                             "type": "urltest",
                             "tag": "☁️ Amnezia WARP",
-                            "outbounds": ($w[0].outbounds | map(.tag)),
+                            "outbounds": $warp_tags,
                             "url": "https://cp.cloudflare.com/generate_204",
                             "interval": "3m",
                             "tolerance": 50,
                             "idle_timeout": "30m"
-                        }] + .outbounds[1:]
+                        }] + .outbounds[1:-1] + [$msq, .outbounds[-1]]
                     )
                 ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
             else
-                jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" --slurpfile w "$WARP_NODES_FILE" '
-                    .experimental.clash_api.secret = $secret
+                jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
+                    ($w[0].masque // {
+                        "type": "masque",
+                        "tag": "☁️ WARP MASQUE (TCP/H2)",
+                        "use_http2": true,
+                        "use_ipv6": false,
+                        "profile": {
+                            "detour": "DIRECT",
+                            "id": "",
+                            "auth_token": "",
+                            "license_key": $wlic
+                        },
+                        "address": "162.159.198.2",
+                        "port": 443,
+                        "udp_timeout": "5m0s",
+                        "udp_keepalive_period": "30s",
+                        "reconnect_delay": "5s",
+                        "congestion_controller": "bbr",
+                        "tls": {
+                            "server_name": "www.cloudflare.com",
+                            "insecure": false,
+                            "fragment": true,
+                            "fragment_fallback_delay": "500ms"
+                        }
+                    }) as $msq
+                    | (($w[0].outbounds | map(.tag)) + [$msq.tag]) as $warp_tags
+                    | .experimental.clash_api.secret = $secret
                     | (.dns.servers[] | select(.tag=="dns_local") | .server) = $gw
                     | del(.providers)
-                    | .endpoints = $w[0].outbounds
+                    | .endpoints = ($w[0].outbounds // [])
                     | (.outbounds[] | select(.type == "urltest" and .providers != null)) |= (
                         del(.providers)
-                        | .outbounds = ($w[0].outbounds | map(.tag))
+                        | .outbounds = $warp_tags
                     )
                     | (.outbounds[] | select(.type == "selector" and .providers != null)) |= (
                         del(.providers)
-                        | .outbounds = ((.outbounds // []) + ["☁️ Amnezia WARP"] + ($w[0].outbounds | map(.tag)))
+                        | .outbounds = ((.outbounds // []) + ["☁️ Amnezia WARP"] + $warp_tags)
                     )
                     | .outbounds = (
                         [.outbounds[0]] + [{
                             "type": "urltest",
                             "tag": "☁️ Amnezia WARP",
-                            "outbounds": ($w[0].outbounds | map(.tag)),
+                            "outbounds": $warp_tags,
                             "url": "https://cp.cloudflare.com/generate_204",
                             "interval": "3m",
                             "tolerance": 50,
                             "idle_timeout": "30m"
-                        }] + .outbounds[1:]
+                        }] + .outbounds[1:-1] + [$msq, .outbounds[-1]]
                     )
                 ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
             fi
@@ -1451,9 +1501,9 @@ print_proxy_slots_report() {
 
     if is_warp_enabled; then
         if [ -n "${WARP_LICENSE:-}" ]; then
-            SLOT3_INFO="${C_GRN}АКТИВЕН${C_RES} (4 ноды Cloudflare WARP+ -> группа '☁️ Amnezia WARP')"
+            SLOT3_INFO="${C_GRN}АКТИВЕН${C_RES} (4 ноды UDP AWG WARP+ + 1 нода TCP MASQUE H2 -> '☁️ Amnezia WARP')"
         else
-            SLOT3_INFO="${C_GRN}АКТИВЕН${C_RES} (4 ноды Cloudflare Anycast -> группа '☁️ Amnezia WARP')"
+            SLOT3_INFO="${C_GRN}АКТИВЕН${C_RES} (4 ноды UDP AWG 2.0 + 1 нода TCP MASQUE H2 -> '☁️ Amnezia WARP')"
         fi
     else
         SLOT3_INFO="${C_DIM}ОТКЛЮЧЕН${C_RES}"
@@ -1461,7 +1511,7 @@ print_proxy_slots_report() {
 
     echo " • Слот 1 [Подписки по ссылке]: ${SLOT1_INFO}"
     echo " • Слот 2 [Личные ключи URI]:   ${SLOT2_INFO}"
-    echo " • Слот 3 [Amnezia WARP 2.0]:   ${SLOT3_INFO}"
+    echo " • Слот 3 [Amnezia WARP + H2]:  ${SLOT3_INFO}"
     return 0
 }
 
@@ -1691,6 +1741,23 @@ rotate_gateway_logs() {
 # ==================== [ КОНЕЦ ЧАСТИ 2 ИЗ 4 ] =====================
 
 # ==================== [ НАЧАЛО ЧАСТИ 3 ИЗ 4 ] ====================
+# Активное сканирование всей /24 подсети LAN (прогрев ARP-таблицы за ~1.5 сек)
+scan_lan_subnet() {
+    CUR_LAN=$(get_current_lan_ip)
+    LAN_SUB="${CUR_LAN%.*}"
+    echo "Сканирование подсети ${LAN_SUB}.0/24 (опрос живых устройств ~1.5 сек)..."
+    I_HOST=1
+    while [ "$I_HOST" -le 254 ]; do
+        ping -c 1 -W 1 "${LAN_SUB}.${I_HOST}" >/dev/null 2>&1 &
+        if [ $((I_HOST % 64)) -eq 0 ]; then
+            wait 2>/dev/null || true
+        fi
+        I_HOST=$((I_HOST + 1))
+    done
+    wait 2>/dev/null || true
+    return 0
+}
+
 # Авто-сканер живых устройств в локальной сети (ARP + DHCP Leases) для Пункта 8
 discover_lan_devices() {
     load_gateway_env
@@ -1750,7 +1817,7 @@ discover_lan_devices() {
                 print ip > out_cache
             }
             if (idx == 0) {
-                printf "  %s(активные соседи в ARP/DHCP пока не обнаружены)%s\n", c_dim, c_res
+                printf "  %s(активные соседи в ARP/DHCP пока не обнаружены — нажмите [s] для опроса сети)%s\n", c_dim, c_res
             }
         }
     ' $LEASE_F /proc/net/arp 2>/dev/null || true
@@ -2085,7 +2152,7 @@ configure_smart_dhcp() {
                 apk update >/dev/null 2>&1 || true
                 apk add dnsmasq >/dev/null 2>&1 || true
             fi
-            mkdir -p /etc/dnsmasq.d
+            mkdir -p /etc/dnsmasq.d /var/lib/misc
             cat << ALP_DHCP > "$ALPINE_DHCP_CONF"
 port=5353
 interface=${LAN_IF}
@@ -2218,8 +2285,10 @@ apply_network_ips() {
 sleep 1
 rc-service sing-box stop >/dev/null 2>&1 || true
 killall -9 udhcpc >/dev/null 2>&1 || true
-ip -4 addr flush dev ${LAN_IF} >/dev/null 2>&1 || true
-ip -4 addr add ${TARGET_LAN_IP}/24 dev ${LAN_IF} >/dev/null 2>&1 || true
+if [ "${TARGET_LAN_IP}" != "${CUR_LAN_IP}" ]; then
+    ip -4 addr flush dev ${LAN_IF} >/dev/null 2>&1 || true
+fi
+ip -4 addr replace ${TARGET_LAN_IP}/24 dev ${LAN_IF} >/dev/null 2>&1 || true
 ip link set ${LAN_IF} up >/dev/null 2>&1 || true
 ip -4 route replace default via ${GW_IP} dev ${LAN_IF} >/dev/null 2>&1 || true
 sleep 2
@@ -2486,7 +2555,7 @@ print_gateway_header() {
         P_INFO="активно ключей в my_nodes.yaml: ${MY_CNT} шт."
     elif is_warp_enabled; then
         P_STAT="${C_CYN}[ТОЛЬКО WARP]${C_RES} "
-        P_INFO="работает бесплатный Amnezia WARP 2.0"
+        P_INFO="работает гибридный Amnezia WARP 2.0 + MASQUE H2"
     else
         P_STAT="${C_YEL}[РЕЖИМ DIRECT]${C_RES}"
         P_INFO="прокси не заданы (весь трафик напрямую)"
@@ -2495,9 +2564,9 @@ print_gateway_header() {
     if is_warp_enabled; then
         W_STAT="${C_GRN}[АКТИВЕН]${C_RES}     "
         if [ -n "${WARP_LICENSE:-}" ]; then
-            W_INFO="4 ноды AWG WARP+ (группа '☁️ Amnezia WARP')"
+            W_INFO="4 ноды AWG WARP+ + MASQUE TCP/H2 ('☁️ Amnezia WARP')"
         else
-            W_INFO="4 ноды AWG 2.0 (группа '☁️ Amnezia WARP')"
+            W_INFO="4 ноды AWG 2.0 + MASQUE TCP/H2 ('☁️ Amnezia WARP')"
         fi
     else
         W_STAT="${C_DIM}[ВЫКЛЮЧЕН]${C_RES}    "
@@ -2623,11 +2692,9 @@ format_uri_keys() {
 # ==================== [ КОНЕЦ ЧАСТИ 3 ИЗ 4 ] =====================
 
 # ==================== [ НАЧАЛО ЧАСТИ 4 ИЗ 4 ] ====================
-# Живой сканер Anycast-узлов Cloudflare WARP напрямую через физический LAN-интерфейс (в обход singbox-tun)
+# Живой сканер Anycast-узлов Cloudflare WARP с сортировкой по минимальному RTT (в обход singbox-tun)
 scan_best_warp_endpoints() {
-    CANDIDATES="162.159.192.1:4500 188.114.97.1:500 188.114.99.224:1002 162.159.195.1:2408 188.114.98.224:854 188.114.96.1:1701 162.159.193.1:500 188.114.97.3:4500"
-    ALIVE_LIST=""
-    ALIVE_CNT=0
+    CANDIDATES="188.114.98.224:854 188.114.97.1:500 162.159.192.1:4500 188.114.99.224:1002 162.159.195.1:2408 188.114.96.1:1701 162.159.193.1:500 188.114.97.3:4500"
     LAN_DEV_SCAN=$(get_lan_ifname)
 
     if [ -n "$LAN_DEV_SCAN" ] && ip link show "$LAN_DEV_SCAN" >/dev/null 2>&1; then
@@ -2636,14 +2703,30 @@ scan_best_warp_endpoints() {
         PING_CMD="ping -c 1 -W 1"
     fi
 
+    RTT_TMP="/tmp/warp_rtt_scan.$$"
+    : > "$RTT_TMP"
+
     for EP in $CANDIDATES; do
         EP_IP="${EP%:*}"
-        if $PING_CMD "$EP_IP" >/dev/null 2>&1; then
+        P_OUT=$($PING_CMD "$EP_IP" 2>/dev/null || true)
+        if printf "%s" "$P_OUT" | grep -q "time="; then
+            RTT_VAL=$(printf "%s" "$P_OUT" | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -n 1)
+            RTT_INT="${RTT_VAL%.*}"
+            [ -z "$RTT_INT" ] && RTT_INT="999"
+            printf "%04d %s\n" "$RTT_INT" "$EP" >> "$RTT_TMP"
+        fi
+    done
+
+    ALIVE_LIST=""
+    ALIVE_CNT=0
+    if [ -s "$RTT_TMP" ]; then
+        for EP in $(sort -n "$RTT_TMP" | awk '{print $2}'); do
             ALIVE_LIST="${ALIVE_LIST} ${EP}"
             ALIVE_CNT=$((ALIVE_CNT + 1))
             [ "$ALIVE_CNT" -ge 4 ] && break
-        fi
-    done
+        done
+    fi
+    rm -f "$RTT_TMP"
 
     for EP in $CANDIDATES; do
         [ "$ALIVE_CNT" -ge 4 ] && break
@@ -2660,7 +2743,7 @@ scan_best_warp_endpoints() {
     return 0
 }
 
-# Автоматическая бесплатная генерация Amnezia WARP 2.0 (4 живых ноды Cloudflare Anycast + поддержка WARP+)
+# Автоматическая бесплатная генерация гибридного Amnezia WARP 2.0 (4 UDP AWG + 1 TCP MASQUE H2 + WARP+)
 generate_amnezia_warp() {
     OPT_LIC="${1:-}"
     mkdir -p "$SB_PROVIDERS_DIR"
@@ -2763,29 +2846,33 @@ generate_amnezia_warp() {
     fi
 
     if [ "$REG_OK" = "no" ]; then
-        echo "${C_YEL}[!] Провайдер блокирует прямой доступ к API регистрации Cloudflare.${C_RES}"
-        printf "Вставьте готовый WARP PrivateKey (например, из @warp_generator_bot) [Enter = отмена]: "
+        echo "${C_YEL}[!] Провайдер блокирует прямой доступ к API регистрации WG Cloudflare.${C_RES}"
+        printf "Вставьте готовый WARP PrivateKey [или нажмите Enter для авто-регистрации через MASQUE TCP/H2]: "
         read -r USER_PRIV < /dev/tty || true
         USER_PRIV=$(printf "%s" "$USER_PRIV" | tr -d ' \t\r\n')
         if [ -n "$USER_PRIV" ]; then
             PRIV_KEY="$USER_PRIV"
             WARP_IPV4="172.16.0.2"
             REG_OK="yes"
+        elif [ -n "$PRIV_KEY" ]; then
+            WARP_IPV4="172.16.0.2"
+            REG_OK="yes"
+            echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
         else
-            echo "${C_RED}[X] Не удалось получить ключ WARP.${C_RES}"
+            echo "${C_RED}[X] Не удалось получить или сгенерировать ключ WARP.${C_RES}"
             return 1
         fi
     fi
 
     [ -z "$WARP_IPV4" ] && WARP_IPV4="172.16.0.2" || true
 
-    echo "Сканирование оптимальных Anycast-узлов Cloudflare напрямую через провайдера..."
+    echo "Сканирование и сортировка по пингу Anycast-узлов Cloudflare напрямую через провайдера..."
     BEST_EPS=$(scan_best_warp_endpoints)
     set -- $BEST_EPS
-    EP1="${1:-162.159.192.1:4500}"
+    EP1="${1:-188.114.98.224:854}"
     EP2="${2:-188.114.97.1:500}"
-    EP3="${3:-188.114.99.224:1002}"
-    EP4="${4:-162.159.195.1:2408}"
+    EP3="${3:-162.159.192.1:4500}"
+    EP4="${4:-188.114.99.224:1002}"
 
     EP1_IP="${EP1%:*}"; EP1_PORT="${EP1#*:}"
     EP2_IP="${EP2%:*}"; EP2_PORT="${EP2#*:}"
@@ -2922,11 +3009,35 @@ generate_amnezia_warp() {
         "i1": "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
       }
     }
-  ]
+  ],
+  "masque": {
+    "type": "masque",
+    "tag": "☁️ WARP MASQUE (TCP/H2)",
+    "use_http2": true,
+    "use_ipv6": false,
+    "profile": {
+      "detour": "DIRECT",
+      "id": "",
+      "auth_token": "",
+      "license_key": "${WARP_LICENSE:-}"
+    },
+    "address": "162.159.198.2",
+    "port": 443,
+    "udp_timeout": "5m0s",
+    "udp_keepalive_period": "30s",
+    "reconnect_delay": "5s",
+    "congestion_controller": "bbr",
+    "tls": {
+      "server_name": "www.cloudflare.com",
+      "insecure": false,
+      "fragment": true,
+      "fragment_fallback_delay": "500ms"
+    }
+  }
 }
 WARP_EOF
     chmod 600 "$WARP_NODES_FILE" 2>/dev/null || true
-    echo "${C_GRN}[✓] Пул Amnezia WARP 2.0 (${EP1}, ${EP2}, ${EP3}, ${EP4}, jc=${AWG_JC}) создан (IP: ${WARP_IPV4})!${C_RES}"
+    echo "${C_GRN}[✓] Гибридный пул WARP 2.0 (4 ноды UDP AWG: ${EP1}, ${EP2}, ${EP3}, ${EP4} + 1 нода TCP MASQUE H2) создан!${C_RES}"
     return 0
 }
 
@@ -2968,7 +3079,7 @@ sanitize_sub_url_list() {
     return 0
 }
 
-# Распределение ввода по 3 независимым слотам: Слот 1 (HTTP), Слот 2 (my_nodes.yaml), Слот 3 (WARP)
+# Распределение ввода по 3 независимым слотам: Слот 1 (HTTP), Слот 2 (my_nodes.yaml), Слот 3 (WARP + MASQUE)
 apply_subscription_input() {
     RAW_INPUT="$1"
     mkdir -p "$SB_PROVIDERS_DIR"
@@ -3251,7 +3362,7 @@ run_installer() {
         SAVED_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
     fi
 
-    # 1. Запрос ссылки на подписку, прямого ключа или бесплатного Amnezia WARP
+    # 1. Запрос ссылки на подписку, прямого ключа или бесплатного гибридного WARP
     USE_INITIAL_WARP="no"
     if [ -n "$SAVED_SUB_URL" ]; then
         printf "Введите подписку (http://...), ключ (vless://...) или 'warp' [Enter = оставить %s]: " "$SAVED_SUB_URL"
@@ -3260,7 +3371,7 @@ run_installer() {
     elif is_warp_enabled; then
         printf "Введите подписку (http://...), ключ или 'warp' [Enter = оставить текущий Amnezia WARP]: "
     else
-        printf "Введите подписку (http://...), ключ (vless://...) или 'warp' (бесплатный Amnezia WARP 2.0): "
+        printf "Введите подписку (http://...), ключ (vless://...) или 'warp' (бесплатный WARP 2.0 + MASQUE H2): "
     fi
     read -r INPUT_SUB_URL < /dev/tty || true
     INPUT_SUB_URL=$(printf "%s" "$INPUT_SUB_URL" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -3268,7 +3379,7 @@ run_installer() {
     if [ -n "$INPUT_SUB_URL" ]; then
         apply_subscription_input "$INPUT_SUB_URL"
     elif [ -z "$SAVED_SUB_URL" ] && ! has_my_nodes && ! is_warp_enabled; then
-        printf "Прокси не указаны. Сгенерировать бесплатный безлимитный Amnezia WARP 2.0? (y/n) [Enter = y]: "
+        printf "Прокси не указаны. Сгенерировать бесплатный безлимитный Amnezia WARP 2.0 + MASQUE H2? (y/n) [Enter = y]: "
         read -r WARP_FALLBACK < /dev/tty || true
         WARP_FALLBACK=$(printf "%s" "$WARP_FALLBACK" | tr -d ' \t\r\n')
         [ -z "$WARP_FALLBACK" ] && WARP_FALLBACK="y"
@@ -3394,10 +3505,17 @@ run_installer() {
         return 0
     }
 
-    # ЭТАП 1: Установка системных зависимостей, модулей ядра, BBR и сети (Dual-OS)
+    # ЭТАП 1: Установка системных зависимостей, синхронизация часов до apk update и настройка сети
     write_resolv_conf "nameserver ${GW_IP}
 nameserver 77.88.8.8
 nameserver 77.88.8.1"
+
+    LAN_IF_INIT=$(get_lan_ifname)
+    ip -4 route show default 2>/dev/null | grep -q "default" || \
+        ip -4 route add default via "$GW_IP" dev "$LAN_IF_INIT" 2>/dev/null || true
+
+    # Ранняя синхронизация времени (защита от ошибки SSL в apk update на платах без RTC-батарейки)
+    sync_clock
 
     if [ "$OS_TYPE" = "alpine" ]; then
         if [ -f /etc/apk/repositories ]; then
@@ -3416,11 +3534,10 @@ nameserver 77.88.8.1"
             echo "Europe/Moscow" > /etc/timezone 2>/dev/null || true
         fi
 
-        LAN_IF_INIT=$(get_lan_ifname)
         write_alpine_static_interfaces "$LAN_IF_INIT" "$TARGET_LAN_IP" "$GW_IP"
         if [ "$TARGET_LAN_IP" = "$SAVED_LAN_IP" ]; then
             killall -9 udhcpc >/dev/null 2>&1 || true
-            ip -4 addr add "${TARGET_LAN_IP}/24" dev "$LAN_IF_INIT" 2>/dev/null || true
+            ip -4 addr replace "${TARGET_LAN_IP}/24" dev "$LAN_IF_INIT" 2>/dev/null || true
             ip link set "$LAN_IF_INIT" up 2>/dev/null || true
             ip -4 route replace default via "$GW_IP" dev "$LAN_IF_INIT" 2>/dev/null || true
         fi
@@ -3514,11 +3631,10 @@ net.ipv4.tcp_congestion_control = bbr
 SYS_EOF
 
     sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
-    sync_clock
     [ "$OS_TYPE" = "openwrt" ] && /etc/init.d/sysntpd restart 2>/dev/null || true
     sync_dns_firewall "yes" "keep"
 
-    # Если выбран режим бесплатного Amnezia WARP — генерируем пул нод со сканером
+    # Если выбран режим бесплатного Amnezia WARP — генерируем гибридный пул нод со сканером
     if [ "$USE_INITIAL_WARP" = "yes" ]; then
         generate_amnezia_warp "${WARP_LICENSE:-}" || true
     fi
@@ -3802,7 +3918,7 @@ show_menu() {
                     echo " 5) Добавить личный ключ (vless/hy2/tuic/ss/wg/anytls...) [Слот 2]"
                     echo " 6) Удалить один конкретный личный ключ по номеру [Слот 2]"
                     echo " 7) Очистить все личные ключи в my_nodes.yaml [Слот 2]"
-                    echo " 8) Включить / перевыпустить Amnezia WARP 2.0 (+ WARP+) [Слот 3]"
+                    echo " 8) Включить / перевыпустить гибридный WARP 2.0 + MASQUE H2 [Слот 3]"
                     echo " 9) Отключить и полностью очистить ноды Amnezia WARP 2.0 [Слот 3]"
                     echo " 10) Режим «Белые списки» (показать/скрыть РФ-каскады в подписке) [Слот 1]"
                     echo " 11) ${C_GRN}⚡ Мини-пульт управления нодами и группами прямо из SSH${C_RES}"
@@ -3861,7 +3977,7 @@ show_menu() {
                             load_gateway_env
                             SUB_URL=""
                             if ! has_my_nodes && ! is_warp_enabled; then
-                                printf "[!] Других прокси нет. Включить бесплатный Amnezia WARP вместо удаленной подписки? (y/n) [Enter = n (режим DIRECT)]: "
+                                printf "[!] Других прокси нет. Включить бесплатный Amnezia WARP + MASQUE H2 вместо удаленной подписки? (y/n) [Enter = n (режим DIRECT)]: "
                                 read -r EN_W < /dev/tty || true
                                 EN_W=$(printf "%s" "$EN_W" | tr -d ' \t\r\n')
                                 case "$EN_W" in
@@ -3927,7 +4043,7 @@ show_menu() {
                             read -r W_LIC_IN < /dev/tty || true
                             W_LIC_IN=$(printf "%s" "$W_LIC_IN" | tr -d ' \t\r\n')
                             if generate_amnezia_warp "$W_LIC_IN"; then
-                                apply_and_verify_singbox "Включение / обновление Amnezia WARP 2.0 (Слот 3)" || true
+                                apply_and_verify_singbox "Включение / обновление гибридного WARP 2.0 + MASQUE H2 (Слот 3)" || true
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
@@ -4149,13 +4265,17 @@ show_menu() {
                     echo " 3) Удалить один IP из списка ОБХОД (DIRECT) по номеру"
                     echo " 4) Удалить один IP из списка FULL-VPN по номеру"
                     echo " 5) Очистить оба списка IP"
+                    echo " s) ${C_GRN}🔄 Активно просканировать всю подсеть LAN (найти спящие ТВ/консоли)${C_RES}"
                     echo " 0) Назад в главное меню"
                     echo "--------------------------------------------------------"
-                    printf "Выбор [0-5]: "
+                    printf "Выбор [0-5 / s]: "
                     read -r BYP_ACT < /dev/tty || true
                     case "$BYP_ACT" in
                         ""|0)
                             break
+                            ;;
+                        s|S)
+                            scan_lan_subnet
                             ;;
                         1)
                             printf "Введите номер устройства из таблицы LAN выше ИЛИ его IP-адрес (для DIRECT): "
@@ -4304,6 +4424,8 @@ show_menu() {
                                     rm -f /etc/sing-box/cache.db 2>/dev/null || true
                                     tar -xzf "$BACKUP_ARCHIVE" -C / 2>/dev/null || true
                                     chmod 600 "$SB_CONF" "$SB_ENV" "$AGH_CONF" 2>/dev/null || true
+                                    load_gateway_env
+                                    sync_user_domain_rulesets
                                     service_ctl sing-box start
                                     service_ctl adguardhome start
                                     echo "${C_GRN}[✓] Конфигурация безопасно восстановлена из ${BACKUP_ARCHIVE}${C_RES}"
