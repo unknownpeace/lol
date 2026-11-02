@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-# ==================== [ НАЧАЛО ЧАСТИ 1 ИЗ 3 ] ====================
+# ==================== [ НАЧАЛО ЧАСТИ 1 ИЗ 4 ] ====================
 # ==============================================================================
 # Глобальные пути и переменные (Universal: OpenWrt 25.x + Alpine Linux 3.x)
 # ==============================================================================
@@ -24,6 +24,7 @@ CRON_FILE="/etc/crontabs/root"
 AUTOUPDATE_LOG="/var/log/gateway_autoupdate.log"
 SB_LOG_FILE="/var/log/sing-box.log"
 VER_CACHE_FILE="/tmp/gateway_ver.cache"
+LAN_SCAN_CACHE="/tmp/gateway_lan_scan.cache"
 UI_VER_FILE="${SB_DIR}/ui/.ui_version"
 UI_REPO="Zephyruso/zashboard"
 UI_ZIP_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip"
@@ -32,9 +33,11 @@ AGH_CONF="/etc/AdGuardHome/AdGuardHome.yaml"
 SYSUPGRADE_CONF="/etc/sysupgrade.conf"
 ALPINE_NFT_CONF="/etc/nftables.nft"
 ALPINE_DHCP_CONF="/etc/dnsmasq.d/gateway-dhcp.conf"
-SUB_FILTER_STRICT="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|осталось|трафик|истекает|подписк|тариф|инфо|новост|поддержк|канал|бот|t[.]me/|🇷🇺|Россия|Russia|Москва|Moscow|СПб|Белые списки|WhiteList)"
-SUB_FILTER_WHITELIST="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|осталось|трафик|истекает|подписк|тариф|инфо|новост|поддержк|канал|бот|t[.]me/)"
+SUB_FILTER_STRICT="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|срок|осталось|трафик|истекает|подписк|тариф|торрент|запрещ|лимит|инфо|новост|поддержк|канал|бот|t[.]me/|ℹ️|⛔|🚫|⚠️|📅|🇷🇺|Россия|Russia|Москва|Moscow|СПб|Белые списки|WhiteList)"
+SUB_FILTER_WHITELIST="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|срок|осталось|трафик|истекает|подписк|тариф|торрент|запрещ|лимит|инфо|новост|поддержк|канал|бот|t[.]me/|ℹ️|⛔|🚫|⚠️|📅)"
 ALLOW_RU_NODES="no"
+TG_BOT_TOKEN=""
+TG_CHAT_ID=""
 GH_PROXY=""
 LATEST_SB_TAG=""
 LATEST_AGH_TAG=""
@@ -46,6 +49,29 @@ AGH_GOMEMLIMIT="100MiB"
 SYS_CONNTRACK_MAX="65536"
 SYS_BUF_MAX="16777216"
 TOTAL_RAM_MB="512"
+
+# Инициализация цветовой палитры терминала (автоматически выключается в cron-логах)
+init_colors() {
+    if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+        C_RES=$(printf '\033[0m')
+        C_BLD=$(printf '\033[1m')
+        C_DIM=$(printf '\033[2m')
+        C_GRN=$(printf '\033[1;32m')
+        C_RED=$(printf '\033[1;31m')
+        C_YEL=$(printf '\033[1;33m')
+        C_CYN=$(printf '\033[1;36m')
+    else
+        C_RES=""
+        C_BLD=""
+        C_DIM=""
+        C_GRN=""
+        C_RED=""
+        C_YEL=""
+        C_CYN=""
+    fi
+    return 0
+}
+init_colors
 
 # Безопасная запись /etc/resolv.conf (предотвращает ошибку cp при симлинке в OpenWrt)
 write_resolv_conf() {
@@ -98,7 +124,7 @@ calc_hardware_limits() {
 # Автоопределение целевой платформы (OpenWrt 25.x+ или Alpine Linux 3.x)
 detect_os() {
     if ! command -v apk >/dev/null 2>&1; then
-        echo "[X] Ошибка: Не найден пакетный менеджер apk (требуется OpenWrt 25.x+ или Alpine Linux)."
+        echo "${C_RED}[X] Ошибка: Не найден пакетный менеджер apk (требуется OpenWrt 25.x+ или Alpine Linux).${C_RES}"
         exit 1
     fi
 
@@ -111,7 +137,7 @@ detect_os() {
         OS_TYPE="alpine"
         OS_NAME="Alpine Linux v$(cat /etc/alpine-release 2>/dev/null | tr -d ' \t\r\n')"
     else
-        echo "[X] Ошибка: Поддерживаются только OpenWrt 25.x+ и Alpine Linux."
+        echo "${C_RED}[X] Ошибка: Поддерживаются только OpenWrt 25.x+ и Alpine Linux.${C_RES}"
         exit 1
     fi
 
@@ -126,7 +152,7 @@ detect_os() {
             AGH_ARCH="arm64"
             ;;
         *)
-            echo "[X] Ошибка: Неподдерживаемая архитектура ${ARCH_RAW}."
+            echo "${C_RED}[X] Ошибка: Неподдерживаемая архитектура ${ARCH_RAW}.${C_RES}"
             exit 1
             ;;
     esac
@@ -300,6 +326,10 @@ is_warp_enabled() {
     [ -f "$WARP_NODES_FILE" ] && grep -q '"type":[[:space:]]*"wireguard"' "$WARP_NODES_FILE" 2>/dev/null
 }
 
+is_telegram_configured() {
+    [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${TG_CHAT_ID:-}" ]
+}
+
 # Проверка состояния аппаратного Kill-Switch (Dual-OS)
 is_killswitch_enabled() {
     if [ "$OS_TYPE" = "alpine" ]; then
@@ -309,7 +339,7 @@ is_killswitch_enabled() {
     fi
 }
 
-# Проверка состояния Умнoго DHCP-сервера на самом шлюзе (Dual-OS)
+# Проверка состояния Умного DHCP-сервера на самом шлюзе (Dual-OS)
 is_dhcp_server_enabled() {
     if [ "$OS_TYPE" = "alpine" ]; then
         [ -f "$ALPINE_DHCP_CONF" ] && pgrep dnsmasq >/dev/null 2>&1
@@ -503,12 +533,16 @@ save_gateway_env() {
     ESC_SUB=$(escape_single_quotes "${SUB_URL:-}")
     ESC_WLIC=$(escape_single_quotes "${WARP_LICENSE:-}")
     ESC_ARU=$(escape_single_quotes "${ALLOW_RU_NODES:-no}")
+    ESC_TGB=$(escape_single_quotes "${TG_BOT_TOKEN:-}")
+    ESC_TGC=$(escape_single_quotes "${TG_CHAT_ID:-}")
     cat << ENV_EOF > "$SB_ENV"
 GW_IP='${ESC_GW}'
 ADMIN_PASS='${ESC_PASS}'
 SUB_URL='${ESC_SUB}'
 WARP_LICENSE='${ESC_WLIC}'
 ALLOW_RU_NODES='${ESC_ARU}'
+TG_BOT_TOKEN='${ESC_TGB}'
+TG_CHAT_ID='${ESC_TGC}'
 ENV_EOF
     chmod 600 "$SB_ENV" 2>/dev/null || true
     return 0
@@ -535,10 +569,10 @@ sanitize_domain_entry() {
 list_entries_numbered() {
     TARGET_FILE="$1"
     if [ ! -s "$TARGET_FILE" ] || ! awk 'NF {found=1} END {exit !found}' "$TARGET_FILE" 2>/dev/null; then
-        echo "  (список пуст)"
+        echo "  ${C_DIM}(список пуст)${C_RES}"
         return 0
     fi
-    awk 'NF {idx++; printf "  [%d] %s\n", idx, $0}' "$TARGET_FILE" 2>/dev/null || true
+    awk -v c="${C_CYN}" -v r="${C_RES}" 'NF {idx++; printf "  %s[%d]%s %s\n", c, idx, r, $0}' "$TARGET_FILE" 2>/dev/null || true
     return 0
 }
 
@@ -566,13 +600,13 @@ delete_entry_by_index() {
     FALLBACK_VAL="${3:-}"
     case "$DEL_IDX" in
         ''|*[!0-9]*)
-            echo "[X] Некорректный номер."
+            echo "${C_RED}[X] Некорректный номер.${C_RES}"
             return 1
             ;;
     esac
     TOTAL_E=$(count_file_entries "$TARGET_FILE")
     if [ "$DEL_IDX" -lt 1 ] || [ "$DEL_IDX" -gt "$TOTAL_E" ]; then
-        echo "[X] Запись с номером ${DEL_IDX} не существует (доступно: 1..${TOTAL_E})."
+        echo "${C_RED}[X] Запись с номером ${DEL_IDX} не существует (доступно: 1..${TOTAL_E}).${C_RES}"
         return 1
     fi
     awk -v target="$DEL_IDX" -v fb="$FALLBACK_VAL" '
@@ -632,8 +666,10 @@ get_ip_cidr_json_array() {
     }' "$SRC_FILE" | jq -R . | jq -s .
     return 0
 }
+# ==================== [ КОНЕЦ ЧАСТИ 1 ИЗ 4 ] =====================
 
-# Генерация эталонного /etc/sing-box/config.json (5 чистых групп, 100% на пачках .srs)
+# ==================== [ НАЧАЛО ЧАСТИ 2 ИЗ 4 ] ====================
+# Генерация эталонного /etc/sing-box/config.json (оптимизировано под 200+ нод и AI-сервера)
 generate_singbox_config() {
     check_github_mirror
     sync_user_domain_rulesets
@@ -668,9 +704,9 @@ generate_singbox_config() {
                         "exclude": $excl,
                         "health_check": {
                             "enabled": true,
-                            "url": "https://www.youtube.com/generate_204",
+                            "url": "https://www.gstatic.com/generate_204",
                             "interval": "3m",
-                            "timeout": "5s"
+                            "timeout": "8s"
                         }
                     }]')
                 PROVIDER_TAGS_JSON=$(printf "%s" "$PROVIDER_TAGS_JSON" | jq --arg tag "$P_TAG" '. + [$tag]')
@@ -687,9 +723,9 @@ generate_singbox_config() {
                     "path": $path,
                     "health_check": {
                         "enabled": true,
-                        "url": "https://www.youtube.com/generate_204",
+                        "url": "https://www.gstatic.com/generate_204",
                         "interval": "3m",
-                        "timeout": "5s"
+                        "timeout": "8s"
                     }
                 }]')
             PROVIDER_TAGS_JSON=$(printf "%s" "$PROVIDER_TAGS_JSON" | jq '. + ["my_nodes"]')
@@ -876,7 +912,7 @@ FORCE_GRP
       "type": "urltest",
       "tag": "⚡ Авто (Самый быстрый)",
       "providers": ${PROVIDER_TAGS_JSON},
-      "url": "https://www.youtube.com/generate_204",
+      "url": "https://www.gstatic.com/generate_204",
       "interval": "3m",
       "tolerance": 35,
       "idle_timeout": "30m"
@@ -1392,35 +1428,35 @@ restore_gateway_state() {
 print_proxy_slots_report() {
     load_gateway_env
     if [ "${ALLOW_RU_NODES:-no}" = "yes" ]; then
-        RU_FLT_TAG="Каскады РФ/БС: ПОКАЗАНЫ"
+        RU_FLT_TAG="${C_YEL}Каскады РФ/БС: ПОКАЗАНЫ${C_RES}"
     else
         RU_FLT_TAG="Каскады РФ/БС: СКРЫТЫ"
     fi
 
     SUB_CNT=$(count_sub_urls)
     if [ "$SUB_CNT" -gt 1 ]; then
-        SLOT1_INFO="АКТИВНЫ (${SUB_CNT} подписки | ${RU_FLT_TAG})"
+        SLOT1_INFO="${C_GRN}АКТИВНЫ${C_RES} (${SUB_CNT} подписки | ${RU_FLT_TAG})"
     elif [ "$SUB_CNT" -eq 1 ]; then
-        SLOT1_INFO="АКТИВНА (${SUB_URL} | ${RU_FLT_TAG})"
+        SLOT1_INFO="${C_GRN}АКТИВНА${C_RES} (${SUB_URL} | ${RU_FLT_TAG})"
     else
-        SLOT1_INFO="ОТКЛЮЧЕНА (${RU_FLT_TAG})"
+        SLOT1_INFO="${C_DIM}ОТКЛЮЧЕНА${C_RES} (${RU_FLT_TAG})"
     fi
 
     MY_CNT=$(count_my_nodes)
     if [ "$MY_CNT" -gt 0 ]; then
-        SLOT2_INFO="АКТИВЕН (${MY_CNT} шт. в my_nodes.yaml)"
+        SLOT2_INFO="${C_GRN}АКТИВЕН${C_RES} (${MY_CNT} шт. в my_nodes.yaml)"
     else
-        SLOT2_INFO="ПУСТО (0 ключей)"
+        SLOT2_INFO="${C_DIM}ПУСТО (0 ключей)${C_RES}"
     fi
 
     if is_warp_enabled; then
         if [ -n "${WARP_LICENSE:-}" ]; then
-            SLOT3_INFO="АКТИВЕН (4 ноды Cloudflare WARP+ -> группа '☁️ Amnezia WARP')"
+            SLOT3_INFO="${C_GRN}АКТИВЕН${C_RES} (4 ноды Cloudflare WARP+ -> группа '☁️ Amnezia WARP')"
         else
-            SLOT3_INFO="АКТИВЕН (4 ноды Cloudflare Anycast -> группа '☁️ Amnezia WARP')"
+            SLOT3_INFO="${C_GRN}АКТИВЕН${C_RES} (4 ноды Cloudflare Anycast -> группа '☁️ Amnezia WARP')"
         fi
     else
-        SLOT3_INFO="ОТКЛЮЧЕН"
+        SLOT3_INFO="${C_DIM}ОТКЛЮЧЕН${C_RES}"
     fi
 
     echo " • Слот 1 [Подписки по ссылке]: ${SLOT1_INFO}"
@@ -1432,11 +1468,11 @@ print_proxy_slots_report() {
 # Вывод пронумерованного списка личных ключей в my_nodes.yaml
 list_my_nodes() {
     if ! has_my_nodes; then
-        echo " [i] Список личных ключей (my_nodes.yaml) пуст."
+        echo " ${C_DIM}[i] Список личных ключей (my_nodes.yaml) пуст.${C_RES}"
         return 0
     fi
-    echo " --- Список ваших ключей в ${CUSTOM_NODES_FILE} ---"
-    awk '
+    echo " ${C_CYN}--- Список ваших ключей в ${CUSTOM_NODES_FILE} ---${C_RES}"
+    awk -v c="${C_CYN}" -v r="${C_RES}" '
         NF && $0 !~ /^proxies:/ {
             idx++
             line = $0
@@ -1451,7 +1487,7 @@ list_my_nodes() {
             sub(/^[a-zA-Z0-9+-]+:\/\/([^@]*@)?/, "", host)
             sub(/[\/?#].*/, "", host)
             if (length(host) > 34) host = substr(host, 1, 31) "..."
-            printf "  [%d] %-10s | %-34s | #%s\n", idx, proto "://", host, tag
+            printf "  %s[%d]%s %-10s | %-34s | #%s\n", c, idx, r, proto "://", host, tag
         }
     ' "$CUSTOM_NODES_FILE" 2>/dev/null || true
     return 0
@@ -1462,13 +1498,13 @@ delete_my_node_by_index() {
     DEL_IDX="$1"
     case "$DEL_IDX" in
         ''|*[!0-9]*)
-            echo "[X] Некорректный номер ключа."
+            echo "${C_RED}[X] Некорректный номер ключа.${C_RES}"
             return 1
             ;;
     esac
     TOTAL_K=$(count_my_nodes)
     if [ "$DEL_IDX" -lt 1 ] || [ "$DEL_IDX" -gt "$TOTAL_K" ]; then
-        echo "[X] Ключ с номером ${DEL_IDX} не существует (доступно: 1..${TOTAL_K})."
+        echo "${C_RED}[X] Ключ с номером ${DEL_IDX} не существует (доступно: 1..${TOTAL_K}).${C_RES}"
         return 1
     fi
     awk -v target="$DEL_IDX" '
@@ -1492,10 +1528,10 @@ apply_and_verify_singbox() {
     generate_singbox_config
 
     if ! check_singbox_config; then
-        echo "[X] Ошибка синтаксиса при действии: ${ACTION_TITLE}!"
+        echo "${C_RED}[X] Ошибка синтаксиса при действии: ${ACTION_TITLE}!${C_RES}"
         ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true \
             /usr/bin/sing-box check -c "$SB_CONF" -D "$SB_DIR" || true
-        echo "[!] Выполняется авто-откат к предыдущей рабочей конфигурации..."
+        echo "${C_YEL}[!] Выполняется авто-откат к предыдущей рабочей конфигурации...${C_RES}"
         restore_gateway_state
         return 1
     fi
@@ -1516,29 +1552,490 @@ apply_and_verify_singbox() {
     if [ "$WAIT_OK" = "yes" ]; then
         reload_singbox_api
         echo "---------------------------------------------------------------"
-        echo "[✓] ${ACTION_TITLE}: УСПЕШНО (Sing-Box ЗАПУЩЕН | singbox-tun АКТИВЕН)"
+        echo "${C_GRN}[✓] ${ACTION_TITLE}: УСПЕШНО (Sing-Box ЗАПУЩЕН | singbox-tun АКТИВЕН)${C_RES}"
         print_proxy_slots_report
         echo "---------------------------------------------------------------"
         return 0
     else
         echo "---------------------------------------------------------------"
-        echo "[X] Служба Sing-Box не смогла запуститься (${ACTION_TITLE})!"
+        echo "${C_RED}[X] Служба Sing-Box не смогла запуститься (${ACTION_TITLE})!${C_RES}"
         echo "--- Причина из системного журнала ---"
         show_singbox_logs 8
         echo "---------------------------------------------------------------"
-        echo "[!] Выполняется авто-откат к предыдущей рабочей конфигурации..."
+        echo "${C_YEL}[!] Выполняется авто-откат к предыдущей рабочей конфигурации...${C_RES}"
         restore_gateway_state
         return 1
     fi
 }
-# ==================== [ КОНЕЦ ЧАСТИ 1 ИЗ 3 ] =====================
 
-# ==================== [ НАЧАЛО ЧАСТИ 2 ИЗ 3 ] ====================
+# Отправка текстового уведомления в Telegram (через туннель Sing-Box или напрямую)
+send_telegram_msg() {
+    MSG_TEXT="$1"
+    load_gateway_env
+    is_telegram_configured || return 0
+
+    TG_API_URL="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
+    for CURL_P in "-x http://127.0.0.1:7890" ""; do
+        # shellcheck disable=SC2086
+        if curl -fsSL --curves X25519:P-256 --connect-timeout 4 -m 8 $CURL_P \
+            -X POST "$TG_API_URL" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=${MSG_TEXT}" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Отправка архива резервной копии шлюза файлом в Telegram
+send_telegram_backup() {
+    BAK_FILE="${1:-$BACKUP_ARCHIVE}"
+    load_gateway_env
+    if ! is_telegram_configured; then
+        echo "${C_YEL}[!] Telegram-бот не настроен (укажите Токен и Chat ID в меню).${C_RES}"
+        return 1
+    fi
+    if [ ! -f "$BAK_FILE" ]; then
+        echo "${C_RED}[X] Файл бэкапа ${BAK_FILE} не найден!${C_RES}"
+        return 1
+    fi
+
+    CAPTION_TXT="📦 Бэкап шлюза (${OS_NAME})
+🌐 LAN IP: $(get_current_lan_ip)
+🕒 Дата: $(date '+%Y-%m-%d %H:%M:%S')"
+    TG_DOC_URL="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument"
+
+    echo "Отправка архива ${BAK_FILE} в ваш Telegram..."
+    for CURL_P in "-x http://127.0.0.1:7890" ""; do
+        # shellcheck disable=SC2086
+        if curl -fsSL --curves X25519:P-256 --connect-timeout 5 -m 20 $CURL_P \
+            -F "chat_id=${TG_CHAT_ID}" \
+            -F "caption=${CAPTION_TXT}" \
+            -F "document=@${BAK_FILE}" \
+            "$TG_DOC_URL" >/dev/null 2>&1; then
+            echo "${C_GRN}[✓] Архив бэкапа успешно доставлен в ваш Telegram!${C_RES}"
+            return 0
+        fi
+    done
+    echo "${C_RED}[X] Не удалось отправить бэкап в Telegram (проверьте Токен, Chat ID и соединение).${C_RES}"
+    return 1
+}
+
+# Интерактивная настройка Telegram-бота для облачных бэкапов и уведомлений
+configure_telegram_menu() {
+    load_gateway_env
+    echo ""
+    echo "${C_CYN}=== Настройка Telegram (Облачный бэкап + Уведомления) ===${C_RES}"
+    if is_telegram_configured; then
+        echo " • Статус: ${C_GRN}ПОДКЛЮЧЕН${C_RES} (Chat ID: ${TG_CHAT_ID})"
+    else
+        echo " • Статус: ${C_DIM}НЕ НАСТРОЕН${C_RES}"
+    fi
+    echo "--------------------------------------------------------"
+    echo " 1) Указать / изменить Токен бота (@BotFather) и ваш Chat ID"
+    echo " 2) Отправить тестовое сообщение в Telegram"
+    echo " 3) Отключить Telegram-уведомления и очистить токен"
+    echo " 0) Назад"
+    printf "Выбор [0-3]: "
+    read -r TG_ACT < /dev/tty || true
+    case "$TG_ACT" in
+        1)
+            printf "Введите API Token бота (от @BotFather): "
+            read -r IN_TOK < /dev/tty || true
+            IN_TOK=$(printf "%s" "$IN_TOK" | tr -d ' \t\r\n')
+            printf "Введите ваш Chat ID (узнать можно в @userinfobot): "
+            read -r IN_CID < /dev/tty || true
+            IN_CID=$(printf "%s" "$IN_CID" | tr -d ' \t\r\n')
+            if [ -n "$IN_TOK" ] && [ -n "$IN_CID" ]; then
+                TG_BOT_TOKEN="$IN_TOK"
+                TG_CHAT_ID="$IN_CID"
+                save_gateway_env
+                if send_telegram_msg "✅ Шлюз (${OS_NAME} | $(get_current_lan_ip)) успешно подключен к Telegram!"; then
+                    echo "${C_GRN}[✓] Настройки сохранены, тестовое сообщение доставлено!${C_RES}"
+                else
+                    echo "${C_YEL}[!] Настройки сохранены, но тестовое сообщение не прошло (проверьте нажали ли вы /start у бота).${C_RES}"
+                fi
+            else
+                echo "${C_RED}[X] Отмена: Токен и Chat ID не могут быть пустыми.${C_RES}"
+            fi
+            ;;
+        2)
+            if send_telegram_msg "🔔 Проверка связи со шлюзом (${OS_NAME} | $(get_current_lan_ip)). Все системы работают нормально."; then
+                echo "${C_GRN}[✓] Тестовое уведомление успешно отправлено!${C_RES}"
+            else
+                echo "${C_RED}[X] Ошибка отправки сообщения.${C_RES}"
+            fi
+            ;;
+        3)
+            TG_BOT_TOKEN=""
+            TG_CHAT_ID=""
+            save_gateway_env
+            echo "${C_GRN}[✓] Telegram-уведомления отключены.${C_RES}"
+            ;;
+    esac
+    return 0
+}
+
+# Авто-ротация логов (защита от переполнения диска при аптайме > 1 года)
+rotate_gateway_logs() {
+    for LOG_F in "$SB_LOG_FILE" "$AUTOUPDATE_LOG"; do
+        if [ -f "$LOG_F" ]; then
+            F_SIZE=$(wc -c < "$LOG_F" 2>/dev/null | tr -d ' \t\r\n' || echo "0")
+            if [ "${F_SIZE:-0}" -gt 1048576 ]; then
+                tail -n 500 "$LOG_F" > "${LOG_F}.tmp" 2>/dev/null && mv -f "${LOG_F}.tmp" "$LOG_F" 2>/dev/null || true
+            fi
+        fi
+    done
+    return 0
+}
+# ==================== [ КОНЕЦ ЧАСТИ 2 ИЗ 4 ] =====================
+
+# ==================== [ НАЧАЛО ЧАСТИ 3 ИЗ 4 ] ====================
+# Авто-сканер живых устройств в локальной сети (ARP + DHCP Leases) для Пункта 8
+discover_lan_devices() {
+    load_gateway_env
+    CUR_LAN=$(get_current_lan_ip)
+    rm -f "$LAN_SCAN_CACHE"
+    touch "$LAN_SCAN_CACHE"
+
+    LEASE_F=""
+    [ -f /tmp/dhcp.leases ] && LEASE_F="/tmp/dhcp.leases"
+    [ -f /var/lib/misc/dnsmasq.leases ] && LEASE_F="${LEASE_F} /var/lib/misc/dnsmasq.leases"
+
+    echo " ${C_CYN}--- Обнаруженные устройства в локальной сети (ARP + DHCP) ---${C_RES}"
+    # shellcheck disable=SC2086
+    awk -v gw="$GW_IP" -v self="$CUR_LAN" -v out_cache="$LAN_SCAN_CACHE" \
+        -v byp_f="$USER_BYPASS_IPS" -v vpn_f="$USER_FORCE_PROXY_IPS" \
+        -v c_cyn="$C_CYN" -v c_grn="$C_GRN" -v c_yel="$C_YEL" -v c_dim="$C_DIM" -v c_res="$C_RES" '
+        BEGIN {
+            while ((getline line < byp_f) > 0) {
+                gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", line)
+                if (line != "") byp[line] = 1
+            }
+            close(byp_f)
+            while ((getline line < vpn_f) > 0) {
+                gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", line)
+                if (line != "") vpn[line] = 1
+            }
+            close(vpn_f)
+        }
+        FILENAME ~ /leases$/ {
+            ip = $3; mac = tolower($2); host = $4
+            if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && ip != self) {
+                ips[ip] = 1
+                if (mac != "") macs[ip] = mac
+                if (host != "" && host != "*") names[ip] = host
+            }
+            next
+        }
+        FILENAME == "/proc/net/arp" && FNR > 1 {
+            ip = $1; flags = $3; mac = tolower($4)
+            if (ip != self && flags != "0x0" && mac != "00:00:00:00:00:00") {
+                ips[ip] = 1
+                if (macs[ip] == "") macs[ip] = mac
+            }
+            next
+        }
+        END {
+            idx = 0
+            for (ip in ips) {
+                idx++
+                m = (macs[ip] != "") ? macs[ip] : "неизвестен"
+                n = (names[ip] != "") ? names[ip] : "Устройство LAN"
+                if (ip == gw) n = "Основной роутер (" n ")"
+                st = c_dim "[По правилам]" c_res
+                if (byp[ip]) st = c_yel "[В ОБХОДЕ: DIRECT]" c_res
+                if (vpn[ip]) st = c_grn "[В FULL-VPN]" c_res
+                printf "  %s[%d]%s %-15s | %-17s | %-22s %s\n", c_cyn, idx, c_res, ip, m, n, st
+                print ip > out_cache
+            }
+            if (idx == 0) {
+                printf "  %s(активные соседи в ARP/DHCP пока не обнаружены)%s\n", c_dim, c_res
+            }
+        }
+    ' $LEASE_F /proc/net/arp 2>/dev/null || true
+    return 0
+}
+
+# Преобразование ввода пользователя (IP или номер из авто-сканера LAN) в IPv4
+resolve_device_ip_input() {
+    RAW_IN=$(printf "%s" "$1" | tr -d ' \t\r\n')
+    [ -z "$RAW_IN" ] && return 1
+    case "$RAW_IN" in
+        *[!0-9]*)
+            if is_valid_ipv4 "$RAW_IN"; then
+                printf "%s" "$RAW_IN"
+                return 0
+            fi
+            return 1
+            ;;
+        *)
+            if [ -s "$LAN_SCAN_CACHE" ]; then
+                PICKED_IP=$(awk -v target="$RAW_IN" 'NR == target {print $1; exit}' "$LAN_SCAN_CACHE" 2>/dev/null)
+                if [ -n "$PICKED_IP" ] && is_valid_ipv4 "$PICKED_IP"; then
+                    printf "%s" "$PICKED_IP"
+                    return 0
+                fi
+            fi
+            return 1
+            ;;
+    esac
+}
+
+# Интерактивный «Детектор сайта» (Рентген маршрута домена: AdGuard + FakeIP + TLS-пинг + переключение в 1 клик)
+inspect_domain_route() {
+    printf "\nВведите домен или ссылку для проверки (например, https://instagram.com): "
+    read -r TEST_IN < /dev/tty || true
+    TEST_IN=$(printf "%s" "$TEST_IN" | tr -d ' \t\r\n')
+    [ -z "$TEST_IN" ] && return 0
+
+    CLEAN_SUFFIX=$(sanitize_domain_entry "$TEST_IN" || true)
+    if [ -z "$CLEAN_SUFFIX" ]; then
+        echo "${C_RED}[X] Некорректное имя домена: ${TEST_IN}${C_RES}"
+        return 1
+    fi
+    CLEAN_HOST="${CLEAN_SUFFIX#+.}"
+
+    echo ""
+    echo "${C_CYN}=== 🕵️ Рентген маршрута для домена: ${C_BLD}${CLEAN_HOST}${C_RES}${C_CYN} ===${C_RES}"
+
+    # 1. Проверка в пользовательских списках
+    if grep -qxF "$CLEAN_SUFFIX" "$USER_DIRECT_FILE" 2>/dev/null; then
+        echo " • Списки пользователя: ${C_YEL}Принудительно НАПРЯМУЮ (${USER_DIRECT_FILE})${C_RES}"
+    elif grep -qxF "$CLEAN_SUFFIX" "$USER_PROXY_FILE" 2>/dev/null; then
+        echo " • Списки пользователя: ${C_GRN}Принудительно В ПРОКСИ (${USER_PROXY_FILE})${C_RES}"
+    else
+        echo " • Списки пользователя: ${C_DIM}Не числится (маршрутизируется по базам .srs)${C_RES}"
+    fi
+
+    # 2. DNS-резолв через AdGuard Home -> Sing-Box
+    RESOLVED_IP=$(nslookup "$CLEAN_HOST" 127.0.0.1 2>/dev/null | awk '/^Name:/ {f=1; next} f && /Address/ {for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {print $i; exit}}')
+    case "$RESOLVED_IP" in
+        0.0.0.0|127.0.0.1)
+            echo " • Вердикт DNS (:53):   ${C_RED}ЗАБЛОКИРОВАН фильтром рекламы AdGuard Home (${RESOLVED_IP})!${C_RES}"
+            ;;
+        198.18.*|198.19.*)
+            echo " • Вердикт DNS (:53):   ${C_GRN}Выдан FakeIP (${RESOLVED_IP}) -> Маршрут: В ПРОКСИ (Туннель)${C_RES}"
+            ;;
+        "")
+            echo " • Вердикт DNS (:53):   ${C_RED}Не удалось разрешить имя (NXDOMAIN или таймаут DNS)${C_RES}"
+            ;;
+        *)
+            echo " • Вердикт DNS (:53):   ${C_YEL}Выдан реальный IP (${RESOLVED_IP}) -> Маршрут: НАПРЯМУЮ (DIRECT / dns_ru)${C_RES}"
+            ;;
+    esac
+
+    # 3. Замер живого соединения через туннель и напрямую
+    echo " • Проверка доступности по HTTPS (TLS Handshake)..."
+    PRX_RES=$(curl -o /dev/null -sS --curves X25519:P-256 --connect-timeout 3 -m 5 -x http://127.0.0.1:7890 -w '%{http_code} %{time_appconnect}' "https://${CLEAN_HOST}" 2>/dev/null || echo "000 0")
+    PRX_CODE=$(printf "%s" "$PRX_RES" | awk '{print $1}')
+    PRX_MS=$(printf "%s" "$PRX_RES" | awk '$2+0 > 0 {printf "%.0f ms", $2*1000; ok=1} END {if (!ok) print "недоступен"}')
+
+    LAN_IF_T=$(get_lan_ifname)
+    DIR_RES=$(curl -o /dev/null -sS --curves X25519:P-256 --interface "$LAN_IF_T" --connect-timeout 2 -m 4 -w '%{http_code} %{time_appconnect}' "https://${CLEAN_HOST}" 2>/dev/null || echo "000 0")
+    DIR_CODE=$(printf "%s" "$DIR_RES" | awk '{print $1}')
+    DIR_MS=$(printf "%s" "$DIR_RES" | awk '$2+0 > 0 {printf "%.0f ms", $2*1000; ok=1} END {if (!ok) print "заблокирован/таймаут"}')
+
+    echo "   -> Через Sing-Box: HTTP ${PRX_CODE} | TLS: ${C_GRN}${PRX_MS}${C_RES}"
+    echo "   -> Напрямую (ISP): HTTP ${DIR_CODE} | TLS: ${C_YEL}${DIR_MS}${C_RES}"
+    echo "--------------------------------------------------------"
+    echo "Быстрое действие для ${CLEAN_SUFFIX}:"
+    echo " 1) Направить этот домен В ПРОКСИ (добавить в ${USER_PROXY_FILE})"
+    echo " 2) Направить этот домен НАПРЯМУЮ (добавить в ${USER_DIRECT_FILE})"
+    echo " 0) Ничего не менять (назад)"
+    printf "Выбор [0-2]: "
+    read -r Q_ACT < /dev/tty || true
+    case "$Q_ACT" in
+        1)
+            backup_gateway_state
+            load_gateway_env
+            awk -v d="$CLEAN_SUFFIX" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.localdomain"}' "$USER_DIRECT_FILE" > "${USER_DIRECT_FILE}.tmp" && mv "${USER_DIRECT_FILE}.tmp" "$USER_DIRECT_FILE"
+            grep -qxF "$CLEAN_SUFFIX" "$USER_PROXY_FILE" 2>/dev/null || echo "$CLEAN_SUFFIX" >> "$USER_PROXY_FILE"
+            apply_and_verify_singbox "Перевод домена ${CLEAN_SUFFIX} в прокси" || true
+            ;;
+        2)
+            backup_gateway_state
+            load_gateway_env
+            awk -v d="$CLEAN_SUFFIX" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.chatgpt.com"}' "$USER_PROXY_FILE" > "${USER_PROXY_FILE}.tmp" && mv "${USER_PROXY_FILE}.tmp" "$USER_PROXY_FILE"
+            grep -qxF "$CLEAN_SUFFIX" "$USER_DIRECT_FILE" 2>/dev/null || echo "$CLEAN_SUFFIX" >> "$USER_DIRECT_FILE"
+            apply_and_verify_singbox "Перевод домена ${CLEAN_SUFFIX} напрямую (DIRECT)" || true
+            ;;
+    esac
+    return 0
+}
+
+# Поштучная диагностика и оживление нод с «молнией» (⚡) без залповой перегрузки
+diagnose_failed_nodes() {
+    if ! pgrep sing-box >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+        echo "${C_RED}[X] Служба Sing-Box не запущена или не найден jq.${C_RES}"
+        return 1
+    fi
+    load_gateway_env
+    API_JSON=$(curl -fsS --connect-timeout 2 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
+    if [ -z "$API_JSON" ]; then
+        echo "${C_RED}[X] Не удалось подключиться к Clash API (127.0.0.1:9090).${C_RES}"
+        return 1
+    fi
+
+    echo ""
+    echo "${C_CYN}=== 🩺 Поштучная диагностика и оживление нод без пинга (⚡) ===${C_RES}"
+    FAILED_LIST=$(printf "%s" "$API_JSON" | jq -r '
+        .proxies | to_entries[]
+        | select(.value.type != "Selector" and .value.type != "URLTest" and .value.type != "Direct" and .value.type != "Reject" and .value.type != "Pass")
+        | select(((.value.history // []) | if length > 0 then .[-1].delay else 0 end) == 0)
+        | .key
+    ' 2>/dev/null || true)
+
+    if [ -z "$FAILED_LIST" ]; then
+        echo "${C_GRN}[✓] Идеально! У всех 100% активных нод уже есть результат пинга!${C_RES}"
+        return 0
+    fi
+
+    printf "%s\n" "$FAILED_LIST" | while IFS= read -r NODE_KEY; do
+        [ -z "$NODE_KEY" ] && continue
+        ENC_N=$(jq -rn --arg s "$NODE_KEY" '$s|@uri')
+        RES1=$(curl -fsS --connect-timeout 6 -m 7 -H "Authorization: Bearer ${ADMIN_PASS}" \
+            "http://127.0.0.1:9090/proxies/${ENC_N}/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=5000" 2>/dev/null || true)
+        D1=$(printf "%s" "$RES1" | jq -r '.delay // 0' 2>/dev/null || echo "0")
+
+        if [ "${D1:-0}" -gt 0 ]; then
+            printf "  %s[✓ ОЖИВЛЕНА: %4s ms]%s %s\n" "$C_GRN" "$D1" "$C_RES" "$NODE_KEY"
+        else
+            RES2=$(curl -fsS --connect-timeout 6 -m 7 -H "Authorization: Bearer ${ADMIN_PASS}" \
+                "http://127.0.0.1:9090/proxies/${ENC_N}/delay?url=http%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204&timeout=5000" 2>/dev/null || true)
+            D2=$(printf "%s" "$RES2" | jq -r '.delay // 0' 2>/dev/null || echo "0")
+            if [ "${D2:-0}" -gt 0 ]; then
+                printf "  %s[✓ ОЖИВЛЕНА: %4s ms]%s %s (через CF)\n" "$C_GRN" "$D2" "$C_RES" "$NODE_KEY"
+            else
+                printf "  %s[X МЕРТВА У ПРОВАЙДЕРА]%s %s\n" "$C_RED" "$C_RES" "$NODE_KEY"
+            fi
+        fi
+    done
+    echo "---------------------------------------------------------------"
+    echo "${C_DIM}[i] Все оживленные ноды уже обновили свой пинг в панели Zashboard!${C_RES}"
+    return 0
+}
+
+# Мини-пульт управления группами и нодами прямо из SSH-терминала (через Clash API)
+manage_nodes_cli_menu() {
+    if ! pgrep sing-box >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+        echo "${C_RED}[X] Служба Sing-Box не запущена или не найден jq.${C_RES}"
+        return 1
+    fi
+    load_gateway_env
+
+    while true; do
+        API_JSON=$(curl -fsS --connect-timeout 2 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
+        if [ -z "$API_JSON" ]; then
+            echo "${C_RED}[X] Не удалось получить список нод от Clash API (127.0.0.1:9090).${C_RES}"
+            return 1
+        fi
+
+        clear
+        echo "${C_CYN}=== ⚡ Мини-пульт управления группами и нодами (SSH) ===${C_RES}"
+        AUTO_NOW=$(printf "%s" "$API_JSON" | jq -r '.proxies["⚡ Авто (Самый быстрый)"].now // "не выбрана"')
+        echo " • Авто-выбор сейчас: ${C_GRN}${AUTO_NOW}${C_RES}"
+        echo "--------------------------------------------------------"
+        echo "${C_BLD}Топ-8 самых быстрых нод по замеру пинга:${C_RES}"
+        printf "%s" "$API_JSON" | jq -r '
+            [.proxies | to_entries[]
+             | select(.value.type != "Selector" and .value.type != "URLTest" and .value.type != "Direct" and .value.type != "Reject" and .value.type != "Pass")
+             | {name: .key, type: .value.type, delay: ((.value.history // []) | if length > 0 then .[-1].delay else 0 end)}
+             | select(.delay > 0)]
+            | sort_by(.delay) | .[:8] | to_entries[]
+            | "  • [\(.value.delay) ms] \(.value.name) (\(.value.type))"
+        ' 2>/dev/null || true
+        echo "--------------------------------------------------------"
+        echo "${C_BLD}Активные селекторы маршрутизации (выберите для смены ноды):${C_RES}"
+
+        GRP_LIST_FILE="/tmp/gateway_selectors.list"
+        printf "%s" "$API_JSON" | jq -r '
+            [.proxies | to_entries[] | select(.value.type == "Selector" and .key != "GLOBAL")]
+            | map(.key) | .[]
+        ' > "$GRP_LIST_FILE" 2>/dev/null || true
+
+        G_IDX=0
+        while IFS= read -r G_NAME; do
+            [ -z "$G_NAME" ] && continue
+            G_IDX=$((G_IDX + 1))
+            G_CUR=$(printf "%s" "$API_JSON" | jq -r --arg g "$G_NAME" '.proxies[$g].now // "Авто"')
+            printf "  %s[%d]%s %-28s -> Сейчас: %s%s%s\n" "$C_CYN" "$G_IDX" "$C_RES" "$G_NAME" "$C_GRN" "$G_CUR" "$C_RES"
+        done < "$GRP_LIST_FILE"
+
+        echo "--------------------------------------------------------"
+        echo "  ${C_CYN}[d]${C_RES} ${C_GRN}🩺 Поштучно проверить и оживить ноды с молнией (⚡)${C_RES}"
+        echo "  ${C_CYN}[r]${C_RES} Запустить общий замер пинга всех нод"
+        echo "  ${C_CYN}[0]${C_RES} Назад"
+        printf "Выберите номер группы [1-%d / d / r / 0]: " "$G_IDX"
+        read -r G_SEL < /dev/tty || true
+        G_SEL=$(printf "%s" "$G_SEL" | tr -d ' \t\r\n')
+
+        case "$G_SEL" in
+            ""|0)
+                rm -f "$GRP_LIST_FILE"
+                break
+                ;;
+            d|D)
+                diagnose_failed_nodes || true
+                printf "\nНажмите Enter для продолжения..."
+                read -r _ < /dev/tty
+                ;;
+            r|R)
+                echo "Запуск тестирования задержки всех нод..."
+                reload_singbox_api
+                sleep 1
+                ;;
+            *[!0-9]*)
+                ;;
+            *)
+                TARGET_GRP=$(awk -v t="$G_SEL" 'NR == t {print $0; exit}' "$GRP_LIST_FILE" 2>/dev/null)
+                if [ -n "$TARGET_GRP" ]; then
+                    NODES_LIST_FILE="/tmp/gateway_group_nodes.list"
+                    printf "%s" "$API_JSON" | jq -r --arg g "$TARGET_GRP" '.proxies[$g].all[]?' > "$NODES_LIST_FILE" 2>/dev/null || true
+                    echo ""
+                    echo "${C_CYN}--- Доступные ноды для группы «${TARGET_GRP}» ---${C_RES}"
+                    N_IDX=0
+                    while IFS= read -r N_NAME; do
+                        [ -z "$N_NAME" ] && continue
+                        N_IDX=$((N_IDX + 1))
+                        N_DELAY=$(printf "%s" "$API_JSON" | jq -r --arg n "$N_NAME" '(.proxies[$n].history // []) | if length > 0 then .[-1].delay else 0 end' 2>/dev/null || echo "0")
+                        if [ "${N_DELAY:-0}" -gt 0 ]; then
+                            printf "  %s[%d]%s %s %s(%s ms)%s\n" "$C_CYN" "$N_IDX" "$C_RES" "$N_NAME" "$C_GRN" "$N_DELAY" "$C_RES"
+                        else
+                            printf "  %s[%d]%s %s %s(⚡)%s\n" "$C_CYN" "$N_IDX" "$C_RES" "$N_NAME" "$C_DIM" "$C_RES"
+                        fi
+                    done < "$NODES_LIST_FILE"
+                    printf "\nВыберите номер ноды для «%s» [Enter = отмена]: " "$TARGET_GRP"
+                    read -r N_SEL < /dev/tty || true
+                    N_SEL=$(printf "%s" "$N_SEL" | tr -d ' \t\r\n')
+                    case "$N_SEL" in
+                        ''|*[!0-9]*) ;;
+                        *)
+                            PICKED_NODE=$(awk -v t="$N_SEL" 'NR == t {print $0; exit}' "$NODES_LIST_FILE" 2>/dev/null)
+                            if [ -n "$PICKED_NODE" ]; then
+                                ENC_GRP=$(jq -rn --arg s "$TARGET_GRP" '$s|@uri')
+                                PAYLOAD_JSON=$(jq -n --arg name "$PICKED_NODE" '{"name": $name}')
+                                if curl -fsS -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
+                                    -d "$PAYLOAD_JSON" "http://127.0.0.1:9090/proxies/${ENC_GRP}" >/dev/null 2>&1; then
+                                    echo "${C_GRN}[✓] Группа «${TARGET_GRP}» переключена на: ${PICKED_NODE}${C_RES}"
+                                    sleep 1
+                                fi
+                            fi
+                            ;;
+                    esac
+                    rm -f "$NODES_LIST_FILE"
+                fi
+                ;;
+        esac
+    done
+    return 0
+}
+
 # Быстрая смена единого пароля (Sing-Box Zashboard + AdGuard Home) с защитой YAML
 change_unified_password() {
     NEW_PASS=$(printf "%s" "$1" | tr -d '\r\n')
     if [ -z "$NEW_PASS" ]; then
-        echo "[X] Ошибка: Пароль не может быть пустым!"
+        echo "${C_RED}[X] Ошибка: Пароль не может быть пустым!${C_RES}"
         return 1
     fi
     load_gateway_env
@@ -1570,7 +2067,7 @@ change_unified_password() {
 
     service_ctl sing-box restart
     service_ctl adguardhome start
-    echo "[✓] Единый пароль успешно обновлен для Sing-Box Zashboard и AdGuard Home!"
+    echo "${C_GRN}[✓] Единый пароль успешно обновлен для Sing-Box Zashboard и AdGuard Home!${C_RES}"
     return 0
 }
 
@@ -1600,13 +2097,13 @@ dhcp-option=6,${CUR_LAN_IP}
 ALP_DHCP
             service_ctl dnsmasq enable
             service_ctl dnsmasq restart
-            echo "[✓] Умный DHCP-сервер на Alpine ВКЛЮЧЕН (Шлюз и DNS: ${CUR_LAN_IP}, пул .100-.239)."
+            echo "${C_GRN}[✓] Умный DHCP-сервер на Alpine ВКЛЮЧЕН (Шлюз и DNS: ${CUR_LAN_IP}, пул .100-.239).${C_RES}"
             echo "    Не забудьте отключить DHCP-сервер на основном роутере провайдера!"
         else
             rm -f "$ALPINE_DHCP_CONF" 2>/dev/null || true
             service_ctl dnsmasq stop
             service_ctl dnsmasq disable
-            echo "[✓] DHCP-сервер на Alpine ВЫКЛЮЧЕН (классический режим Sidecar)."
+            echo "${C_GRN}[✓] DHCP-сервер на Alpine ВЫКЛЮЧЕН (классический режим Sidecar).${C_RES}"
         fi
         return 0
     fi
@@ -1629,7 +2126,7 @@ ALP_DHCP
         /etc/init.d/odhcpd stop 2>/dev/null || true
         /etc/init.d/odhcpd disable 2>/dev/null || true
         /etc/init.d/dnsmasq restart 2>/dev/null || true
-        echo "[✓] Умный DHCP-сервер OpenWrt ВКЛЮЧЕН (Шлюз и DNS: ${CUR_LAN_IP}, пул .100-.239)."
+        echo "${C_GRN}[✓] Умный DHCP-сервер OpenWrt ВКЛЮЧЕН (Шлюз и DNS: ${CUR_LAN_IP}, пул .100-.239).${C_RES}"
         echo "    Не забудьте отключить DHCP-сервер на основном роутере провайдера!"
     else
         uci set dhcp.lan.ignore='1'
@@ -1637,7 +2134,7 @@ ALP_DHCP
         /etc/init.d/odhcpd stop 2>/dev/null || true
         /etc/init.d/odhcpd disable 2>/dev/null || true
         /etc/init.d/dnsmasq restart 2>/dev/null || true
-        echo "[✓] DHCP-сервер на OpenWrt ВЫКЛЮЧЕН (классический режим Sidecar)."
+        echo "${C_GRN}[✓] DHCP-сервер на OpenWrt ВЫКЛЮЧЕН (классический режим Sidecar).${C_RES}"
     fi
     return 0
 }
@@ -1673,24 +2170,24 @@ apply_network_ips() {
     [ -z "$TARGET_GW_IP" ] && TARGET_GW_IP="$GW_IP"
 
     if ! is_valid_ipv4 "$TARGET_LAN_IP"; then
-        echo "[X] Ошибка: Некорректный IPv4-адрес шлюза (${TARGET_LAN_IP})!"
+        echo "${C_RED}[X] Ошибка: Некорректный IPv4-адрес шлюза (${TARGET_LAN_IP})!${C_RES}"
         return 1
     fi
 
     if ! is_valid_ipv4 "$TARGET_GW_IP"; then
-        echo "[X] Ошибка: Некорректный IPv4-адрес основного роутера (${TARGET_GW_IP})!"
+        echo "${C_RED}[X] Ошибка: Некорректный IPv4-адрес основного роутера (${TARGET_GW_IP})!${C_RES}"
         return 1
     fi
 
     if [ "$TARGET_LAN_IP" = "$TARGET_GW_IP" ]; then
-        echo "[X] Ошибка: IP шлюза (${TARGET_LAN_IP}) не может совпадать с IP основного роутера (${TARGET_GW_IP})!"
+        echo "${C_RED}[X] Ошибка: IP шлюза (${TARGET_LAN_IP}) не может совпадать с IP основного роутера (${TARGET_GW_IP})!${C_RES}"
         return 1
     fi
 
     LAN_SUBNET="${TARGET_LAN_IP%.*}"
     GW_SUBNET="${TARGET_GW_IP%.*}"
     if [ "$LAN_SUBNET" != "$GW_SUBNET" ]; then
-        echo "[!] Внимание: Подсеть шлюза (${LAN_SUBNET}.x) отличается от подсети роутера (${GW_SUBNET}.x)!"
+        echo "${C_YEL}[!] Внимание: Подсеть шлюза (${LAN_SUBNET}.x) отличается от подсети роутера (${GW_SUBNET}.x)!${C_RES}"
         printf "Введите IP основного роутера в новой подсети [Enter = %s.1 / отмена = n]: " "$LAN_SUBNET"
         read -r FIX_GW < /dev/tty || true
         FIX_GW=$(printf "%s" "$FIX_GW" | tr -d ' \t\r\n')
@@ -1700,7 +2197,7 @@ apply_network_ips() {
         fi
         [ -z "$FIX_GW" ] && FIX_GW="${LAN_SUBNET}.1"
         if ! is_valid_ipv4 "$FIX_GW" || [ "$FIX_GW" = "$TARGET_LAN_IP" ]; then
-            echo "[X] Некорректный или конфликтующий IP основного роутера (${FIX_GW})."
+            echo "${C_RED}[X] Некорректный или конфликтующий IP основного роутера (${FIX_GW}).${C_RES}"
             return 1
         fi
         TARGET_GW_IP="$FIX_GW"
@@ -1770,7 +2267,7 @@ nameserver ${GW_IP}
 nameserver 77.88.8.8"
 
     echo "==============================================================="
-    echo "[✓] Сетевые настройки успешно сохранены (${OS_NAME}):"
+    echo "${C_GRN}[✓] Сетевые настройки успешно сохранены (${OS_NAME}):${C_RES}"
     echo " • Новый IP шлюза (${LAN_IF}):    ${TARGET_LAN_IP} (маска 255.255.255.0)"
     echo " • IP основного роутера:     ${GW_IP}"
     echo " • Панель Sing-Box Extended: http://${TARGET_LAN_IP}:9090/ui"
@@ -1778,7 +2275,7 @@ nameserver 77.88.8.8"
 
     if [ "$TARGET_LAN_IP" != "$CUR_LAN_IP" ]; then
         echo "---------------------------------------------------------------"
-        echo "[!] ВНИМАНИЕ: IP шлюза изменился (${CUR_LAN_IP} -> ${TARGET_LAN_IP})!"
+        echo "${C_YEL}[!] ВНИМАНИЕ: IP шлюза изменился (${CUR_LAN_IP} -> ${TARGET_LAN_IP})!${C_RES}"
         echo " 1. Переподключитесь по SSH: ssh root@${TARGET_LAN_IP}"
         echo " 2. Обновите адрес шлюза/DNS на устройствах или в роутере на ${TARGET_LAN_IP}!"
         echo "==============================================================="
@@ -1838,18 +2335,27 @@ disable_watchdog() {
     return 0
 }
 
-# Фоновая проверка здоровья служб (Watchdog Auto-Healer)
+# Фоновая проверка здоровья служб и ротация логов (Watchdog Auto-Healer)
 run_watchdog() {
     detect_os
+    rotate_gateway_logs
     [ -f "$SB_CONF" ] || return 0
     ensure_alpine_modules
+    RECOVERED_MSG=""
     if ! pgrep sing-box >/dev/null 2>&1 || ! ip link show singbox-tun >/dev/null 2>&1; then
         logger -t gateway-watchdog "Sing-Box or singbox-tun down, restarting service..." 2>/dev/null || true
         service_ctl sing-box restart
+        sleep 2
+        RECOVERED_MSG="⚠️ [Авто-Доктор] На шлюзе ($(get_current_lan_ip)) был перезапущен туннель Sing-Box."
     fi
     if ! pgrep AdGuardHome >/dev/null 2>&1; then
         logger -t gateway-watchdog "AdGuardHome down, restarting service..." 2>/dev/null || true
         service_ctl adguardhome restart
+        RECOVERED_MSG="${RECOVERED_MSG}
+⚠️ [Авто-Доктор] Перезапущена служба AdGuard Home."
+    fi
+    if [ -n "$RECOVERED_MSG" ]; then
+        send_telegram_msg "$RECOVERED_MSG" >/dev/null 2>&1 || true
     fi
     return 0
 }
@@ -1866,6 +2372,8 @@ run_autoupdate() {
         service_ctl adguardhome start
     fi
     reload_singbox_api
+    rotate_gateway_logs
+    send_telegram_msg "🔄 [Автообновление 04:00] Шлюз (${OS_NAME} | $(get_current_lan_ip)) проверил обновления. Текущие версии: Sing-Box ${LATEST_SB_TAG}, AdGuard ${LATEST_AGH_TAG}." >/dev/null 2>&1 || true
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Автообновление завершено ==="
     return 0
 }
@@ -1908,7 +2416,7 @@ VC_EOF
     return 0
 }
 
-# Отрисовка статуса и версий в шапке меню
+# Отрисовка статуса и версий в шапке меню (с поддержкой ANSI TUI)
 print_gateway_header() {
     load_gateway_env
     calc_hardware_limits
@@ -1916,9 +2424,9 @@ print_gateway_header() {
     LAN_IF_NOW=$(get_lan_ifname)
 
     if pgrep sing-box >/dev/null 2>&1; then
-        S_STAT="[ЗАПУЩЕН]     "
+        S_STAT="${C_GRN}[ЗАПУЩЕН]${C_RES}     "
     else
-        S_STAT="[ОСТАНОВЛЕН]  "
+        S_STAT="${C_RED}[ОСТАНОВЛЕН]${C_RES}  "
     fi
 
     if [ -x /usr/bin/sing-box ]; then
@@ -1934,18 +2442,18 @@ print_gateway_header() {
 
     if [ -n "$LATEST_SB_TAG" ] && [ "$S_VER" != "не установлен" ]; then
         if [ "$S_VER" = "$LATEST_SB_TAG" ]; then
-            S_VER_INFO="${S_VER} (актуальна)"
+            S_VER_INFO="${S_VER} ${C_DIM}(актуальна)${C_RES}"
         else
-            S_VER_INFO="${S_VER} -> ДОСТУПНА ${LATEST_SB_TAG}!"
+            S_VER_INFO="${S_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_SB_TAG}!${C_RES}"
         fi
     else
         S_VER_INFO="${S_VER}"
     fi
 
     if pgrep AdGuardHome >/dev/null 2>&1; then
-        A_STAT="[ЗАПУЩЕН]     "
+        A_STAT="${C_GRN}[ЗАПУЩЕН]${C_RES}     "
     else
-        A_STAT="[ОСТАНОВЛЕН]  "
+        A_STAT="${C_RED}[ОСТАНОВЛЕН]${C_RES}  "
     fi
 
     if [ -x /usr/bin/AdGuardHome ]; then
@@ -1957,9 +2465,9 @@ print_gateway_header() {
 
     if [ -n "$LATEST_AGH_TAG" ] && [ "$A_VER" != "не установлен" ]; then
         if [ "$A_VER" = "$LATEST_AGH_TAG" ]; then
-            A_VER_INFO="${A_VER} (актуальна)"
+            A_VER_INFO="${A_VER} ${C_DIM}(актуальна)${C_RES}"
         else
-            A_VER_INFO="${A_VER} -> ДОСТУПНА ${LATEST_AGH_TAG}!"
+            A_VER_INFO="${A_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_AGH_TAG}!${C_RES}"
         fi
     else
         A_VER_INFO="${A_VER}"
@@ -1968,84 +2476,90 @@ print_gateway_header() {
     SUB_CNT=$(count_sub_urls)
     MY_CNT=$(count_my_nodes)
     if [ "$SUB_CNT" -gt 1 ]; then
-        P_STAT="[МУЛЬТИ-САБ]  "
+        P_STAT="${C_CYN}[МУЛЬТИ-САБ]${C_RES}  "
         P_INFO="активно подписок: ${SUB_CNT} шт. (+ ключей: ${MY_CNT})"
     elif [ "$SUB_CNT" -eq 1 ]; then
-        P_STAT="[ПОДПИСКА]    "
+        P_STAT="${C_CYN}[ПОДПИСКА]${C_RES}    "
         P_INFO="${SUB_URL}"
     elif [ "$MY_CNT" -gt 0 ]; then
-        P_STAT="[КЛЮЧИ URI]   "
+        P_STAT="${C_CYN}[КЛЮЧИ URI]${C_RES}   "
         P_INFO="активно ключей в my_nodes.yaml: ${MY_CNT} шт."
     elif is_warp_enabled; then
-        P_STAT="[ТОЛЬКО WARP] "
+        P_STAT="${C_CYN}[ТОЛЬКО WARP]${C_RES} "
         P_INFO="работает бесплатный Amnezia WARP 2.0"
     else
-        P_STAT="[РЕЖИМ DIRECT]"
+        P_STAT="${C_YEL}[РЕЖИМ DIRECT]${C_RES}"
         P_INFO="прокси не заданы (весь трафик напрямую)"
     fi
 
     if is_warp_enabled; then
-        W_STAT="[АКТИВЕН]     "
+        W_STAT="${C_GRN}[АКТИВЕН]${C_RES}     "
         if [ -n "${WARP_LICENSE:-}" ]; then
             W_INFO="4 ноды AWG WARP+ (группа '☁️ Amnezia WARP')"
         else
             W_INFO="4 ноды AWG 2.0 (группа '☁️ Amnezia WARP')"
         fi
     else
-        W_STAT="[ВЫКЛЮЧЕН]    "
+        W_STAT="${C_DIM}[ВЫКЛЮЧЕН]${C_RES}    "
         W_INFO="можно включить бесплатно в пункте 2"
     fi
 
     if [ -f "${SB_DIR}/ui/index.html" ]; then
-        UI_STAT="[Zashboard]   "
+        UI_STAT="${C_GRN}[Zashboard]${C_RES}   "
         UI_VER=""
         [ -f "$UI_VER_FILE" ] && UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
         [ -z "$UI_VER" ] && UI_VER="установлена" || true
 
         if [ -n "$LATEST_UI_TAG" ] && [ "$UI_VER" != "установлена" ]; then
             if [ "$UI_VER" = "$LATEST_UI_TAG" ]; then
-                UI_VER_INFO="${UI_VER} (актуальна)"
+                UI_VER_INFO="${UI_VER} ${C_DIM}(актуальна)${C_RES}"
             else
-                UI_VER_INFO="${UI_VER} -> ДОСТУПНА ${LATEST_UI_TAG}!"
+                UI_VER_INFO="${UI_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_UI_TAG}!${C_RES}"
             fi
         else
             UI_VER_INFO="${UI_VER}"
         fi
     else
-        UI_STAT="[НЕ НАЙДЕНА]  "
+        UI_STAT="${C_RED}[НЕ НАЙДЕНА]${C_RES}  "
         UI_VER_INFO="не установлена"
     fi
 
     if is_killswitch_enabled; then
-        KS_STAT="[АКТИВЕН]     "
+        KS_STAT="${C_GRN}[АКТИВЕН]${C_RES}     "
         KS_INFO="строгая блокировка трафика мимо singbox-tun (${LAN_IF_NOW})"
     else
-        KS_STAT="[СТАНДАРТ]    "
+        KS_STAT="${C_CYN}[СТАНДАРТ]${C_RES}    "
         KS_INFO="защита IPv6 + DoT/DoQ + перехват DNS 53 (${LAN_IF_NOW})"
     fi
 
     if is_watchdog_enabled; then
-        WD_TXT="ВКЛ"
+        WD_TXT="${C_GRN}ВКЛ${C_RES}"
     else
-        WD_TXT="ВЫКЛ"
+        WD_TXT="${C_DIM}ВЫКЛ${C_RES}"
+    fi
+
+    if is_telegram_configured; then
+        TG_TXT="${C_GRN}ВКЛ${C_RES}"
+    else
+        TG_TXT="${C_DIM}ВЫКЛ${C_RES}"
     fi
 
     if is_dhcp_server_enabled; then
-        DHCP_TXT="ВКЛ"
+        DHCP_TXT="${C_GRN}ВКЛ${C_RES}"
     else
-        DHCP_TXT="ВЫКЛ"
+        DHCP_TXT="${C_DIM}ВЫКЛ${C_RES}"
     fi
 
     if is_autoupdate_enabled; then
-        AU_STAT="[ВКЛЮЧЕНО]    "
-        AU_INFO="04:00 + Watchdog: ${WD_TXT}"
+        AU_STAT="${C_GRN}[ВКЛЮЧЕНО]${C_RES}    "
+        AU_INFO="04:00 | Watchdog: ${WD_TXT} | TG-облако: ${TG_TXT}"
     else
-        AU_STAT="[ВЫКЛЮЧЕНО]   "
-        AU_INFO="вручную | Watchdog: ${WD_TXT}"
+        AU_STAT="${C_DIM}[ВЫКЛЮЧЕНО]${C_RES}   "
+        AU_INFO="вручную | Watchdog: ${WD_TXT} | TG-облако: ${TG_TXT}"
     fi
 
-    echo " Платформа:     [${OS_NAME}] | [${TOTAL_RAM_MB} МБ RAM -> SB ${SB_GOMEMLIMIT}]"
-    echo " Сеть шлюза:    [${LAN_IF_NOW}: ${LAN_IP_NOW}] -> [Роутер: ${GW_IP}] | DHCP: ${DHCP_TXT}"
+    echo " Платформа:     ${C_CYN}[${OS_NAME}]${C_RES} | [${TOTAL_RAM_MB} МБ RAM -> SB ${SB_GOMEMLIMIT}]"
+    echo " Сеть шлюза:    ${C_BLD}[${LAN_IF_NOW}: ${LAN_IP_NOW}]${C_RES} -> [Роутер: ${GW_IP}] | DHCP: ${DHCP_TXT}"
     echo " Sing-Box Ext:  ${S_STAT}${S_VER_INFO}"
     echo " AdGuard Home:  ${A_STAT}${A_VER_INFO} (DNS :53 + Антиреклама)"
     echo " Основной пул:  ${P_STAT}${P_INFO}"
@@ -2066,7 +2580,7 @@ check_github_mirror() {
     fi
     for MIRROR in "https://gh-proxy.com/" "https://ghproxy.net/"; do
         if curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null "${MIRROR}${TEST_URL}" 2>/dev/null; then
-            echo "[!] Прямой доступ к GitHub ограничен, включено зеркало: ${MIRROR}"
+            echo "${C_YEL}[!] Прямой доступ к GitHub ограничен, включено зеркало: ${MIRROR}${C_RES}"
             GH_PROXY="$MIRROR"
             return 0
         fi
@@ -2106,7 +2620,9 @@ format_uri_keys() {
     printf "%s\n" "$1" | tr -d '\r' | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|hysteria|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
     return 0
 }
+# ==================== [ КОНЕЦ ЧАСТИ 3 ИЗ 4 ] =====================
 
+# ==================== [ НАЧАЛО ЧАСТИ 4 ИЗ 4 ] ====================
 # Живой сканер Anycast-узлов Cloudflare WARP напрямую через физический LAN-интерфейс (в обход singbox-tun)
 scan_best_warp_endpoints() {
     CANDIDATES="162.159.192.1:4500 188.114.97.1:500 188.114.99.224:1002 162.159.195.1:2408 188.114.98.224:854 188.114.96.1:1701 162.159.193.1:500 188.114.97.3:4500"
@@ -2225,10 +2741,10 @@ generate_amnezia_warp() {
                 -X PUT "https://api.devices.cloudflare.com/v0a4471/reg/${REG_ID}/account" \
                 -d "{\"license\":\"${WARP_LICENSE}\"}" 2>/dev/null || true)
             if printf "%s" "$LIC_RESP" | grep -q '"warp_plus":[[:space:]]*true'; then
-                echo "[✓] Статус WARP+ (Argo Priority) успешно активирован!"
+                echo "${C_GRN}[✓] Статус WARP+ (Argo Priority) успешно активирован!${C_RES}"
                 save_gateway_env
             else
-                echo "[!] Лицензия WARP+ не принята API Cloudflare, используется стандартный безлимитный WARP."
+                echo "${C_YEL}[!] Лицензия WARP+ не принята API Cloudflare, используется стандартный безлимитный WARP.${C_RES}"
                 WARP_LICENSE=""
                 save_gateway_env
             fi
@@ -2247,7 +2763,7 @@ generate_amnezia_warp() {
     fi
 
     if [ "$REG_OK" = "no" ]; then
-        echo "[!] Провайдер блокирует прямой доступ к API регистрации Cloudflare."
+        echo "${C_YEL}[!] Провайдер блокирует прямой доступ к API регистрации Cloudflare.${C_RES}"
         printf "Вставьте готовый WARP PrivateKey (например, из @warp_generator_bot) [Enter = отмена]: "
         read -r USER_PRIV < /dev/tty || true
         USER_PRIV=$(printf "%s" "$USER_PRIV" | tr -d ' \t\r\n')
@@ -2256,7 +2772,7 @@ generate_amnezia_warp() {
             WARP_IPV4="172.16.0.2"
             REG_OK="yes"
         else
-            echo "[X] Не удалось получить ключ WARP."
+            echo "${C_RED}[X] Не удалось получить ключ WARP.${C_RES}"
             return 1
         fi
     fi
@@ -2410,7 +2926,7 @@ generate_amnezia_warp() {
 }
 WARP_EOF
     chmod 600 "$WARP_NODES_FILE" 2>/dev/null || true
-    echo "[✓] Пул Amnezia WARP 2.0 (${EP1}, ${EP2}, ${EP3}, ${EP4}, jc=${AWG_JC}) создан (IP: ${WARP_IPV4})!"
+    echo "${C_GRN}[✓] Пул Amnezia WARP 2.0 (${EP1}, ${EP2}, ${EP3}, ${EP4}, jc=${AWG_JC}) создан (IP: ${WARP_IPV4})!${C_RES}"
     return 0
 }
 
@@ -2430,8 +2946,8 @@ reload_singbox_api() {
         curl -fsS -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
             "http://127.0.0.1:9090/providers/proxies/${P_TAG}" >/dev/null 2>&1 || true
     done
-    curl -g -fsS --connect-timeout 2 -m 4 -H "Authorization: Bearer ${ADMIN_PASS}" \
-        "http://127.0.0.1:9090/group/%E2%9A%A1%20%D0%90%D0%B2%D1%82%D0%BE%20%28%D0%A1%D0%B0%D0%BC%D1%8B%D0%B9%20%D0%B1%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9%29/delay?url=https%3A%2F%2Fwww.youtube.com%2Fgenerate_204&timeout=3000" >/dev/null 2>&1 || true
+    curl -g -fsS --connect-timeout 2 -m 7 -H "Authorization: Bearer ${ADMIN_PASS}" \
+        "http://127.0.0.1:9090/group/%E2%9A%A1%20%D0%90%D0%B2%D1%82%D0%BE%20%28%D0%A1%D0%B0%D0%BC%D1%8B%D0%B9%20%D0%B1%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9%29/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=6000" >/dev/null 2>&1 || true
     return 0
 }
 
@@ -2503,11 +3019,11 @@ install_zashboard_ui() {
         [ -n "$TARGET_UI_VER" ] && echo "$TARGET_UI_VER" > "$UI_VER_FILE" || true
         LATEST_UI_TAG="$TARGET_UI_VER"
         rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
-        echo "[✓] Веб-панель Zashboard ${TARGET_UI_VER} успешно установлена в ${SB_DIR}/ui."
+        echo "${C_GRN}[✓] Веб-панель Zashboard ${TARGET_UI_VER} успешно установлена в ${SB_DIR}/ui.${C_RES}"
         return 0
     else
         rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
-        echo "[X] Ошибка загрузки или распаковки веб-панели Zashboard!"
+        echo "${C_RED}[X] Ошибка загрузки или распаковки веб-панели Zashboard!${C_RES}"
         return 1
     fi
 }
@@ -2530,7 +3046,7 @@ update_cores_only() {
     fi
 
     if [ "$INSTALLED_SB_VER" = "$SB_TAG" ]; then
-        echo "[✓] Ядро Sing-Box Extended ${INSTALLED_SB_VER} (${SB_ARCH}) актуально."
+        echo "${C_GRN}[✓] Ядро Sing-Box Extended ${INSTALLED_SB_VER} (${SB_ARCH}) актуально.${C_RES}"
     else
         echo "Загрузка Sing-Box Extended ${SB_TAG} (${SB_ARCH})..."
         rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
@@ -2544,16 +3060,16 @@ update_cores_only() {
                     if "$SB_BIN" version >/dev/null 2>&1; then
                         service_ctl sing-box stop
                         mv -f "$SB_BIN" /usr/bin/sing-box
-                        echo "[✓] Sing-Box Extended безопасно обновлен до ${SB_TAG}."
+                        echo "${C_GRN}[✓] Sing-Box Extended безопасно обновлен до ${SB_TAG}.${C_RES}"
                     else
-                        echo "[X] Ошибка: скачанный бинарник sing-box поврежден, оставлена текущая версия."
+                        echo "${C_RED}[X] Ошибка: скачанный бинарник sing-box поврежден, оставлена текущая версия.${C_RES}"
                     fi
                 fi
             fi
             rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
         else
             rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
-            echo "[X] Не удалось скачать Sing-Box Extended ${SB_TAG}."
+            echo "${C_RED}[X] Не удалось скачать Sing-Box Extended ${SB_TAG}.${C_RES}"
         fi
     fi
 
@@ -2566,7 +3082,7 @@ update_cores_only() {
     fi
 
     if [ "$INSTALLED_AGH_VER" = "$AGH_TAG" ]; then
-        echo "[✓] Ядро AdGuard Home ${INSTALLED_AGH_VER} актуально."
+        echo "${C_GRN}[✓] Ядро AdGuard Home ${INSTALLED_AGH_VER} актуально.${C_RES}"
     else
         echo "Загрузка AdGuard Home ${AGH_TAG}..."
         rm -rf /tmp/agh.tar.gz /tmp/agh_extract
@@ -2578,15 +3094,15 @@ update_cores_only() {
                 if /tmp/agh_extract/AdGuardHome/AdGuardHome --version >/dev/null 2>&1; then
                     service_ctl adguardhome stop
                     mv -f /tmp/agh_extract/AdGuardHome/AdGuardHome /usr/bin/AdGuardHome
-                    echo "[✓] AdGuard Home безопасно обновлен до ${AGH_TAG}."
+                    echo "${C_GRN}[✓] AdGuard Home безопасно обновлен до ${AGH_TAG}.${C_RES}"
                 else
-                    echo "[X] Ошибка проверки бинарника AdGuard Home, оставлена текущая версия."
+                    echo "${C_RED}[X] Ошибка проверки бинарника AdGuard Home, оставлена текущая версия.${C_RES}"
                 fi
             fi
             rm -rf /tmp/agh.tar.gz /tmp/agh_extract
         else
             rm -rf /tmp/agh.tar.gz /tmp/agh_extract
-            echo "[X] Не удалось скачать AdGuard Home ${AGH_TAG}."
+            echo "${C_RED}[X] Не удалось скачать AdGuard Home ${AGH_TAG}.${C_RES}"
         fi
     fi
 
@@ -2597,7 +3113,7 @@ update_cores_only() {
         [ -f "$UI_VER_FILE" ] && INSTALLED_UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
 
         if [ -f "${SB_DIR}/ui/index.html" ] && [ -n "$UI_TAG" ] && [ "$INSTALLED_UI_VER" = "$UI_TAG" ]; then
-            echo "[✓] Веб-панель Zashboard ${INSTALLED_UI_VER} актуальна."
+            echo "${C_GRN}[✓] Веб-панель Zashboard ${INSTALLED_UI_VER} актуальна.${C_RES}"
         else
             install_zashboard_ui "$UI_TAG" || true
         fi
@@ -2708,9 +3224,7 @@ INIT_AGH_OWRT
     service_ctl adguardhome restart
     return 0
 }
-# ==================== [ КОНЕЦ ЧАСТИ 2 ИЗ 3 ] =====================
 
-# ==================== [ НАЧАЛО ЧАСТИ 3 ИЗ 3 ] ====================
 # ==============================================================================
 # Главный мастер установки и настройки (OpenWrt 25.x + Alpine Linux 3.x)
 # ==============================================================================
@@ -2719,9 +3233,9 @@ run_installer() {
     disable_legacy_mihomo
     init_user_lists
 
-    echo "========================================================"
-    echo " Установщик Sing-Box Extended + AdGuard Home (Universal)"
-    echo "========================================================"
+    echo "${C_CYN}========================================================${C_RES}"
+    echo "${C_BLD} Установщик Sing-Box Extended + AdGuard Home (Universal)${C_RES}"
+    echo "${C_CYN}========================================================${C_RES}"
     echo "Система: ${OS_NAME} [${ARCH_RAW} -> ${SB_ARCH}]"
     echo "Память:  ${TOTAL_RAM_MB} МБ RAM (Лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
     echo "--------------------------------------------------------"
@@ -2793,7 +3307,7 @@ run_installer() {
     INPUT_LAN_IP=$(printf "%s" "$INPUT_LAN_IP" | tr -d ' \t\r\n')
     TARGET_LAN_IP="${INPUT_LAN_IP:-$SAVED_LAN_IP}"
     if ! is_valid_ipv4 "$TARGET_LAN_IP"; then
-        echo "[X] Некорректный IP (${TARGET_LAN_IP}), оставлен текущий: ${SAVED_LAN_IP}"
+        echo "${C_RED}[X] Некорректный IP (${TARGET_LAN_IP}), оставлен текущий: ${SAVED_LAN_IP}${C_RES}"
         TARGET_LAN_IP="$SAVED_LAN_IP"
     fi
 
@@ -2812,7 +3326,7 @@ run_installer() {
     fi
 
     if ! is_valid_ipv4 "$GW_IP" || [ "$GW_IP" = "$TARGET_LAN_IP" ]; then
-        echo "[X] Ошибка: IP основного роутера (${GW_IP}) некорректен или совпадает с IP шлюза (${TARGET_LAN_IP})!"
+        echo "${C_RED}[X] Ошибка: IP основного роутера (${GW_IP}) некорректен или совпадает с IP шлюза (${TARGET_LAN_IP})!${C_RES}"
         exit 1
     fi
 
@@ -2833,7 +3347,7 @@ run_installer() {
 
     ADMIN_PASS="${INPUT_PASS:-$SAVED_PASS}"
     if [ -z "$ADMIN_PASS" ]; then
-        echo "[X] Ошибка: Пароль не может быть пустым!"
+        echo "${C_RED}[X] Ошибка: Пароль не может быть пустым!${C_RES}"
         exit 1
     fi
 
@@ -3018,7 +3532,7 @@ SYS_EOF
     if [ ! -f "${SB_DIR}/ui/index.html" ]; then
         install_zashboard_ui || true
     else
-        echo "[✓] Веб-панель Zashboard уже установлена."
+        echo "${C_GRN}[✓] Веб-панель Zashboard уже установлена.${C_RES}"
     fi
 
     generate_singbox_config
@@ -3031,7 +3545,7 @@ SYS_EOF
         [ -z "$AGH_PASS_HASH" ] && AGH_PASS_HASH=$(htpasswd -nbBC 10 "$AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true) || true
     fi
     disable_apache_daemon
-    [ -z "$AGH_PASS_HASH" ] && { echo "[X] Ошибка генерации bcrypt-хэша!"; exit 1; }
+    [ -z "$AGH_PASS_HASH" ] && { echo "${C_RED}[X] Ошибка генерации bcrypt-хэша!${C_RES}"; exit 1; }
 
     service_ctl adguardhome stop
     mkdir -p /etc/AdGuardHome/data
@@ -3064,7 +3578,7 @@ SYS_EOF
         ' "$AGH_CONF" > "${AGH_CONF}.tmp" && mv "${AGH_CONF}.tmp" "$AGH_CONF"
         grep -q "aaaa_disabled:" "$AGH_CONF" 2>/dev/null || sed -i '/cache_size:/a \  aaaa_disabled: true' "$AGH_CONF" 2>/dev/null || true
         chmod 600 "$AGH_CONF" 2>/dev/null || true
-        echo "[✓] Существующий AdGuardHome.yaml обновлен (фильтры сохранены, aaaa_disabled: true активен)."
+        echo "${C_GRN}[✓] Существующий AdGuardHome.yaml обновлен (фильтры сохранены, aaaa_disabled: true активен).${C_RES}"
     else
         cat << AGH_EOF > "$AGH_CONF"
 http:
@@ -3124,14 +3638,14 @@ nameserver 77.88.8.8"
     reload_singbox_api
     run_self_test
 
-    echo "========================================================"
-    echo " Развертывание на ${OS_NAME} успешно завершено!"
-    echo " - IP-адрес шлюза:     ${CURRENT_IP} (интерфейс $(get_lan_ifname), маска /24)"
+    echo "${C_CYN}========================================================${C_RES}"
+    echo "${C_GRN} Развертывание на ${OS_NAME} успешно завершено!${C_RES}"
+    echo " - IP-адрес шлюза:     ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
     echo " - Основной роутер:    ${GW_IP}"
-    echo " - Панель Sing-Box:    http://${CURRENT_IP}:9090/ui [Zashboard] (пароль: ${ADMIN_PASS})"
-    echo " - Панель AdGuard:     http://${CURRENT_IP}:3000 (логин: ${AGH_USER} / пароль: ${ADMIN_PASS})"
-    echo " - Вызов меню шлюза:   gateway"
-    echo "========================================================"
+    echo " - Панель Sing-Box:    ${C_CYN}http://${CURRENT_IP}:9090/ui${C_RES} [Zashboard] (пароль: ${ADMIN_PASS})"
+    echo " - Панель AdGuard:     ${C_CYN}http://${CURRENT_IP}:3000${C_RES} (логин: ${AGH_USER} / пароль: ${ADMIN_PASS})"
+    echo " - Вызов меню шлюза:   ${C_GRN}gateway${C_RES}"
+    echo "${C_CYN}========================================================${C_RES}"
 
     if [ "$TARGET_LAN_IP" != "$SAVED_LAN_IP" ]; then
         apply_network_ips "$TARGET_LAN_IP" "$GW_IP" || true
@@ -3143,7 +3657,7 @@ nameserver 77.88.8.8"
 run_self_test() {
     set +e
     detect_os
-    echo "=== [Self-Test 2.0] Матрица диагностики шлюза (${OS_NAME}) ==="
+    echo "${C_CYN}=== [Self-Test 2.0] Матрица диагностики шлюза (${OS_NAME}) ===${C_RES}"
     WAIT_CNT=0
     while [ "$WAIT_CNT" -lt 12 ]; do
         if pgrep sing-box >/dev/null 2>&1 && ip link show singbox-tun >/dev/null 2>&1; then
@@ -3157,59 +3671,59 @@ run_self_test() {
     calc_hardware_limits
     LAN_IF_NOW=$(get_lan_ifname)
     if is_dhcp_server_enabled; then
-        DHCP_ST="ВКЛ"
+        DHCP_ST="${C_GRN}ВКЛ${C_RES}"
     else
-        DHCP_ST="ВЫКЛ"
+        DHCP_ST="${C_DIM}ВЫКЛ${C_RES}"
     fi
-    echo " • Сеть шлюза: [${OS_NAME} (${LAN_IF_NOW}): $(get_current_lan_ip)] -> [Роутер: ${GW_IP}] | DHCP: ${DHCP_ST}"
+    echo " • Сеть шлюза: ${C_BLD}[${OS_NAME} (${LAN_IF_NOW}): $(get_current_lan_ip)]${C_RES} -> [Роутер: ${GW_IP}] | DHCP: ${DHCP_ST}"
     print_proxy_slots_report
 
     SB_PID=$(pgrep sing-box 2>/dev/null | head -n 1 || true)
     if [ -n "$SB_PID" ]; then
         SB_RSS=$(awk '/^VmRSS:/ {printf "%.1f МБ", $2/1024}' "/proc/${SB_PID}/status" 2>/dev/null || echo "активен")
-        echo "[✓] Служба Sing-Box Extended: ЗАПУЩЕНА (PID ${SB_PID}, ОЗУ: ${SB_RSS} / лимит ${SB_GOMEMLIMIT})"
+        echo "${C_GRN}[✓]${C_RES} Служба Sing-Box Extended: ${C_GRN}ЗАПУЩЕНА${C_RES} (PID ${SB_PID}, ОЗУ: ${SB_RSS} / лимит ${SB_GOMEMLIMIT})"
     else
-        echo "[X] Служба Sing-Box Extended: ОСТАНОВЛЕНА"
+        echo "${C_RED}[X] Служба Sing-Box Extended: ОСТАНОВЛЕНА${C_RES}"
     fi
 
     AGH_PID=$(pgrep AdGuardHome 2>/dev/null | head -n 1 || true)
     if [ -n "$AGH_PID" ]; then
         AGH_RSS=$(awk '/^VmRSS:/ {printf "%.1f МБ", $2/1024}' "/proc/${AGH_PID}/status" 2>/dev/null || echo "активен")
-        echo "[✓] Служба AdGuard Home (:53): ЗАПУЩЕНА (PID ${AGH_PID}, ОЗУ: ${AGH_RSS} / лимит ${AGH_GOMEMLIMIT})"
+        echo "${C_GRN}[✓]${C_RES} Служба AdGuard Home (:53): ${C_GRN}ЗАПУЩЕНА${C_RES} (PID ${AGH_PID}, ОЗУ: ${AGH_RSS} / лимит ${AGH_GOMEMLIMIT})"
     else
-        echo "[X] Служба AdGuard Home: ОСТАНОВЛЕНА"
+        echo "${C_RED}[X] Служба AdGuard Home: ОСТАНОВЛЕНА${C_RES}"
     fi
 
     if ip link show singbox-tun >/dev/null 2>&1; then
-        echo "[✓] TUN-интерфейс (singbox-tun): АКТИВЕН (MTU 1492, mixed stack)"
+        echo "${C_GRN}[✓]${C_RES} TUN-интерфейс (singbox-tun): ${C_GRN}АКТИВЕН${C_RES} (MTU 1492, mixed stack)"
     else
-        echo "[X] TUN-интерфейс (singbox-tun): НЕ НАЙДЕН"
+        echo "${C_RED}[X] TUN-интерфейс (singbox-tun): НЕ НАЙДЕН${C_RES}"
     fi
 
     RP_STAT=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo "unknown")
     BBR_STAT=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
     CT_CNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "0")
-    echo "[✓] Сетевой стек: TCP ${BBR_STAT} | rp_filter=${RP_STAT} | Сессии Conntrack: ${CT_CNT} из ${SYS_CONNTRACK_MAX}"
+    echo "${C_GRN}[✓]${C_RES} Сетевой стек: TCP ${C_CYN}${BBR_STAT}${C_RES} | rp_filter=${RP_STAT} | Сессии Conntrack: ${C_BLD}${CT_CNT}${C_RES} из ${SYS_CONNTRACK_MAX}"
 
     if is_killswitch_enabled; then
-        echo "[✓] Защита от утечек: Kill-Switch АКТИВЕН + блок Type 65 (HTTPS/ECH), IPv6 и DoT 853"
+        echo "${C_GRN}[✓]${C_RES} Защита от утечек: ${C_GRN}Kill-Switch АКТИВЕН${C_RES} + блок Type 65 (HTTPS/ECH), IPv6 и DoT 853"
     else
-        echo "[✓] Защита от утечек: Блок Type 65 (HTTPS/ECH), IPv6 Drop, DoT/DoQ 853 Reject и DNS 53 Redirect"
+        echo "${C_GRN}[✓]${C_RES} Защита от утечек: Блок Type 65 (HTTPS/ECH), IPv6 Drop, DoT/DoQ 853 Reject и DNS 53 Redirect"
     fi
 
     if [ -f "$SB_CONF" ] && [ -n "$SB_PID" ]; then
         ACTIVE_NODE=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null | jq -r '.proxies["⚡ Авто (Самый быстрый)"].now // empty' 2>/dev/null)
-        [ -n "$ACTIVE_NODE" ] && echo "[✓] Активная нода (Авто): ${ACTIVE_NODE}" || true
+        [ -n "$ACTIVE_NODE" ] && echo "${C_GRN}[✓]${C_RES} Активная нода (Авто): ${C_CYN}${ACTIVE_NODE}${C_RES}" || true
         CF_TRACE=$(curl -fsS --curves X25519:P-256 --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
         if [ -n "$CF_TRACE" ]; then
-            echo "[✓] Внешний выход через туннель (Cloudflare Trace): ${CF_TRACE}"
+            echo "${C_GRN}[✓]${C_RES} Внешний выход через туннель (Cloudflare Trace): ${C_GRN}${CF_TRACE}${C_RES}"
             PING_RU=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 2 -w '%{time_connect}' "http://ya.ru" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f ms", $1*1000; ok=1} END {if (!ok) print "timeout"}')
             PING_CF=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://cp.cloudflare.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f ms", $1*1000; ok=1} END {if (!ok) print "timeout"}')
             PING_GG=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "https://www.youtube.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f ms", $1*1000; ok=1} END {if (!ok) print "timeout"}')
             PING_AI=$(curl -o /dev/null -sS --curves X25519:P-256 --connect-timeout 3 -m 4 -x http://127.0.0.1:7890 -w '%{time_appconnect}' "https://api.openai.com" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f ms", $1*1000; ok=1} END {if (!ok) print "timeout"}')
-            echo "[✓] Матрица задержек: РФ (ya.ru): ${PING_RU} | CF: ${PING_CF} | YouTube: ${PING_GG} | OpenAI (TLS): ${PING_AI}"
+            echo "${C_GRN}[✓]${C_RES} Матрица задержек: РФ (ya.ru): ${C_BLD}${PING_RU}${C_RES} | CF: ${C_BLD}${PING_CF}${C_RES} | YouTube: ${C_BLD}${PING_GG}${C_RES} | OpenAI (TLS): ${C_BLD}${PING_AI}${C_RES}"
         else
-            echo "[!] Туннель еще прогревается или подписка недоступна."
+            echo "${C_YEL}[!] Туннель еще прогревается или подписка недоступна.${C_RES}"
         fi
     fi
     return 0
@@ -3224,7 +3738,7 @@ if [ -f "$0" ] && [ "$0" != "$INSTALL_PATH" ] && [ "$SCRIPT_BASE" != "sh" ] && [
     chmod +x "$INSTALL_PATH"
     detect_os
     ensure_sysupgrade_persistence
-    echo "[✓] Команда 'gateway' успешно установлена в систему (${OS_NAME})."
+    echo "${C_GRN}[✓] Команда 'gateway' успешно установлена в систему (${OS_NAME}).${C_RES}"
 fi
 
 # ==============================================================================
@@ -3238,24 +3752,24 @@ show_menu() {
     refresh_remote_versions "no"
     while true; do
         clear
-        echo "========================================================"
-        echo "  Панель управления шлюзом (Sing-Box Extended Edition)  "
-        echo "========================================================"
+        echo "${C_CYN}========================================================${C_RES}"
+        echo "${C_BLD}  Панель управления шлюзом (Sing-Box Extended Edition)  ${C_RES}"
+        echo "${C_CYN}========================================================${C_RES}"
         print_gateway_header
         echo "--------------------------------------------------------"
-        echo " 1) Статус служб, матрица пинга и тест на утечки (Self-Test 2.0)"
-        echo " 2) Управление прокси: Подписки / Ключи / Amnezia WARP 2.0"
-        echo " 3) Обновить ядра Sing-Box Extended, AdGuard Home и Zashboard"
-        echo " 4) Перезапустить службы + пересобрать конфиг и сбросить кэш"
-        echo " 5) Посмотреть живые логи Sing-Box"
-        echo " 6) Полная перенастройка шлюза (Мастер установки)"
-        echo " 7) Свои домены: добавить/удалить (В прокси / Напрямую)"
-        echo " 8) Маршрутизация устройств по IP (Обход DIRECT / Full-VPN)"
-        echo " 9) Сервисный режим, смена пароля и резервное копирование"
-        echo " 10) Автообновление (04:00) и Авто-Доктор (Watchdog)"
-        echo " 11) Аппаратный Kill-Switch (защита от утечек при падении Sing-Box)"
-        echo " 12) Сетевые настройки: IP шлюза / роутера + Умный DHCP Sidecar"
-        echo " 0) Выход"
+        echo " ${C_CYN}1)${C_RES} Статус служб, матрица пинга и рентген сайтов (Self-Test 2.0)"
+        echo " ${C_CYN}2)${C_RES} Управление прокси: Подписки / Ключи / WARP + ${C_GRN}SSH-пульт нод${C_RES}"
+        echo " ${C_CYN}3)${C_RES} Обновить ядра Sing-Box Extended, AdGuard Home и Zashboard"
+        echo " ${C_CYN}4)${C_RES} Перезапустить службы + пересобрать конфиг и сбросить кэш"
+        echo " ${C_CYN}5)${C_RES} Посмотреть живые логи Sing-Box"
+        echo " ${C_CYN}6)${C_RES} Полная перенастройка шлюза (Мастер установки)"
+        echo " ${C_CYN}7)${C_RES} Свои домены (В прокси / Напрямую) + ${C_GRN}🕵️ Детектор сайта${C_RES}"
+        echo " ${C_CYN}8)${C_RES} Маршрутизация устройств по IP + ${C_GRN}🔍 Авто-поиск в LAN${C_RES}"
+        echo " ${C_CYN}9)${C_RES} Сервисный режим, пароль и ${C_GRN}☁️ Облачный бэкап в Telegram${C_RES}"
+        echo " ${C_CYN}10)${C_RES} Автообновление (04:00), Авто-Доктор (Watchdog) и Telegram"
+        echo " ${C_CYN}11)${C_RES} Аппаратный Kill-Switch (защита от утечек при падении Sing-Box)"
+        echo " ${C_CYN}12)${C_RES} Сетевые настройки: IP шлюза / роутера + Умный DHCP Sidecar"
+        echo " ${C_CYN}0)${C_RES} Выход"
         echo "--------------------------------------------------------"
         printf "Выберите действие [0-12]: "
         read -r CHOICE < /dev/tty || true
@@ -3266,13 +3780,19 @@ show_menu() {
                 run_self_test
                 echo "--- Прослушиваемые порты ---"
                 ss -tulpn 2>/dev/null | grep -E ':(53|1053|3000|9090|7890)\b' || netstat -tulpn 2>/dev/null | grep -E ':(53|1053|3000|9090|7890)\b' || true
-                printf "\nНажмите Enter для возврата в меню..."
-                read -r _ < /dev/tty
+                echo "--------------------------------------------------------"
+                printf "Нажмите Enter для возврата в меню (или введите 'd' для проверки любого сайта): "
+                read -r ST_ACT < /dev/tty || true
+                if [ "$ST_ACT" = "d" ] || [ "$ST_ACT" = "D" ]; then
+                    inspect_domain_route || true
+                    printf "\nНажмите Enter для возврата в меню..."
+                    read -r _ < /dev/tty
+                fi
                 ;;
             2)
                 while true; do
                     clear
-                    echo "=== Управление источниками прокси (3 независимых слота) ==="
+                    echo "${C_CYN}=== Управление источниками прокси (3 независимых слота) ===${C_RES}"
                     print_proxy_slots_report
                     echo "---------------------------------------------------------------"
                     echo " 1) Указать / заменить основную подписку (http://...) [Слот 1]"
@@ -3285,9 +3805,11 @@ show_menu() {
                     echo " 8) Включить / перевыпустить Amnezia WARP 2.0 (+ WARP+) [Слот 3]"
                     echo " 9) Отключить и полностью очистить ноды Amnezia WARP 2.0 [Слот 3]"
                     echo " 10) Режим «Белые списки» (показать/скрыть РФ-каскады в подписке) [Слот 1]"
+                    echo " 11) ${C_GRN}⚡ Мини-пульт управления нодами и группами прямо из SSH${C_RES}"
+                    echo " 12) ${C_GRN}🩺 Поштучно проверить и оживить ноды с молнией (⚡)${C_RES}"
                     echo " 0) Назад в главное меню"
                     echo "---------------------------------------------------------------"
-                    printf "Выбор [0-10]: "
+                    printf "Выбор [0-12]: "
                     read -r SUB_ACT < /dev/tty || true
                     case "$SUB_ACT" in
                         ""|0)
@@ -3306,7 +3828,7 @@ show_menu() {
                                 fi
                                 apply_and_verify_singbox "Обновление подписки (Слот 1)" || true
                             else
-                                echo "[X] Отмена: пустой ввод."
+                                echo "${C_RED}[X] Отмена: пустой ввод.${C_RES}"
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
@@ -3328,7 +3850,7 @@ show_menu() {
                                     apply_and_verify_singbox "Добавление дополнительной подписки в Слот 1" || true
                                     ;;
                                 *)
-                                    echo "[X] Ошибка: Ссылка должна начинаться с http:// или https://"
+                                    echo "${C_RED}[X] Ошибка: Ссылка должна начинаться с http:// или https://${C_RES}"
                                     ;;
                             esac
                             printf "\nНажмите Enter для продолжения..."
@@ -3416,7 +3938,7 @@ show_menu() {
                             echo '{"outbounds": []}' > "$WARP_NODES_FILE"
                             WARP_LICENSE=""
                             if ! is_sub_enabled && ! has_my_nodes; then
-                                echo "[!] Сейчас Amnezia WARP был единственным источником прокси."
+                                echo "${C_YEL}[!] Сейчас Amnezia WARP был единственным источником прокси.${C_RES}"
                                 printf "Введите ссылку на подписку (http://...) или ключ (vless://...) на замену [Enter = перевести шлюз в режим DIRECT]: "
                                 read -r REPL_SUB < /dev/tty || true
                                 REPL_SUB=$(printf "%s" "$REPL_SUB" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -3446,6 +3968,14 @@ show_menu() {
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
+                        11)
+                            manage_nodes_cli_menu || true
+                            ;;
+                        12)
+                            diagnose_failed_nodes || true
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
                     esac
                 done
                 ;;
@@ -3464,12 +3994,12 @@ show_menu() {
                 if apply_and_verify_singbox "Актуализация групп и перезапуск служб"; then
                     conntrack -F >/dev/null 2>&1 || true
                     service_ctl adguardhome restart
-                    echo "[✓] Таблица conntrack очищена, службы успешно перезапущены."
+                    echo "${C_GRN}[✓] Таблица conntrack очищена, службы успешно перезапущены.${C_RES}"
                 fi
                 sleep 2
                 ;;
             5)
-                echo "=== Последние записи лога Sing-Box Extended (${OS_NAME}) ==="
+                echo "${C_CYN}=== Последние записи лога Sing-Box Extended (${OS_NAME}) ===${C_RES}"
                 show_singbox_logs 45
                 printf "\nНажмите Enter для возврата в меню..."
                 read -r _ < /dev/tty
@@ -3482,7 +4012,7 @@ show_menu() {
             7)
                 while true; do
                     clear
-                    echo "=== Пользовательские правила доменов ==="
+                    echo "${C_CYN}=== Пользовательские правила доменов и Детектор сайта ===${C_RES}"
                     echo "Домены В ПРОКСИ (${USER_PROXY_FILE} -> группа 🌐 Остальной трафик):"
                     list_entries_numbered "$USER_PROXY_FILE"
                     echo "--------------------------------------------------------"
@@ -3494,9 +4024,10 @@ show_menu() {
                     echo " 3) Удалить один домен из списка В ПРОКСИ по номеру"
                     echo " 4) Удалить один домен из списка НАПРЯМУЮ по номеру"
                     echo " 5) Сбросить оба списка доменов по умолчанию"
+                    echo " 6) ${C_GRN}🕵️ Проверить любой сайт / домен (Рентген маршрута: AdGuard + FakeIP + TLS)${C_RES}"
                     echo " 0) Назад в главное меню"
                     echo "--------------------------------------------------------"
-                    printf "Выбор [0-5]: "
+                    printf "Выбор [0-6]: "
                     read -r DOM_ACT < /dev/tty || true
                     case "$DOM_ACT" in
                         ""|0)
@@ -3518,7 +4049,7 @@ show_menu() {
                                         grep -qxF "$CLEAN_D" "$USER_PROXY_FILE" 2>/dev/null || echo "$CLEAN_D" >> "$USER_PROXY_FILE"
                                         ADDED_LIST="${ADDED_LIST} ${CLEAN_D}"
                                     else
-                                        echo "[!] Пропущен некорректный домен: ${D_ITEM}"
+                                        echo "${C_YEL}[!] Пропущен некорректный домен: ${D_ITEM}${C_RES}"
                                     fi
                                 done
                                 if [ -n "$ADDED_LIST" ]; then
@@ -3544,7 +4075,7 @@ show_menu() {
                                         grep -qxF "$CLEAN_D" "$USER_DIRECT_FILE" 2>/dev/null || echo "$CLEAN_D" >> "$USER_DIRECT_FILE"
                                         ADDED_LIST="${ADDED_LIST} ${CLEAN_D}"
                                     else
-                                        echo "[!] Пропущен некорректный домен: ${D_ITEM}"
+                                        echo "${C_YEL}[!] Пропущен некорректный домен: ${D_ITEM}${C_RES}"
                                     fi
                                 done
                                 if [ -n "$ADDED_LIST" ]; then
@@ -3593,21 +4124,28 @@ show_menu() {
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
+                        6)
+                            inspect_domain_route || true
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
                     esac
                 done
                 ;;
             8)
                 while true; do
                     clear
-                    echo "=== Маршрутизация устройств по локальному IP ==="
+                    echo "${C_CYN}=== Маршрутизация устройств по IP (Авто-сканер LAN) ===${C_RES}"
+                    discover_lan_devices
+                    echo "--------------------------------------------------------"
                     echo "Устройства в обходе (всегда DIRECT):"
                     list_entries_numbered "$USER_BYPASS_IPS"
                     echo "--------------------------------------------------------"
                     echo "Устройства в Full-VPN (группа '📺 Устройства (Full-VPN)' — ТВ/PS5/Quest):"
                     list_entries_numbered "$USER_FORCE_PROXY_IPS"
                     echo "--------------------------------------------------------"
-                    echo " 1) Добавить IP устройства в ОБХОД (DIRECT)"
-                    echo " 2) Добавить IP устройства в FULL-VPN (группа 📺 Устройства (Full-VPN))"
+                    echo " 1) Добавить устройство в ОБХОД (DIRECT) — по номеру из LAN или по IP"
+                    echo " 2) Добавить устройство в FULL-VPN — по номеру из LAN или по IP"
                     echo " 3) Удалить один IP из списка ОБХОД (DIRECT) по номеру"
                     echo " 4) Удалить один IP из списка FULL-VPN по номеру"
                     echo " 5) Очистить оба списка IP"
@@ -3620,10 +4158,10 @@ show_menu() {
                             break
                             ;;
                         1)
-                            printf "Введите локальный IP для обхода (DIRECT): "
-                            read -r IP_IN < /dev/tty || true
-                            IP_IN=$(printf "%s" "$IP_IN" | tr -d ' \t\r\n')
-                            if is_valid_ipv4 "$IP_IN"; then
+                            printf "Введите номер устройства из таблицы LAN выше ИЛИ его IP-адрес (для DIRECT): "
+                            read -r RAW_DEV_IN < /dev/tty || true
+                            IP_IN=$(resolve_device_ip_input "$RAW_DEV_IN" || true)
+                            if [ -n "$IP_IN" ]; then
                                 backup_gateway_state
                                 load_gateway_env
                                 sed -i "\|^${IP_IN}$|d" "$USER_FORCE_PROXY_IPS" 2>/dev/null || true
@@ -3632,16 +4170,16 @@ show_menu() {
                                     conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
                                 fi
                             else
-                                echo "[X] Некорректный IPv4-адрес!"
+                                echo "${C_RED}[X] Некорректный номер устройства или IPv4-адрес!${C_RES}"
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
                         2)
-                            printf "Введите локальный IP для Full-VPN (всегда в прокси): "
-                            read -r IP_IN < /dev/tty || true
-                            IP_IN=$(printf "%s" "$IP_IN" | tr -d ' \t\r\n')
-                            if is_valid_ipv4 "$IP_IN"; then
+                            printf "Введите номер устройства из таблицы LAN выше ИЛИ его IP-адрес (для Full-VPN): "
+                            read -r RAW_DEV_IN < /dev/tty || true
+                            IP_IN=$(resolve_device_ip_input "$RAW_DEV_IN" || true)
+                            if [ -n "$IP_IN" ]; then
                                 backup_gateway_state
                                 load_gateway_env
                                 sed -i "\|^${IP_IN}$|d" "$USER_BYPASS_IPS" 2>/dev/null || true
@@ -3650,7 +4188,7 @@ show_menu() {
                                     conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
                                 fi
                             else
-                                echo "[X] Некорректный IPv4-адрес!"
+                                echo "${C_RED}[X] Некорректный номер устройства или IPv4-адрес!${C_RES}"
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
@@ -3713,18 +4251,22 @@ show_menu() {
                 ;;
             9)
                 while true; do
+                    load_gateway_env
                     clear
-                    echo "=== Сервисный режим, смена пароля и резервное копирование ==="
+                    echo "${C_CYN}=== Сервисный режим, смена пароля и Облачный бэкап ===${C_RES}"
+                    echo " • Облако Telegram: $(is_telegram_configured && echo "${C_GRN}ПОДКЛЮЧЕНО (Chat ID: ${TG_CHAT_ID})${C_RES}" || echo "${C_DIM}НЕ НАСТРОЕНО${C_RES}")"
+                    echo "--------------------------------------------------------"
                     echo " 1) Пауза: переключить весь трафик в DIRECT (без остановки DNS)"
                     echo " 2) Возобновить работу по правилам (mode: rule)"
-                    echo " 3) Создать бэкап всех настроек и фильтров (${BACKUP_ARCHIVE})"
+                    echo " 3) Создать бэкап всех настроек (${BACKUP_ARCHIVE}) + автоотправка в TG"
                     echo " 4) Восстановить настройки из бэкапа (${BACKUP_ARCHIVE})"
                     echo " 5) Сменить единый пароль (Sing-Box Zashboard + AdGuard Home)"
+                    echo " 6) ${C_GRN}☁️ Отправить текущий файл бэкапа себе в Telegram${C_RES}"
+                    echo " 7) ⚙️ Настроить Telegram-бота (Токен и Chat ID для облачных бэкапов)"
                     echo " 0) Назад в главное меню"
                     echo "--------------------------------------------------------"
-                    printf "Выбор [0-5]: "
+                    printf "Выбор [0-7]: "
                     read -r SRV_ACT < /dev/tty || true
-                    load_gateway_env
                     case "$SRV_ACT" in
                         ""|0)
                             break
@@ -3732,14 +4274,14 @@ show_menu() {
                         1)
                             curl -fsS -X PATCH -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
                                 -d '{"mode":"direct"}' "http://127.0.0.1:9090/configs" >/dev/null 2>&1 || true
-                            echo "[✓] Шлюз переведен в режим паузы (весь трафик идет напрямую в DIRECT)."
+                            echo "${C_GRN}[✓] Шлюз переведен в режим паузы (весь трафик идет напрямую в DIRECT).${C_RES}"
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
                         2)
                             curl -fsS -X PATCH -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
                                 -d '{"mode":"rule"}' "http://127.0.0.1:9090/configs" >/dev/null 2>&1 || true
-                            echo "[✓] Режим маршрутизации по правилам (rule) восстановлен."
+                            echo "${C_GRN}[✓] Режим маршрутизации по правилам (rule) восстановлен.${C_RES}"
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
@@ -3747,7 +4289,10 @@ show_menu() {
                             tar --exclude='*cache.db*' -czf "$BACKUP_ARCHIVE" /etc/sing-box /etc/AdGuardHome/AdGuardHome.yaml 2>/dev/null || \
                             tar --exclude='*cache.db*' -czf "$BACKUP_ARCHIVE" /etc/sing-box 2>/dev/null || true
                             chmod 600 "$BACKUP_ARCHIVE" 2>/dev/null || true
-                            echo "[✓] Архив (без временного cache.db) сохранен в ${BACKUP_ARCHIVE}"
+                            echo "${C_GRN}[✓] Архив (без временного cache.db) сохранен в ${BACKUP_ARCHIVE}${C_RES}"
+                            if is_telegram_configured; then
+                                send_telegram_backup "$BACKUP_ARCHIVE" || true
+                            fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
@@ -3761,12 +4306,12 @@ show_menu() {
                                     chmod 600 "$SB_CONF" "$SB_ENV" "$AGH_CONF" 2>/dev/null || true
                                     service_ctl sing-box start
                                     service_ctl adguardhome start
-                                    echo "[✓] Конфигурация безопасно восстановлена из ${BACKUP_ARCHIVE}"
+                                    echo "${C_GRN}[✓] Конфигурация безопасно восстановлена из ${BACKUP_ARCHIVE}${C_RES}"
                                 else
-                                    echo "[X] Ошибка: Архив ${BACKUP_ARCHIVE} поврежден!"
+                                    echo "${C_RED}[X] Ошибка: Архив ${BACKUP_ARCHIVE} поврежден!${C_RES}"
                                 fi
                             else
-                                echo "[X] Файл бэкапа ${BACKUP_ARCHIVE} не найден!"
+                                echo "${C_RED}[X] Файл бэкапа ${BACKUP_ARCHIVE} не найден!${C_RES}"
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
@@ -3778,8 +4323,23 @@ show_menu() {
                             if [ -n "$NEW_P_IN" ]; then
                                 change_unified_password "$NEW_P_IN" || true
                             else
-                                echo "[X] Отмена: пароль не может быть пустым."
+                                echo "${C_RED}[X] Отмена: пароль не может быть пустым.${C_RES}"
                             fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        6)
+                            if [ ! -f "$BACKUP_ARCHIVE" ]; then
+                                tar --exclude='*cache.db*' -czf "$BACKUP_ARCHIVE" /etc/sing-box /etc/AdGuardHome/AdGuardHome.yaml 2>/dev/null || \
+                                tar --exclude='*cache.db*' -czf "$BACKUP_ARCHIVE" /etc/sing-box 2>/dev/null || true
+                                chmod 600 "$BACKUP_ARCHIVE" 2>/dev/null || true
+                            fi
+                            send_telegram_backup "$BACKUP_ARCHIVE" || true
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        7)
+                            configure_telegram_menu || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
@@ -3788,20 +4348,23 @@ show_menu() {
                 ;;
             10)
                 while true; do
+                    load_gateway_env
                     clear
-                    echo "=== Автообновление (04:00) и Авто-Доктор (Watchdog каждые 5 мин) ==="
+                    echo "${C_CYN}=== Автообновление (04:00), Авто-Доктор (Watchdog) и Telegram ===${C_RES}"
                     echo " ⚠️  Бро я думаю ты осознаешь последствия ,_,"
                     echo "--------------------------------------------------------"
-                    echo " • Автообновление ядер (04:00): $(is_autoupdate_enabled && echo "ВКЛЮЧЕНО" || echo "ВЫКЛЮЧЕНО")"
-                    echo " • Авто-Доктор служб (Watchdog): $(is_watchdog_enabled && echo "ВКЛЮЧЕН (каждые 5 мин)" || echo "ВЫКЛЮЧЕН")"
+                    echo " • Автообновление ядер (04:00): $(is_autoupdate_enabled && echo "${C_GRN}ВКЛЮЧЕНО${C_RES}" || echo "${C_DIM}ВЫКЛЮЧЕНО${C_RES}")"
+                    echo " • Авто-Доктор служб (Watchdog): $(is_watchdog_enabled && echo "${C_GRN}ВКЛЮЧЕН (каждые 5 мин + ротация логов)${C_RES}" || echo "${C_DIM}ВЫКЛЮЧЕН${C_RES}")"
+                    echo " • Уведомления в Telegram:       $(is_telegram_configured && echo "${C_GRN}ВКЛЮЧЕНЫ (Chat ID: ${TG_CHAT_ID})${C_RES}" || echo "${C_DIM}НЕ НАСТРОЕНЫ${C_RES}")"
                     echo "--------------------------------------------------------"
                     echo " 1) Включить Автообновление (04:00) + Watchdog"
                     echo " 2) Выключить Автообновление (оставить только Watchdog)"
                     echo " 3) Включить / Выключить Авто-Доктор (Watchdog)"
                     echo " 4) Посмотреть лог последнего автообновления (${AUTOUPDATE_LOG})"
+                    echo " 5) ⚙️ Настроить уведомления и облачный бэкап в Telegram"
                     echo " 0) Назад в главное меню"
                     echo "--------------------------------------------------------"
-                    printf "Выбор [0-4]: "
+                    printf "Выбор [0-5]: "
                     read -r AU_ACT < /dev/tty || true
                     case "$AU_ACT" in
                         ""|0)
@@ -3810,24 +4373,24 @@ show_menu() {
                         1)
                             enable_autoupdate
                             enable_watchdog
-                            echo "[✓] Автообновление (04:00) и Watchdog включены. Бро я думаю ты осознаешь последствия ,_,"
+                            echo "${C_GRN}[✓] Автообновление (04:00) и Watchdog включены. Бро я думаю ты осознаешь последствия ,_,${C_RES}"
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
                         2)
                             disable_autoupdate
                             enable_watchdog
-                            echo "[✓] Автообновление отключено (Watchdog продолжает следить за службами)."
+                            echo "${C_GRN}[✓] Автообновление отключено (Watchdog продолжает следить за службами).${C_RES}"
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
                         3)
                             if is_watchdog_enabled; then
                                 disable_watchdog
-                                echo "[✓] Авто-Доктор (Watchdog) отключен."
+                                echo "${C_YEL}[✓] Авто-Доктор (Watchdog) отключен.${C_RES}"
                             else
                                 enable_watchdog
-                                echo "[✓] Авто-Доктор (Watchdog) включен (проверка каждые 5 минут)."
+                                echo "${C_GRN}[✓] Авто-Доктор (Watchdog) включен (проверка каждые 5 минут).${C_RES}"
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
@@ -3839,6 +4402,11 @@ show_menu() {
                             else
                                 echo "[i] Лог автообновления пока пуст."
                             fi
+                            printf "\nНажмите Enter для возврата в меню..."
+                            read -r _ < /dev/tty
+                            ;;
+                        5)
+                            configure_telegram_menu || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
@@ -3848,11 +4416,11 @@ show_menu() {
             11)
                 while true; do
                     clear
-                    echo "=== Аппаратный Kill-Switch (nftables на $(get_lan_ifname)) ==="
+                    echo "${C_CYN}=== Аппаратный Kill-Switch (nftables на $(get_lan_ifname)) ===${C_RES}"
                     echo "Блокирует любую прямую маршрутизацию из LAN в основной роутер в обход singbox-tun."
                     echo "Если служба Sing-Box упадет, клиенты не «светят» реальный российский IP провайдера."
                     echo "--------------------------------------------------------"
-                    echo " • Текущий статус: $(is_killswitch_enabled && echo "ВКЛЮЧЕН (строгая блокировка)" || echo "ВЫКЛЮЧЕН (стандартная защита DNS/IPv6/DoT)")"
+                    echo " • Текущий статус: $(is_killswitch_enabled && echo "${C_GRN}ВКЛЮЧЕН (строгая блокировка)${C_RES}" || echo "${C_CYN}ВЫКЛЮЧЕН (стандартная защита DNS/IPv6/DoT)${C_RES}")"
                     echo "--------------------------------------------------------"
                     echo " 1) ВКЛЮЧИТЬ строгий Kill-Switch (рекомендуется против утечек)"
                     echo " 2) ВЫКЛЮЧИТЬ строгий Kill-Switch (оставить защиту IPv6, DoT 853 и DNS 53)"
@@ -3866,13 +4434,13 @@ show_menu() {
                             ;;
                         1)
                             sync_dns_firewall "yes" "yes"
-                            echo "[✓] Аппаратный Kill-Switch ВКЛЮЧЕН."
+                            echo "${C_GRN}[✓] Аппаратный Kill-Switch ВКЛЮЧЕН.${C_RES}"
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
                         2)
                             sync_dns_firewall "yes" "no"
-                            echo "[✓] Аппаратный Kill-Switch ВЫКЛЮЧЕН."
+                            echo "${C_GRN}[✓] Аппаратный Kill-Switch ВЫКЛЮЧЕН.${C_RES}"
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty
                             ;;
@@ -3884,10 +4452,10 @@ show_menu() {
                     CUR_LAN_NOW=$(get_current_lan_ip)
                     load_gateway_env
                     clear
-                    echo "=== Сетевые настройки шлюза и Умный DHCP Sidecar ==="
-                    echo " • Текущий IP шлюза (${OS_NAME}): ${CUR_LAN_NOW} (интерфейс $(get_lan_ifname), /24)"
+                    echo "${C_CYN}=== Сетевые настройки шлюза и Умный DHCP Sidecar ===${C_RES}"
+                    echo " • Текущий IP шлюза (${OS_NAME}): ${C_BLD}${CUR_LAN_NOW}${C_RES} (интерфейс $(get_lan_ifname), /24)"
                     echo " • Текущий IP основного роутера:  ${GW_IP}"
-                    echo " • Умный DHCP-сервер на шлюзе:    $(is_dhcp_server_enabled && echo "ВКЛЮЧЕН (раздает шлюз и DNS ${CUR_LAN_NOW})" || echo "ВЫКЛЮЧЕН (раздает главный роутер)")"
+                    echo " • Умный DHCP-сервер на шлюзе:    $(is_dhcp_server_enabled && echo "${C_GRN}ВКЛЮЧЕН (раздает шлюз и DNS ${CUR_LAN_NOW})${C_RES}" || echo "${C_DIM}ВЫКЛЮЧЕН (раздает главный роутер)${C_RES}")"
                     echo "----------------------------------------------------------"
                     echo " 1) Сменить IP-адрес самого шлюза (${OS_NAME})"
                     echo " 2) Сменить IP-адрес основного роутера (Gateway / Local DNS)"
@@ -3971,4 +4539,4 @@ elif [ ! -f "$SB_CONF" ] || [ "${1:-}" = "install" ]; then
 else
     show_menu
 fi
-# ==================== [ КОНЕЦ ЧАСТИ 3 ИЗ 3 ] =====================
+# ==================== [ КОНЕЦ ЧАСТИ 4 ИЗ 4 ] =====================
