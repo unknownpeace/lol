@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-# ==================== [ НАЧАЛО ЧАСТИ 1 ИЗ 4 ] ====================
+# ==================== [ НАЧАЛО ЧАСТИ 1 ИЗ 3 ] ====================
 # ==============================================================================
 # Глобальные пути и переменные (Universal: OpenWrt 25.x + Alpine Linux 3.x)
 # ==============================================================================
@@ -167,7 +167,7 @@ is_valid_ipv4() {
     ' >/dev/null 2>&1
 }
 
-# Динамическое определение имени LAN-интерфейса (br-lan, eth0 и т.д.)
+# Динамическое определение имени LAN-интерфейса (br-lan, eth0, ens18, enp0s3 и т.д.)
 get_lan_ifname() {
     if [ "$OS_TYPE" = "openwrt" ] && command -v uci >/dev/null 2>&1; then
         LAN_DEV=$(uci -q get network.lan.device 2>/dev/null || uci -q get network.lan.ifname 2>/dev/null || true)
@@ -189,6 +189,11 @@ get_lan_ifname() {
     fi
     if ip link show eth0 >/dev/null 2>&1; then
         printf "eth0"
+        return 0
+    fi
+    ANY_DEV=$(ip -o -4 addr show scope global 2>/dev/null | awk '$2 != "singbox-tun" && $2 != "lo" {print $2; exit}')
+    if [ -n "$ANY_DEV" ] && ip link show "$ANY_DEV" >/dev/null 2>&1; then
+        printf "%s" "$ANY_DEV"
         return 0
     fi
     printf "br-lan"
@@ -304,7 +309,7 @@ is_killswitch_enabled() {
     fi
 }
 
-# Проверка состояния Умного DHCP-сервера на самом шлюзе (Dual-OS)
+# Проверка состояния Умнoго DHCP-сервера на самом шлюзе (Dual-OS)
 is_dhcp_server_enabled() {
     if [ "$OS_TYPE" = "alpine" ]; then
         [ -f "$ALPINE_DHCP_CONF" ] && pgrep dnsmasq >/dev/null 2>&1
@@ -426,10 +431,15 @@ NFT_OWRT
     return 0
 }
 
-# Обновление IP основного роутера внутри AdGuardHome.yaml
+# Обновление IP основного роутера внутри AdGuardHome.yaml (с защитой от перезаписи из ОЗУ)
 update_agh_gateway_ip() {
     NEW_GW="$1"
     [ -f "$AGH_CONF" ] || return 0
+    AGH_WAS_RUNNING="no"
+    if pgrep AdGuardHome >/dev/null 2>&1; then
+        AGH_WAS_RUNNING="yes"
+        service_ctl adguardhome stop
+    fi
     awk -v gw="$NEW_GW" '
         /^[[:space:]]*bootstrap_dns:/ {
             print "  bootstrap_dns: [" gw ", 77.88.8.8, 77.88.8.1]"
@@ -444,6 +454,9 @@ update_agh_gateway_ip() {
         { print }
     ' "$AGH_CONF" > "${AGH_CONF}.tmp" && mv "${AGH_CONF}.tmp" "$AGH_CONF"
     chmod 600 "$AGH_CONF" 2>/dev/null || true
+    if [ "$AGH_WAS_RUNNING" = "yes" ]; then
+        service_ctl adguardhome start
+    fi
     return 0
 }
 
@@ -500,9 +513,82 @@ ENV_EOF
     chmod 600 "$SB_ENV" 2>/dev/null || true
     return 0
 }
-# ==================== [ КОНЕЦ ЧАСТИ 1 ИЗ 4 ] =====================
 
-# ==================== [ НАЧАЛО ЧАСТИ 2 ИЗ 4 ] ====================
+# Очистка и нормализация домена при вставке ссылки из браузера (https://www.site.com/path -> +.site.com)
+sanitize_domain_entry() {
+    RAW_DOM=$(printf "%s" "$1" | tr 'A-Z' 'a-z' | sed -E 's|^https?://||; s|/.*$||; s|:.*$||; s|^\*\.\.?||; s|^\+\.||; s|^\.||; s|^www\.||')
+    case "$RAW_DOM" in
+        ""|*[![:alnum:]._-]*|*..*|.*)
+            return 1
+            ;;
+        *.*)
+            printf "+.%s" "$RAW_DOM"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Вывод пронумерованного списка строк из файла (для доменов и IP устройств)
+list_entries_numbered() {
+    TARGET_FILE="$1"
+    if [ ! -s "$TARGET_FILE" ] || ! awk 'NF {found=1} END {exit !found}' "$TARGET_FILE" 2>/dev/null; then
+        echo "  (список пуст)"
+        return 0
+    fi
+    awk 'NF {idx++; printf "  [%d] %s\n", idx, $0}' "$TARGET_FILE" 2>/dev/null || true
+    return 0
+}
+
+count_file_entries() {
+    TARGET_FILE="$1"
+    if [ -s "$TARGET_FILE" ]; then
+        awk 'NF {c++} END {print c+0}' "$TARGET_FILE" 2>/dev/null
+    else
+        echo "0"
+    fi
+    return 0
+}
+
+get_entry_by_index() {
+    TARGET_FILE="$1"
+    TARGET_IDX="$2"
+    awk -v target="$TARGET_IDX" 'NF {idx++; if (idx == target) {print $0; exit}}' "$TARGET_FILE" 2>/dev/null
+    return 0
+}
+
+# Точечное удаление строки (домена или IP) по порядковому номеру
+delete_entry_by_index() {
+    TARGET_FILE="$1"
+    DEL_IDX="$2"
+    FALLBACK_VAL="${3:-}"
+    case "$DEL_IDX" in
+        ''|*[!0-9]*)
+            echo "[X] Некорректный номер."
+            return 1
+            ;;
+    esac
+    TOTAL_E=$(count_file_entries "$TARGET_FILE")
+    if [ "$DEL_IDX" -lt 1 ] || [ "$DEL_IDX" -gt "$TOTAL_E" ]; then
+        echo "[X] Запись с номером ${DEL_IDX} не существует (доступно: 1..${TOTAL_E})."
+        return 1
+    fi
+    awk -v target="$DEL_IDX" -v fb="$FALLBACK_VAL" '
+        NF {
+            idx++
+            if (idx == target) next
+            print $0
+            kept++
+        }
+        END {
+            if (kept == 0 && fb != "") print fb
+        }
+    ' "$TARGET_FILE" > "${TARGET_FILE}.tmp" && mv "${TARGET_FILE}.tmp" "$TARGET_FILE"
+    return 0
+}
+
 # Компиляция текстовых пользовательских списков доменов (.list) в JSON rule-set (version 3)
 sync_user_domain_rulesets() {
     mkdir -p "$SB_RULES_DIR"
@@ -722,6 +808,14 @@ FORCE_GRP
       },
       {
         "rule_set": [
+          "ntp_domain",
+          "torrent_domain",
+          "user_direct_domains"
+        ],
+        "server": "dns_ru"
+      },
+      {
+        "rule_set": [
           "user_proxy_domains"
         ],
         "query_type": [
@@ -732,10 +826,6 @@ FORCE_GRP
       },
       {
         "rule_set": [
-          "ntp_domain",
-          "stun_domain",
-          "torrent_domain",
-          "user_direct_domains",
           "ru_domain"
         ],
         "server": "dns_ru"
@@ -1441,10 +1531,10 @@ apply_and_verify_singbox() {
         return 1
     fi
 }
-# ==================== [ КОНЕЦ ЧАСТИ 2 ИЗ 4 ] =====================
+# ==================== [ КОНЕЦ ЧАСТИ 1 ИЗ 3 ] =====================
 
-# ==================== [ НАЧАЛО ЧАСТИ 3 ИЗ 4 ] ====================
-# Быстрая смена единого пароля (Sing-Box Zashboard + AdGuard Home)
+# ==================== [ НАЧАЛО ЧАСТИ 2 ИЗ 3 ] ====================
+# Быстрая смена единого пароля (Sing-Box Zashboard + AdGuard Home) с защитой YAML
 change_unified_password() {
     NEW_PASS=$(printf "%s" "$1" | tr -d '\r\n')
     if [ -z "$NEW_PASS" ]; then
@@ -1456,6 +1546,7 @@ change_unified_password() {
     save_gateway_env
     generate_singbox_config
 
+    service_ctl adguardhome stop
     if [ -f "$AGH_CONF" ] && command -v htpasswd >/dev/null 2>&1; then
         CUR_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
         [ -z "$CUR_AGH_USER" ] && CUR_AGH_USER="admin" || true
@@ -1478,7 +1569,7 @@ change_unified_password() {
     fi
 
     service_ctl sing-box restart
-    service_ctl adguardhome restart
+    service_ctl adguardhome start
     echo "[✓] Единый пароль успешно обновлен для Sing-Box Zashboard и AdGuard Home!"
     return 0
 }
@@ -2016,15 +2107,22 @@ format_uri_keys() {
     return 0
 }
 
-# Живой сканер Anycast-узлов Cloudflare WARP для выбора 4 самых отзывчивых на провайдере пользователя
+# Живой сканер Anycast-узлов Cloudflare WARP напрямую через физический LAN-интерфейс (в обход singbox-tun)
 scan_best_warp_endpoints() {
     CANDIDATES="162.159.192.1:4500 188.114.97.1:500 188.114.99.224:1002 162.159.195.1:2408 188.114.98.224:854 188.114.96.1:1701 162.159.193.1:500 188.114.97.3:4500"
     ALIVE_LIST=""
     ALIVE_CNT=0
+    LAN_DEV_SCAN=$(get_lan_ifname)
+
+    if [ -n "$LAN_DEV_SCAN" ] && ip link show "$LAN_DEV_SCAN" >/dev/null 2>&1; then
+        PING_CMD="ping -I ${LAN_DEV_SCAN} -c 1 -W 1"
+    else
+        PING_CMD="ping -c 1 -W 1"
+    fi
 
     for EP in $CANDIDATES; do
         EP_IP="${EP%:*}"
-        if ping -c 1 -W 1 "$EP_IP" >/dev/null 2>&1; then
+        if $PING_CMD "$EP_IP" >/dev/null 2>&1; then
             ALIVE_LIST="${ALIVE_LIST} ${EP}"
             ALIVE_CNT=$((ALIVE_CNT + 1))
             [ "$ALIVE_CNT" -ge 4 ] && break
@@ -2165,7 +2263,7 @@ generate_amnezia_warp() {
 
     [ -z "$WARP_IPV4" ] && WARP_IPV4="172.16.0.2" || true
 
-    echo "Сканирование оптимальных Anycast-узлов Cloudflare для вашего провайдера..."
+    echo "Сканирование оптимальных Anycast-узлов Cloudflare напрямую через провайдера..."
     BEST_EPS=$(scan_best_warp_endpoints)
     set -- $BEST_EPS
     EP1="${1:-162.159.192.1:4500}"
@@ -2316,13 +2414,19 @@ WARP_EOF
     return 0
 }
 
-# Горячая перезагрузка провайдеров и мгновенный выбор лучшей ноды в Авто без сброса базы FakeIP
+# Горячая перезагрузка всех активных провайдеров и мгновенный выбор лучшей ноды в Авто
 reload_singbox_api() {
     if ! pgrep sing-box >/dev/null 2>&1; then
         return 0
     fi
     load_gateway_env
-    for P_TAG in custom_sub custom_sub_2 custom_sub_3 my_nodes; do
+    P_LIST=""
+    if [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
+        P_LIST=$(jq -r '.providers[]?.tag // empty' "$SB_CONF" 2>/dev/null || true)
+    fi
+    [ -z "$P_LIST" ] && P_LIST="custom_sub custom_sub_2 custom_sub_3 my_nodes"
+
+    for P_TAG in $P_LIST; do
         curl -fsS -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
             "http://127.0.0.1:9090/providers/proxies/${P_TAG}" >/dev/null 2>&1 || true
     done
@@ -2506,9 +2610,7 @@ LATEST_UI_TAG='${LATEST_UI_TAG}'
 VC_EOF
     return 0
 }
-# ==================== [ КОНЕЦ ЧАСТИ 3 ИЗ 4 ] =====================
 
-# ==================== [ НАЧАЛО ЧАСТИ 4 ИЗ 4 ] ====================
 # Создание системных служб автозапуска (OpenWrt procd / Alpine OpenRC)
 setup_init_scripts() {
     calc_hardware_limits
@@ -2606,7 +2708,9 @@ INIT_AGH_OWRT
     service_ctl adguardhome restart
     return 0
 }
+# ==================== [ КОНЕЦ ЧАСТИ 2 ИЗ 3 ] =====================
 
+# ==================== [ НАЧАЛО ЧАСТИ 3 ИЗ 3 ] ====================
 # ==============================================================================
 # Главный мастер установки и настройки (OpenWrt 25.x + Alpine Linux 3.x)
 # ==============================================================================
@@ -3035,7 +3139,7 @@ nameserver 77.88.8.8"
     return 0
 }
 
-# Матрица глубокой диагностики шлюза (Self-Test 2.0: RAM, Conntrack, FakeIP, Anti-Leak и HTTP Ping)
+# Матрица глубокой диагностики шлюза (Self-Test 2.0: RAM, Conntrack, FakeIP, Anti-Leak и честный HTTP/TLS Ping)
 run_self_test() {
     set +e
     detect_os
@@ -3099,11 +3203,11 @@ run_self_test() {
         CF_TRACE=$(curl -fsS --curves X25519:P-256 --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
         if [ -n "$CF_TRACE" ]; then
             echo "[✓] Внешний выход через туннель (Cloudflare Trace): ${CF_TRACE}"
-            PING_RU=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 2 -w '%{time_connect}' "http://ya.ru" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
-            PING_CF=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://cp.cloudflare.com/generate_204" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
-            PING_GG=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "https://www.youtube.com/generate_204" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
-            PING_AI=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_connect}' "https://api.openai.com" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
-            echo "[✓] Матрица задержек: РФ (ya.ru): ${PING_RU} | CF: ${PING_CF} | YouTube: ${PING_GG} | OpenAI: ${PING_AI}"
+            PING_RU=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 2 -w '%{time_connect}' "http://ya.ru" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f ms", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            PING_CF=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://cp.cloudflare.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f ms", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            PING_GG=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "https://www.youtube.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f ms", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            PING_AI=$(curl -o /dev/null -sS --curves X25519:P-256 --connect-timeout 3 -m 4 -x http://127.0.0.1:7890 -w '%{time_appconnect}' "https://api.openai.com" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f ms", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            echo "[✓] Матрица задержек: РФ (ya.ru): ${PING_RU} | CF: ${PING_CF} | YouTube: ${PING_GG} | OpenAI (TLS): ${PING_AI}"
         else
             echo "[!] Туннель еще прогревается или подписка недоступна."
         fi
@@ -3145,7 +3249,7 @@ show_menu() {
         echo " 4) Перезапустить службы + пересобрать конфиг и сбросить кэш"
         echo " 5) Посмотреть живые логи Sing-Box"
         echo " 6) Полная перенастройка шлюза (Мастер установки)"
-        echo " 7) Свои домены: добавить/очистить (В прокси / Напрямую)"
+        echo " 7) Свои домены: добавить/удалить (В прокси / Напрямую)"
         echo " 8) Маршрутизация устройств по IP (Обход DIRECT / Full-VPN)"
         echo " 9) Сервисный режим, смена пароля и резервное копирование"
         echo " 10) Автообновление (04:00) и Авто-Доктор (Watchdog)"
@@ -3166,178 +3270,184 @@ show_menu() {
                 read -r _ < /dev/tty
                 ;;
             2)
-                echo ""
-                echo "=== Управление источниками прокси (3 независимых слота) ==="
-                print_proxy_slots_report
-                echo "---------------------------------------------------------------"
-                echo " 1) Указать / заменить основную подписку (http://...) [Слот 1]"
-                echo " 2) Добавить дополнительную подписку в пул (Мульти-Саб) [Слот 1]"
-                echo " 3) Отключить и очистить все подписки по ссылке [Слот 1]"
-                echo " 4) Посмотреть пронумерованный список личных ключей [Слот 2]"
-                echo " 5) Добавить личный ключ (vless/hy2/tuic/ss/wg/anytls...) [Слот 2]"
-                echo " 6) Удалить один конкретный личный ключ по номеру [Слот 2]"
-                echo " 7) Очистить все личные ключи в my_nodes.yaml [Слот 2]"
-                echo " 8) Включить / перевыпустить Amnezia WARP 2.0 (+ WARP+) [Слот 3]"
-                echo " 9) Отключить и полностью очистить ноды Amnezia WARP 2.0 [Слот 3]"
-                echo " 10) Режим «Белые списки» (показать/скрыть РФ-каскады в подписке) [Слот 1]"
-                echo " 0) Назад"
-                printf "Выбор [0-10]: "
-                read -r SUB_ACT < /dev/tty || true
-                case "$SUB_ACT" in
-                    1)
-                        printf "Введите ссылку на подписку (или несколько через пробел): "
-                        read -r NEW_SUB < /dev/tty || true
-                        NEW_SUB=$(printf "%s" "$NEW_SUB" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                        if [ -n "$NEW_SUB" ] && [ -f "$SB_CONF" ]; then
-                            backup_gateway_state
-                            load_gateway_env
-                            apply_subscription_input "$NEW_SUB"
-                            if [ "${USE_INITIAL_WARP:-no}" = "yes" ]; then
-                                generate_amnezia_warp || true
-                            fi
-                            apply_and_verify_singbox "Обновление подписки (Слот 1)" || true
-                        else
-                            echo "[X] Отмена: пустой ввод."
-                        fi
-                        printf "\nНажмите Enter для продолжения..."
-                        read -r _ < /dev/tty
-                        ;;
-                    2)
-                        printf "Введите дополнительную ссылку на подписку (http://...): "
-                        read -r EXTRA_SUB < /dev/tty || true
-                        EXTRA_SUB=$(printf "%s" "$EXTRA_SUB" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                        case "$EXTRA_SUB" in
-                            http://*|https://*)
+                while true; do
+                    clear
+                    echo "=== Управление источниками прокси (3 независимых слота) ==="
+                    print_proxy_slots_report
+                    echo "---------------------------------------------------------------"
+                    echo " 1) Указать / заменить основную подписку (http://...) [Слот 1]"
+                    echo " 2) Добавить дополнительную подписку в пул (Мульти-Саб) [Слот 1]"
+                    echo " 3) Отключить и очистить все подписки по ссылке [Слот 1]"
+                    echo " 4) Посмотреть пронумерованный список личных ключей [Слот 2]"
+                    echo " 5) Добавить личный ключ (vless/hy2/tuic/ss/wg/anytls...) [Слот 2]"
+                    echo " 6) Удалить один конкретный личный ключ по номеру [Слот 2]"
+                    echo " 7) Очистить все личные ключи в my_nodes.yaml [Слот 2]"
+                    echo " 8) Включить / перевыпустить Amnezia WARP 2.0 (+ WARP+) [Слот 3]"
+                    echo " 9) Отключить и полностью очистить ноды Amnezia WARP 2.0 [Слот 3]"
+                    echo " 10) Режим «Белые списки» (показать/скрыть РФ-каскады в подписке) [Слот 1]"
+                    echo " 0) Назад в главное меню"
+                    echo "---------------------------------------------------------------"
+                    printf "Выбор [0-10]: "
+                    read -r SUB_ACT < /dev/tty || true
+                    case "$SUB_ACT" in
+                        ""|0)
+                            break
+                            ;;
+                        1)
+                            printf "Введите ссылку на подписку (или несколько через пробел): "
+                            read -r NEW_SUB < /dev/tty || true
+                            NEW_SUB=$(printf "%s" "$NEW_SUB" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                            if [ -n "$NEW_SUB" ] && [ -f "$SB_CONF" ]; then
                                 backup_gateway_state
                                 load_gateway_env
-                                CLEAN_EXTRA=$(sanitize_sub_url_list "$EXTRA_SUB")
-                                if [ -n "$SUB_URL" ]; then
-                                    SUB_URL="${SUB_URL} ${CLEAN_EXTRA}"
-                                else
-                                    SUB_URL="$CLEAN_EXTRA"
-                                fi
-                                apply_and_verify_singbox "Добавление дополнительной подписки в Слот 1" || true
-                                ;;
-                            *)
-                                echo "[X] Ошибка: Ссылка должна начинаться с http:// или https://"
-                                ;;
-                        esac
-                        printf "\nНажмите Enter для продолжения..."
-                        read -r _ < /dev/tty
-                        ;;
-                    3)
-                        backup_gateway_state
-                        load_gateway_env
-                        SUB_URL=""
-                        if ! has_my_nodes && ! is_warp_enabled; then
-                            printf "[!] Других прокси нет. Включить бесплатный Amnezia WARP вместо удаленной подписки? (y/n) [Enter = n (режим DIRECT)]: "
-                            read -r EN_W < /dev/tty || true
-                            EN_W=$(printf "%s" "$EN_W" | tr -d ' \t\r\n')
-                            case "$EN_W" in
-                                [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа])
-                                    generate_amnezia_warp || true
-                                    ;;
-                            esac
-                        fi
-                        apply_and_verify_singbox "Очистка подписок по ссылке (Слот 1)" || true
-                        printf "\nНажмите Enter для продолжения..."
-                        read -r _ < /dev/tty
-                        ;;
-                    4)
-                        echo ""
-                        list_my_nodes
-                        printf "\nНажмите Enter для продолжения..."
-                        read -r _ < /dev/tty
-                        ;;
-                    5)
-                        printf "Вставьте один или несколько ключей (vless://, hy2://, ss://, tuic://, wg://, anytls://): "
-                        read -r EXTRA_KEY < /dev/tty || true
-                        EXTRA_KEY=$(printf "%s" "$EXTRA_KEY" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                        if [ -n "$EXTRA_KEY" ]; then
-                            backup_gateway_state
-                            load_gateway_env
-                            sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
-                            format_uri_keys "$EXTRA_KEY" >> "$CUSTOM_NODES_FILE"
-                            apply_and_verify_singbox "Добавление личного ключа в Слот 2 (my_nodes)" || true
-                        fi
-                        printf "\nНажмите Enter для продолжения..."
-                        read -r _ < /dev/tty
-                        ;;
-                    6)
-                        echo ""
-                        list_my_nodes
-                        if has_my_nodes; then
-                            printf "\nВведите номер ключа для удаления [Enter = отмена]: "
-                            read -r DEL_NUM < /dev/tty || true
-                            DEL_NUM=$(printf "%s" "$DEL_NUM" | tr -d ' \t\r\n')
-                            if [ -n "$DEL_NUM" ]; then
-                                backup_gateway_state
-                                load_gateway_env
-                                if delete_my_node_by_index "$DEL_NUM"; then
-                                    apply_and_verify_singbox "Удаление ключа #${DEL_NUM} из Слота 2" || true
-                                fi
-                            fi
-                        fi
-                        printf "\nНажмите Enter для продолжения..."
-                        read -r _ < /dev/tty
-                        ;;
-                    7)
-                        backup_gateway_state
-                        load_gateway_env
-                        echo "proxies: []" > "$CUSTOM_NODES_FILE"
-                        apply_and_verify_singbox "Очистка всех личных ключей (Слот 2)" || true
-                        printf "\nНажмите Enter для продолжения..."
-                        read -r _ < /dev/tty
-                        ;;
-                    8)
-                        backup_gateway_state
-                        load_gateway_env
-                        printf "Вставьте ключ лицензии WARP+ (если есть) [Enter = бесплатный безлимитный WARP]: "
-                        read -r W_LIC_IN < /dev/tty || true
-                        W_LIC_IN=$(printf "%s" "$W_LIC_IN" | tr -d ' \t\r\n')
-                        if generate_amnezia_warp "$W_LIC_IN"; then
-                            apply_and_verify_singbox "Включение / обновление Amnezia WARP 2.0 (Слот 3)" || true
-                        fi
-                        printf "\nНажмите Enter для продолжения..."
-                        read -r _ < /dev/tty
-                        ;;
-                    9)
-                        backup_gateway_state
-                        load_gateway_env
-                        echo '{"outbounds": []}' > "$WARP_NODES_FILE"
-                        WARP_LICENSE=""
-                        if ! is_sub_enabled && ! has_my_nodes; then
-                            echo "[!] Сейчас Amnezia WARP был единственным источником прокси."
-                            printf "Введите ссылку на подписку (http://...) или ключ (vless://...) на замену [Enter = перевести шлюз в режим DIRECT]: "
-                            read -r REPL_SUB < /dev/tty || true
-                            REPL_SUB=$(printf "%s" "$REPL_SUB" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-                            if [ -n "$REPL_SUB" ]; then
-                                apply_subscription_input "$REPL_SUB"
+                                apply_subscription_input "$NEW_SUB"
                                 if [ "${USE_INITIAL_WARP:-no}" = "yes" ]; then
                                     generate_amnezia_warp || true
                                 fi
+                                apply_and_verify_singbox "Обновление подписки (Слот 1)" || true
+                            else
+                                echo "[X] Отмена: пустой ввод."
                             fi
-                        fi
-                        apply_and_verify_singbox "Отключение и очистка Amnezia WARP 2.0 (Слот 3)" || true
-                        printf "\nНажмите Enter для продолжения..."
-                        read -r _ < /dev/tty
-                        ;;
-                    10)
-                        backup_gateway_state
-                        load_gateway_env
-                        if [ "${ALLOW_RU_NODES:-no}" = "yes" ]; then
-                            ALLOW_RU_NODES="no"
-                            ACT_MSG="Скрытие нод РФ/Белые списки в подписке (стандартный режим)"
-                        else
-                            ALLOW_RU_NODES="yes"
-                            ACT_MSG="Показ каскадных нод РФ/Белые списки в подписке (режим анти-шатдаун)"
-                        fi
-                        save_gateway_env
-                        apply_and_verify_singbox "$ACT_MSG" || true
-                        printf "\nНажмите Enter для продолжения..."
-                        read -r _ < /dev/tty
-                        ;;
-                esac
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        2)
+                            printf "Введите дополнительную ссылку на подписку (http://...): "
+                            read -r EXTRA_SUB < /dev/tty || true
+                            EXTRA_SUB=$(printf "%s" "$EXTRA_SUB" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                            case "$EXTRA_SUB" in
+                                http://*|https://*)
+                                    backup_gateway_state
+                                    load_gateway_env
+                                    CLEAN_EXTRA=$(sanitize_sub_url_list "$EXTRA_SUB")
+                                    if [ -n "$SUB_URL" ]; then
+                                        SUB_URL="${SUB_URL} ${CLEAN_EXTRA}"
+                                    else
+                                        SUB_URL="$CLEAN_EXTRA"
+                                    fi
+                                    apply_and_verify_singbox "Добавление дополнительной подписки в Слот 1" || true
+                                    ;;
+                                *)
+                                    echo "[X] Ошибка: Ссылка должна начинаться с http:// или https://"
+                                    ;;
+                            esac
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        3)
+                            backup_gateway_state
+                            load_gateway_env
+                            SUB_URL=""
+                            if ! has_my_nodes && ! is_warp_enabled; then
+                                printf "[!] Других прокси нет. Включить бесплатный Amnezia WARP вместо удаленной подписки? (y/n) [Enter = n (режим DIRECT)]: "
+                                read -r EN_W < /dev/tty || true
+                                EN_W=$(printf "%s" "$EN_W" | tr -d ' \t\r\n')
+                                case "$EN_W" in
+                                    [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа])
+                                        generate_amnezia_warp || true
+                                        ;;
+                                esac
+                            fi
+                            apply_and_verify_singbox "Очистка подписок по ссылке (Слот 1)" || true
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        4)
+                            echo ""
+                            list_my_nodes
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        5)
+                            printf "Вставьте один или несколько ключей (vless://, hy2://, ss://, tuic://, wg://, anytls://): "
+                            read -r EXTRA_KEY < /dev/tty || true
+                            EXTRA_KEY=$(printf "%s" "$EXTRA_KEY" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                            if [ -n "$EXTRA_KEY" ]; then
+                                backup_gateway_state
+                                load_gateway_env
+                                sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
+                                format_uri_keys "$EXTRA_KEY" >> "$CUSTOM_NODES_FILE"
+                                apply_and_verify_singbox "Добавление личного ключа в Слот 2 (my_nodes)" || true
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        6)
+                            echo ""
+                            list_my_nodes
+                            if has_my_nodes; then
+                                printf "\nВведите номер ключа для удаления [Enter = отмена]: "
+                                read -r DEL_NUM < /dev/tty || true
+                                DEL_NUM=$(printf "%s" "$DEL_NUM" | tr -d ' \t\r\n')
+                                if [ -n "$DEL_NUM" ]; then
+                                    backup_gateway_state
+                                    load_gateway_env
+                                    if delete_my_node_by_index "$DEL_NUM"; then
+                                        apply_and_verify_singbox "Удаление ключа #${DEL_NUM} из Слота 2" || true
+                                    fi
+                                fi
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        7)
+                            backup_gateway_state
+                            load_gateway_env
+                            echo "proxies: []" > "$CUSTOM_NODES_FILE"
+                            apply_and_verify_singbox "Очистка всех личных ключей (Слот 2)" || true
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        8)
+                            backup_gateway_state
+                            load_gateway_env
+                            printf "Вставьте ключ лицензии WARP+ (если есть) [Enter = бесплатный безлимитный WARP]: "
+                            read -r W_LIC_IN < /dev/tty || true
+                            W_LIC_IN=$(printf "%s" "$W_LIC_IN" | tr -d ' \t\r\n')
+                            if generate_amnezia_warp "$W_LIC_IN"; then
+                                apply_and_verify_singbox "Включение / обновление Amnezia WARP 2.0 (Слот 3)" || true
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        9)
+                            backup_gateway_state
+                            load_gateway_env
+                            echo '{"outbounds": []}' > "$WARP_NODES_FILE"
+                            WARP_LICENSE=""
+                            if ! is_sub_enabled && ! has_my_nodes; then
+                                echo "[!] Сейчас Amnezia WARP был единственным источником прокси."
+                                printf "Введите ссылку на подписку (http://...) или ключ (vless://...) на замену [Enter = перевести шлюз в режим DIRECT]: "
+                                read -r REPL_SUB < /dev/tty || true
+                                REPL_SUB=$(printf "%s" "$REPL_SUB" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                                if [ -n "$REPL_SUB" ]; then
+                                    apply_subscription_input "$REPL_SUB"
+                                    if [ "${USE_INITIAL_WARP:-no}" = "yes" ]; then
+                                        generate_amnezia_warp || true
+                                    fi
+                                fi
+                            fi
+                            apply_and_verify_singbox "Отключение и очистка Amnezia WARP 2.0 (Слот 3)" || true
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        10)
+                            backup_gateway_state
+                            load_gateway_env
+                            if [ "${ALLOW_RU_NODES:-no}" = "yes" ]; then
+                                ALLOW_RU_NODES="no"
+                                ACT_MSG="Скрытие нод РФ/Белые списки в подписке (стандартный режим)"
+                            else
+                                ALLOW_RU_NODES="yes"
+                                ACT_MSG="Показ каскадных нод РФ/Белые списки в подписке (режим анти-шатдаун)"
+                            fi
+                            save_gateway_env
+                            apply_and_verify_singbox "$ACT_MSG" || true
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                    esac
+                done
                 ;;
             3)
                 echo "Проверка и атомарное обновление ядер и веб-панели Zashboard..."
@@ -3370,308 +3480,477 @@ show_menu() {
                 read -r _ < /dev/tty
                 ;;
             7)
-                echo "=== Пользовательские правила доменов ==="
-                echo "Домены В ПРОКСИ (${USER_PROXY_FILE} -> группа 🌐 Остальной трафик):"
-                cat "$USER_PROXY_FILE" 2>/dev/null || true
-                echo "----------------------------------------"
-                echo "Домены НАПРЯМУЮ (${USER_DIRECT_FILE} -> DIRECT):"
-                cat "$USER_DIRECT_FILE" 2>/dev/null || true
-                echo "----------------------------------------"
-                echo " 1) Добавить домен В ПРОКСИ (например, +.example.com)"
-                echo " 2) Добавить домен НАПРЯМУЮ (например, +.bank.ru)"
-                echo " 3) Очистить свои списки доменов"
-                echo " 0) Назад"
-                printf "Выбор: "
-                read -r DOM_ACT < /dev/tty || true
-                case "$DOM_ACT" in
-                    1)
-                        printf "Введите домен для проксирования (например, +.site.com): "
-                        read -r D_IN < /dev/tty || true
-                        D_IN=$(printf "%s" "$D_IN" | tr -d ' \t\r\n')
-                        if [ -n "$D_IN" ]; then
+                while true; do
+                    clear
+                    echo "=== Пользовательские правила доменов ==="
+                    echo "Домены В ПРОКСИ (${USER_PROXY_FILE} -> группа 🌐 Остальной трафик):"
+                    list_entries_numbered "$USER_PROXY_FILE"
+                    echo "--------------------------------------------------------"
+                    echo "Домены НАПРЯМУЮ (${USER_DIRECT_FILE} -> DIRECT, высший приоритет):"
+                    list_entries_numbered "$USER_DIRECT_FILE"
+                    echo "--------------------------------------------------------"
+                    echo " 1) Добавить домен(ы) В ПРОКСИ (можно вставлять ссылки https://...)"
+                    echo " 2) Добавить домен(ы) НАПРЯМУЮ (можно вставлять ссылки https://...)"
+                    echo " 3) Удалить один домен из списка В ПРОКСИ по номеру"
+                    echo " 4) Удалить один домен из списка НАПРЯМУЮ по номеру"
+                    echo " 5) Сбросить оба списка доменов по умолчанию"
+                    echo " 0) Назад в главное меню"
+                    echo "--------------------------------------------------------"
+                    printf "Выбор [0-5]: "
+                    read -r DOM_ACT < /dev/tty || true
+                    case "$DOM_ACT" in
+                        ""|0)
+                            break
+                            ;;
+                        1)
+                            printf "Введите домен или ссылку (можно несколько через пробел): "
+                            read -r D_IN < /dev/tty || true
+                            D_IN=$(printf "%s" "$D_IN" | tr -d '\r\n')
+                            if [ -n "$D_IN" ]; then
+                                backup_gateway_state
+                                load_gateway_env
+                                ADDED_LIST=""
+                                for D_ITEM in $(printf "%s\n" "$D_IN" | tr ' ,' '\n\n'); do
+                                    [ -z "$D_ITEM" ] && continue
+                                    CLEAN_D=$(sanitize_domain_entry "$D_ITEM" || true)
+                                    if [ -n "$CLEAN_D" ]; then
+                                        awk -v d="$CLEAN_D" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.localdomain"}' "$USER_DIRECT_FILE" > "${USER_DIRECT_FILE}.tmp" && mv "${USER_DIRECT_FILE}.tmp" "$USER_DIRECT_FILE"
+                                        grep -qxF "$CLEAN_D" "$USER_PROXY_FILE" 2>/dev/null || echo "$CLEAN_D" >> "$USER_PROXY_FILE"
+                                        ADDED_LIST="${ADDED_LIST} ${CLEAN_D}"
+                                    else
+                                        echo "[!] Пропущен некорректный домен: ${D_ITEM}"
+                                    fi
+                                done
+                                if [ -n "$ADDED_LIST" ]; then
+                                    apply_and_verify_singbox "Добавление в прокси:${ADDED_LIST}" || true
+                                fi
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        2)
+                            printf "Введите домен или ссылку (можно несколько через пробел): "
+                            read -r D_IN < /dev/tty || true
+                            D_IN=$(printf "%s" "$D_IN" | tr -d '\r\n')
+                            if [ -n "$D_IN" ]; then
+                                backup_gateway_state
+                                load_gateway_env
+                                ADDED_LIST=""
+                                for D_ITEM in $(printf "%s\n" "$D_IN" | tr ' ,' '\n\n'); do
+                                    [ -z "$D_ITEM" ] && continue
+                                    CLEAN_D=$(sanitize_domain_entry "$D_ITEM" || true)
+                                    if [ -n "$CLEAN_D" ]; then
+                                        awk -v d="$CLEAN_D" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.chatgpt.com"}' "$USER_PROXY_FILE" > "${USER_PROXY_FILE}.tmp" && mv "${USER_PROXY_FILE}.tmp" "$USER_PROXY_FILE"
+                                        grep -qxF "$CLEAN_D" "$USER_DIRECT_FILE" 2>/dev/null || echo "$CLEAN_D" >> "$USER_DIRECT_FILE"
+                                        ADDED_LIST="${ADDED_LIST} ${CLEAN_D}"
+                                    else
+                                        echo "[!] Пропущен некорректный домен: ${D_ITEM}"
+                                    fi
+                                done
+                                if [ -n "$ADDED_LIST" ]; then
+                                    apply_and_verify_singbox "Добавление напрямую (DIRECT):${ADDED_LIST}" || true
+                                fi
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        3)
+                            printf "Введите номер домена из списка В ПРОКСИ для удаления [Enter = отмена]: "
+                            read -r DEL_D_IDX < /dev/tty || true
+                            DEL_D_IDX=$(printf "%s" "$DEL_D_IDX" | tr -d ' \t\r\n')
+                            if [ -n "$DEL_D_IDX" ]; then
+                                backup_gateway_state
+                                load_gateway_env
+                                DEL_VAL=$(get_entry_by_index "$USER_PROXY_FILE" "$DEL_D_IDX")
+                                if delete_entry_by_index "$USER_PROXY_FILE" "$DEL_D_IDX" "+.chatgpt.com"; then
+                                    apply_and_verify_singbox "Удаление домена ${DEL_VAL} из списка прокси" || true
+                                fi
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        4)
+                            printf "Введите номер домена из списка НАПРЯМУЮ для удаления [Enter = отмена]: "
+                            read -r DEL_D_IDX < /dev/tty || true
+                            DEL_D_IDX=$(printf "%s" "$DEL_D_IDX" | tr -d ' \t\r\n')
+                            if [ -n "$DEL_D_IDX" ]; then
+                                backup_gateway_state
+                                load_gateway_env
+                                DEL_VAL=$(get_entry_by_index "$USER_DIRECT_FILE" "$DEL_D_IDX")
+                                if delete_entry_by_index "$USER_DIRECT_FILE" "$DEL_D_IDX" "+.localdomain"; then
+                                    apply_and_verify_singbox "Удаление домена ${DEL_VAL} из списка DIRECT" || true
+                                fi
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        5)
                             backup_gateway_state
                             load_gateway_env
-                            case "$D_IN" in +.*) ;; *.*) D_IN="+.$D_IN" ;; esac
-                            grep -qxF "$D_IN" "$USER_PROXY_FILE" 2>/dev/null || echo "$D_IN" >> "$USER_PROXY_FILE"
-                            apply_and_verify_singbox "Добавление домена ${D_IN} в прокси" || true
-                        fi
-                        sleep 2
-                        ;;
-                    2)
-                        printf "Введите домен для прямого доступа (например, +.avito.ru): "
-                        read -r D_IN < /dev/tty || true
-                        D_IN=$(printf "%s" "$D_IN" | tr -d ' \t\r\n')
-                        if [ -n "$D_IN" ]; then
-                            backup_gateway_state
-                            load_gateway_env
-                            case "$D_IN" in +.*) ;; *.*) D_IN="+.$D_IN" ;; esac
-                            grep -qxF "$D_IN" "$USER_DIRECT_FILE" 2>/dev/null || echo "$D_IN" >> "$USER_DIRECT_FILE"
-                            apply_and_verify_singbox "Добавление домена ${D_IN} напрямую (DIRECT)" || true
-                        fi
-                        sleep 2
-                        ;;
-                    3)
-                        backup_gateway_state
-                        load_gateway_env
-                        echo "+.localdomain" > "$USER_DIRECT_FILE"
-                        echo "+.chatgpt.com" > "$USER_PROXY_FILE"
-                        apply_and_verify_singbox "Сброс пользовательских списков доменов" || true
-                        sleep 2
-                        ;;
-                esac
+                            echo "+.localdomain" > "$USER_DIRECT_FILE"
+                            echo "+.chatgpt.com" > "$USER_PROXY_FILE"
+                            apply_and_verify_singbox "Сброс пользовательских списков доменов" || true
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                    esac
+                done
                 ;;
             8)
-                echo "=== Маршрутизация устройств по локальному IP ==="
-                echo "Устройства в обходе (всегда DIRECT):"
-                if [ -s "$USER_BYPASS_IPS" ]; then cat "$USER_BYPASS_IPS"; else echo " (пусто)"; fi
-                echo "--------------------------------------------------------"
-                echo "Устройства в Full-VPN (группа '📺 Устройства (Full-VPN)' — ТВ/PS5/Quest):"
-                if [ -s "$USER_FORCE_PROXY_IPS" ]; then cat "$USER_FORCE_PROXY_IPS"; else echo " (пусто)"; fi
-                echo "--------------------------------------------------------"
-                echo " 1) Добавить IP устройства в ОБХОД (DIRECT)"
-                echo " 2) Добавить IP устройства в FULL-VPN (группа 📺 Устройства (Full-VPN))"
-                echo " 3) Очистить оба списка IP"
-                echo " 0) Назад"
-                printf "Выбор: "
-                read -r BYP_ACT < /dev/tty || true
-                case "$BYP_ACT" in
-                    1)
-                        printf "Введите локальный IP для обхода (DIRECT): "
-                        read -r IP_IN < /dev/tty || true
-                        IP_IN=$(printf "%s" "$IP_IN" | tr -d ' \t\r\n')
-                        if is_valid_ipv4 "$IP_IN"; then
+                while true; do
+                    clear
+                    echo "=== Маршрутизация устройств по локальному IP ==="
+                    echo "Устройства в обходе (всегда DIRECT):"
+                    list_entries_numbered "$USER_BYPASS_IPS"
+                    echo "--------------------------------------------------------"
+                    echo "Устройства в Full-VPN (группа '📺 Устройства (Full-VPN)' — ТВ/PS5/Quest):"
+                    list_entries_numbered "$USER_FORCE_PROXY_IPS"
+                    echo "--------------------------------------------------------"
+                    echo " 1) Добавить IP устройства в ОБХОД (DIRECT)"
+                    echo " 2) Добавить IP устройства в FULL-VPN (группа 📺 Устройства (Full-VPN))"
+                    echo " 3) Удалить один IP из списка ОБХОД (DIRECT) по номеру"
+                    echo " 4) Удалить один IP из списка FULL-VPN по номеру"
+                    echo " 5) Очистить оба списка IP"
+                    echo " 0) Назад в главное меню"
+                    echo "--------------------------------------------------------"
+                    printf "Выбор [0-5]: "
+                    read -r BYP_ACT < /dev/tty || true
+                    case "$BYP_ACT" in
+                        ""|0)
+                            break
+                            ;;
+                        1)
+                            printf "Введите локальный IP для обхода (DIRECT): "
+                            read -r IP_IN < /dev/tty || true
+                            IP_IN=$(printf "%s" "$IP_IN" | tr -d ' \t\r\n')
+                            if is_valid_ipv4 "$IP_IN"; then
+                                backup_gateway_state
+                                load_gateway_env
+                                sed -i "\|^${IP_IN}$|d" "$USER_FORCE_PROXY_IPS" 2>/dev/null || true
+                                grep -qxF "$IP_IN" "$USER_BYPASS_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_BYPASS_IPS"
+                                if apply_and_verify_singbox "Добавление IP ${IP_IN} в обход (DIRECT)"; then
+                                    conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
+                                fi
+                            else
+                                echo "[X] Некорректный IPv4-адрес!"
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        2)
+                            printf "Введите локальный IP для Full-VPN (всегда в прокси): "
+                            read -r IP_IN < /dev/tty || true
+                            IP_IN=$(printf "%s" "$IP_IN" | tr -d ' \t\r\n')
+                            if is_valid_ipv4 "$IP_IN"; then
+                                backup_gateway_state
+                                load_gateway_env
+                                sed -i "\|^${IP_IN}$|d" "$USER_BYPASS_IPS" 2>/dev/null || true
+                                grep -qxF "$IP_IN" "$USER_FORCE_PROXY_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_FORCE_PROXY_IPS"
+                                if apply_and_verify_singbox "Добавление IP ${IP_IN} в Full-VPN"; then
+                                    conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
+                                fi
+                            else
+                                echo "[X] Некорректный IPv4-адрес!"
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        3)
+                            if [ "$(count_file_entries "$USER_BYPASS_IPS")" -gt 0 ]; then
+                                printf "Введите номер IP из списка ОБХОД (DIRECT) для удаления [Enter = отмена]: "
+                                read -r DEL_I_IDX < /dev/tty || true
+                                DEL_I_IDX=$(printf "%s" "$DEL_I_IDX" | tr -d ' \t\r\n')
+                                if [ -n "$DEL_I_IDX" ]; then
+                                    backup_gateway_state
+                                    load_gateway_env
+                                    DEL_IP=$(get_entry_by_index "$USER_BYPASS_IPS" "$DEL_I_IDX")
+                                    if delete_entry_by_index "$USER_BYPASS_IPS" "$DEL_I_IDX" ""; then
+                                        if apply_and_verify_singbox "Удаление IP ${DEL_IP} из списка ОБХОД"; then
+                                            conntrack -D -s "${DEL_IP%%/*}" >/dev/null 2>&1 || true
+                                        fi
+                                    fi
+                                fi
+                            else
+                                echo "[i] Список ОБХОД (DIRECT) пуст."
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        4)
+                            if [ "$(count_file_entries "$USER_FORCE_PROXY_IPS")" -gt 0 ]; then
+                                printf "Введите номер IP из списка FULL-VPN для удаления [Enter = отмена]: "
+                                read -r DEL_I_IDX < /dev/tty || true
+                                DEL_I_IDX=$(printf "%s" "$DEL_I_IDX" | tr -d ' \t\r\n')
+                                if [ -n "$DEL_I_IDX" ]; then
+                                    backup_gateway_state
+                                    load_gateway_env
+                                    DEL_IP=$(get_entry_by_index "$USER_FORCE_PROXY_IPS" "$DEL_I_IDX")
+                                    if delete_entry_by_index "$USER_FORCE_PROXY_IPS" "$DEL_I_IDX" ""; then
+                                        if apply_and_verify_singbox "Удаление IP ${DEL_IP} из списка FULL-VPN"; then
+                                            conntrack -D -s "${DEL_IP%%/*}" >/dev/null 2>&1 || true
+                                        fi
+                                    fi
+                                fi
+                            else
+                                echo "[i] Список FULL-VPN пуст."
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        5)
                             backup_gateway_state
                             load_gateway_env
-                            sed -i "\|^${IP_IN}$|d" "$USER_FORCE_PROXY_IPS" 2>/dev/null || true
-                            grep -qxF "$IP_IN" "$USER_BYPASS_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_BYPASS_IPS"
-                            if apply_and_verify_singbox "Добавление IP ${IP_IN} в обход (DIRECT)"; then
-                                conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
+                            : > "$USER_BYPASS_IPS"
+                            : > "$USER_FORCE_PROXY_IPS"
+                            if apply_and_verify_singbox "Очистка списков маршрутизации по IP"; then
+                                conntrack -F >/dev/null 2>&1 || true
                             fi
-                        else
-                            echo "[X] Некорректный IPv4-адрес!"
-                        fi
-                        sleep 2
-                        ;;
-                    2)
-                        printf "Введите локальный IP для Full-VPN (всегда в прокси): "
-                        read -r IP_IN < /dev/tty || true
-                        IP_IN=$(printf "%s" "$IP_IN" | tr -d ' \t\r\n')
-                        if is_valid_ipv4 "$IP_IN"; then
-                            backup_gateway_state
-                            load_gateway_env
-                            sed -i "\|^${IP_IN}$|d" "$USER_BYPASS_IPS" 2>/dev/null || true
-                            grep -qxF "$IP_IN" "$USER_FORCE_PROXY_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_FORCE_PROXY_IPS"
-                            if apply_and_verify_singbox "Добавление IP ${IP_IN} в Full-VPN"; then
-                                conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
-                            fi
-                        else
-                            echo "[X] Некорректный IPv4-адрес!"
-                        fi
-                        sleep 2
-                        ;;
-                    3)
-                        backup_gateway_state
-                        load_gateway_env
-                        : > "$USER_BYPASS_IPS"
-                        : > "$USER_FORCE_PROXY_IPS"
-                        if apply_and_verify_singbox "Очистка списков маршрутизации по IP"; then
-                            conntrack -F >/dev/null 2>&1 || true
-                        fi
-                        sleep 2
-                        ;;
-                esac
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                    esac
+                done
                 ;;
             9)
-                echo "=== Сервисный режим, смена пароля и резервное копирование ==="
-                echo " 1) Пауза: переключить весь трафик в DIRECT (без остановки DNS)"
-                echo " 2) Возобновить работу по правилам (mode: rule)"
-                echo " 3) Создать бэкап всех настроек и фильтров (${BACKUP_ARCHIVE})"
-                echo " 4) Восстановить настройки из бэкапа (${BACKUP_ARCHIVE})"
-                echo " 5) Сменить единый пароль (Sing-Box Zashboard + AdGuard Home)"
-                echo " 0) Назад"
-                printf "Выбор: "
-                read -r SRV_ACT < /dev/tty || true
-                load_gateway_env
-                case "$SRV_ACT" in
-                    1)
-                        curl -fsS -X PATCH -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
-                            -d '{"mode":"direct"}' "http://127.0.0.1:9090/configs" >/dev/null 2>&1 || true
-                        echo "[✓] Шлюз переведен в режим паузы (весь трафик идет напрямую в DIRECT)."
-                        sleep 2
-                        ;;
-                    2)
-                        curl -fsS -X PATCH -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
-                            -d '{"mode":"rule"}' "http://127.0.0.1:9090/configs" >/dev/null 2>&1 || true
-                        echo "[✓] Режим маршрутизации по правилам (rule) восстановлен."
-                        sleep 2
-                        ;;
-                    3)
-                        tar -czf "$BACKUP_ARCHIVE" /etc/sing-box /etc/AdGuardHome/AdGuardHome.yaml 2>/dev/null || \
-                        tar -czf "$BACKUP_ARCHIVE" /etc/sing-box 2>/dev/null || true
-                        chmod 600 "$BACKUP_ARCHIVE" 2>/dev/null || true
-                        echo "[✓] Архив сохранен в ${BACKUP_ARCHIVE}"
-                        sleep 2
-                        ;;
-                    4)
-                        if [ -f "$BACKUP_ARCHIVE" ]; then
-                            if tar -xzf "$BACKUP_ARCHIVE" -C / 2>/dev/null; then
-                                service_ctl sing-box restart
-                                service_ctl adguardhome restart
-                                echo "[✓] Конфигурация успешно восстановлена из ${BACKUP_ARCHIVE}"
+                while true; do
+                    clear
+                    echo "=== Сервисный режим, смена пароля и резервное копирование ==="
+                    echo " 1) Пауза: переключить весь трафик в DIRECT (без остановки DNS)"
+                    echo " 2) Возобновить работу по правилам (mode: rule)"
+                    echo " 3) Создать бэкап всех настроек и фильтров (${BACKUP_ARCHIVE})"
+                    echo " 4) Восстановить настройки из бэкапа (${BACKUP_ARCHIVE})"
+                    echo " 5) Сменить единый пароль (Sing-Box Zashboard + AdGuard Home)"
+                    echo " 0) Назад в главное меню"
+                    echo "--------------------------------------------------------"
+                    printf "Выбор [0-5]: "
+                    read -r SRV_ACT < /dev/tty || true
+                    load_gateway_env
+                    case "$SRV_ACT" in
+                        ""|0)
+                            break
+                            ;;
+                        1)
+                            curl -fsS -X PATCH -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
+                                -d '{"mode":"direct"}' "http://127.0.0.1:9090/configs" >/dev/null 2>&1 || true
+                            echo "[✓] Шлюз переведен в режим паузы (весь трафик идет напрямую в DIRECT)."
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        2)
+                            curl -fsS -X PATCH -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
+                                -d '{"mode":"rule"}' "http://127.0.0.1:9090/configs" >/dev/null 2>&1 || true
+                            echo "[✓] Режим маршрутизации по правилам (rule) восстановлен."
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        3)
+                            tar --exclude='*cache.db*' -czf "$BACKUP_ARCHIVE" /etc/sing-box /etc/AdGuardHome/AdGuardHome.yaml 2>/dev/null || \
+                            tar --exclude='*cache.db*' -czf "$BACKUP_ARCHIVE" /etc/sing-box 2>/dev/null || true
+                            chmod 600 "$BACKUP_ARCHIVE" 2>/dev/null || true
+                            echo "[✓] Архив (без временного cache.db) сохранен в ${BACKUP_ARCHIVE}"
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        4)
+                            if [ -f "$BACKUP_ARCHIVE" ]; then
+                                if tar -tzf "$BACKUP_ARCHIVE" >/dev/null 2>&1; then
+                                    service_ctl sing-box stop
+                                    service_ctl adguardhome stop
+                                    rm -f /etc/sing-box/cache.db 2>/dev/null || true
+                                    tar -xzf "$BACKUP_ARCHIVE" -C / 2>/dev/null || true
+                                    chmod 600 "$SB_CONF" "$SB_ENV" "$AGH_CONF" 2>/dev/null || true
+                                    service_ctl sing-box start
+                                    service_ctl adguardhome start
+                                    echo "[✓] Конфигурация безопасно восстановлена из ${BACKUP_ARCHIVE}"
+                                else
+                                    echo "[X] Ошибка: Архив ${BACKUP_ARCHIVE} поврежден!"
+                                fi
                             else
-                                echo "[X] Ошибка: Архив ${BACKUP_ARCHIVE} поврежден!"
+                                echo "[X] Файл бэкапа ${BACKUP_ARCHIVE} не найден!"
                             fi
-                        else
-                            echo "[X] Файл бэкапа ${BACKUP_ARCHIVE} не найден!"
-                        fi
-                        sleep 2
-                        ;;
-                    5)
-                        printf "Введите новый единый пароль (для Zashboard и AdGuard Home): "
-                        read -r NEW_P_IN < /dev/tty || true
-                        NEW_P_IN=$(printf "%s" "$NEW_P_IN" | tr -d '\r\n')
-                        if [ -n "$NEW_P_IN" ]; then
-                            change_unified_password "$NEW_P_IN" || true
-                        else
-                            echo "[X] Отмена: пароль не может быть пустым."
-                        fi
-                        sleep 2
-                        ;;
-                esac
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        5)
+                            printf "Введите новый единый пароль (для Zashboard и AdGuard Home): "
+                            read -r NEW_P_IN < /dev/tty || true
+                            NEW_P_IN=$(printf "%s" "$NEW_P_IN" | tr -d '\r\n')
+                            if [ -n "$NEW_P_IN" ]; then
+                                change_unified_password "$NEW_P_IN" || true
+                            else
+                                echo "[X] Отмена: пароль не может быть пустым."
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                    esac
+                done
                 ;;
             10)
-                echo "=== Автообновление (04:00) и Авто-Доктор (Watchdog каждые 5 мин) ==="
-                echo " ⚠️  Бро я думаю ты осознаешь последствия ,_,"
-                echo "--------------------------------------------------------"
-                echo " • Автообновление ядер (04:00): $(is_autoupdate_enabled && echo "ВКЛЮЧЕНО" || echo "ВЫКЛЮЧЕНО")"
-                echo " • Авто-Доктор служб (Watchdog): $(is_watchdog_enabled && echo "ВКЛЮЧЕН (каждые 5 мин)" || echo "ВЫКЛЮЧЕН")"
-                echo "--------------------------------------------------------"
-                echo " 1) Включить Автообновление (04:00) + Watchdog"
-                echo " 2) Выключить Автообновление (оставить только Watchdog)"
-                echo " 3) Включить / Выключить Авто-Доктор (Watchdog)"
-                echo " 4) Посмотреть лог последнего автообновления (${AUTOUPDATE_LOG})"
-                echo " 0) Назад"
-                printf "Выбор: "
-                read -r AU_ACT < /dev/tty || true
-                case "$AU_ACT" in
-                    1)
-                        enable_autoupdate
-                        enable_watchdog
-                        echo "[✓] Автообновление (04:00) и Watchdog включены. Бро я думаю ты осознаешь последствия ,_,"
-                        sleep 2
-                        ;;
-                    2)
-                        disable_autoupdate
-                        enable_watchdog
-                        echo "[✓] Автообновление отключено (Watchdog продолжает следить за службами)."
-                        sleep 2
-                        ;;
-                    3)
-                        if is_watchdog_enabled; then
-                            disable_watchdog
-                            echo "[✓] Авто-Доктор (Watchdog) отключен."
-                        else
+                while true; do
+                    clear
+                    echo "=== Автообновление (04:00) и Авто-Доктор (Watchdog каждые 5 мин) ==="
+                    echo " ⚠️  Бро я думаю ты осознаешь последствия ,_,"
+                    echo "--------------------------------------------------------"
+                    echo " • Автообновление ядер (04:00): $(is_autoupdate_enabled && echo "ВКЛЮЧЕНО" || echo "ВЫКЛЮЧЕНО")"
+                    echo " • Авто-Доктор служб (Watchdog): $(is_watchdog_enabled && echo "ВКЛЮЧЕН (каждые 5 мин)" || echo "ВЫКЛЮЧЕН")"
+                    echo "--------------------------------------------------------"
+                    echo " 1) Включить Автообновление (04:00) + Watchdog"
+                    echo " 2) Выключить Автообновление (оставить только Watchdog)"
+                    echo " 3) Включить / Выключить Авто-Доктор (Watchdog)"
+                    echo " 4) Посмотреть лог последнего автообновления (${AUTOUPDATE_LOG})"
+                    echo " 0) Назад в главное меню"
+                    echo "--------------------------------------------------------"
+                    printf "Выбор [0-4]: "
+                    read -r AU_ACT < /dev/tty || true
+                    case "$AU_ACT" in
+                        ""|0)
+                            break
+                            ;;
+                        1)
+                            enable_autoupdate
                             enable_watchdog
-                            echo "[✓] Авто-Доктор (Watchdog) включен (проверка каждые 5 минут)."
-                        fi
-                        sleep 2
-                        ;;
-                    4)
-                        echo ""
-                        if [ -f "$AUTOUPDATE_LOG" ]; then
-                            cat "$AUTOUPDATE_LOG"
-                        else
-                            echo "[i] Лог автообновления пока пуст."
-                        fi
-                        printf "\nНажмите Enter для возврата в меню..."
-                        read -r _ < /dev/tty
-                        ;;
-                esac
+                            echo "[✓] Автообновление (04:00) и Watchdog включены. Бро я думаю ты осознаешь последствия ,_,"
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        2)
+                            disable_autoupdate
+                            enable_watchdog
+                            echo "[✓] Автообновление отключено (Watchdog продолжает следить за службами)."
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        3)
+                            if is_watchdog_enabled; then
+                                disable_watchdog
+                                echo "[✓] Авто-Доктор (Watchdog) отключен."
+                            else
+                                enable_watchdog
+                                echo "[✓] Авто-Доктор (Watchdog) включен (проверка каждые 5 минут)."
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        4)
+                            echo ""
+                            if [ -f "$AUTOUPDATE_LOG" ]; then
+                                cat "$AUTOUPDATE_LOG"
+                            else
+                                echo "[i] Лог автообновления пока пуст."
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                    esac
+                done
                 ;;
             11)
-                echo "=== Аппаратный Kill-Switch (nftables на $(get_lan_ifname)) ==="
-                echo "Блокирует любую прямую маршрутизацию из LAN в основной роутер в обход singbox-tun."
-                echo "Если служба Sing-Box упадет, клиенты не «светят» реальный российский IP провайдера."
-                echo "--------------------------------------------------------"
-                echo " 1) ВКЛЮЧИТЬ строгий Kill-Switch (рекомендуется против утечек)"
-                echo " 2) ВЫКЛЮЧИТЬ строгий Kill-Switch (оставить защиту IPv6, DoT 853 и DNS 53)"
-                echo " 0) Назад"
-                printf "Выбор [0-2]: "
-                read -r KS_ACT < /dev/tty || true
-                case "$KS_ACT" in
-                    1)
-                        sync_dns_firewall "yes" "yes"
-                        echo "[✓] Аппаратный Kill-Switch ВКЛЮЧЕН."
-                        sleep 2
-                        ;;
-                    2)
-                        sync_dns_firewall "yes" "no"
-                        echo "[✓] Аппаратный Kill-Switch ВЫКЛЮЧЕН."
-                        sleep 2
-                        ;;
-                esac
+                while true; do
+                    clear
+                    echo "=== Аппаратный Kill-Switch (nftables на $(get_lan_ifname)) ==="
+                    echo "Блокирует любую прямую маршрутизацию из LAN в основной роутер в обход singbox-tun."
+                    echo "Если служба Sing-Box упадет, клиенты не «светят» реальный российский IP провайдера."
+                    echo "--------------------------------------------------------"
+                    echo " • Текущий статус: $(is_killswitch_enabled && echo "ВКЛЮЧЕН (строгая блокировка)" || echo "ВЫКЛЮЧЕН (стандартная защита DNS/IPv6/DoT)")"
+                    echo "--------------------------------------------------------"
+                    echo " 1) ВКЛЮЧИТЬ строгий Kill-Switch (рекомендуется против утечек)"
+                    echo " 2) ВЫКЛЮЧИТЬ строгий Kill-Switch (оставить защиту IPv6, DoT 853 и DNS 53)"
+                    echo " 0) Назад в главное меню"
+                    echo "--------------------------------------------------------"
+                    printf "Выбор [0-2]: "
+                    read -r KS_ACT < /dev/tty || true
+                    case "$KS_ACT" in
+                        ""|0)
+                            break
+                            ;;
+                        1)
+                            sync_dns_firewall "yes" "yes"
+                            echo "[✓] Аппаратный Kill-Switch ВКЛЮЧЕН."
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        2)
+                            sync_dns_firewall "yes" "no"
+                            echo "[✓] Аппаратный Kill-Switch ВЫКЛЮЧЕН."
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                    esac
+                done
                 ;;
             12)
-                CUR_LAN_NOW=$(get_current_lan_ip)
-                load_gateway_env
-                echo ""
-                echo "=== Сетевые настройки шлюза и Умный DHCP Sidecar ==="
-                echo " • Текущий IP шлюза (${OS_NAME}): ${CUR_LAN_NOW} (интерфейс $(get_lan_ifname), /24)"
-                echo " • Текущий IP основного роутера:  ${GW_IP}"
-                echo " • Умный DHCP-сервер на шлюзе:    $(is_dhcp_server_enabled && echo "ВКЛЮЧЕН (раздает шлюз и DNS ${CUR_LAN_NOW})" || echo "ВЫКЛЮЧЕН (раздает главный роутер)")"
-                echo "----------------------------------------------------------"
-                echo " 1) Сменить IP-адрес самого шлюза (${OS_NAME})"
-                echo " 2) Сменить IP-адрес основного роутера (Gateway / Local DNS)"
-                echo " 3) Сменить оба адреса сразу (при переезде в другую подсеть)"
-                echo " 4) ВКЛЮЧИТЬ Умный DHCP-сервер на шлюзе (для залоченных роутеров РТК/МТС)"
-                echo " 5) ВЫКЛЮЧИТЬ DHCP-сервер на шлюзе (классический Sidecar)"
-                echo " 0) Назад"
-                printf "Выбор [0-5]: "
-                read -r NET_ACT < /dev/tty || true
-                case "$NET_ACT" in
-                    1)
-                        printf "Введите новый IP для шлюза [текущий %s]: " "$CUR_LAN_NOW"
-                        read -r NEW_L < /dev/tty || true
-                        NEW_L=$(printf "%s" "$NEW_L" | tr -d ' \t\r\n')
-                        if [ -n "$NEW_L" ]; then
-                            if apply_network_ips "$NEW_L" "$GW_IP"; then
-                                [ "$NEW_L" != "$CUR_LAN_NOW" ] && exit 0
+                while true; do
+                    CUR_LAN_NOW=$(get_current_lan_ip)
+                    load_gateway_env
+                    clear
+                    echo "=== Сетевые настройки шлюза и Умный DHCP Sidecar ==="
+                    echo " • Текущий IP шлюза (${OS_NAME}): ${CUR_LAN_NOW} (интерфейс $(get_lan_ifname), /24)"
+                    echo " • Текущий IP основного роутера:  ${GW_IP}"
+                    echo " • Умный DHCP-сервер на шлюзе:    $(is_dhcp_server_enabled && echo "ВКЛЮЧЕН (раздает шлюз и DNS ${CUR_LAN_NOW})" || echo "ВЫКЛЮЧЕН (раздает главный роутер)")"
+                    echo "----------------------------------------------------------"
+                    echo " 1) Сменить IP-адрес самого шлюза (${OS_NAME})"
+                    echo " 2) Сменить IP-адрес основного роутера (Gateway / Local DNS)"
+                    echo " 3) Сменить оба адреса сразу (при переезде в другую подсеть)"
+                    echo " 4) ВКЛЮЧИТЬ Умный DHCP-сервер на шлюзе (для залоченных роутеров РТК/МТС)"
+                    echo " 5) ВЫКЛЮЧИТЬ DHCP-сервер на шлюзе (классический Sidecar)"
+                    echo " 0) Назад в главное меню"
+                    echo "----------------------------------------------------------"
+                    printf "Выбор [0-5]: "
+                    read -r NET_ACT < /dev/tty || true
+                    case "$NET_ACT" in
+                        ""|0)
+                            break
+                            ;;
+                        1)
+                            printf "Введите новый IP для шлюза [текущий %s]: " "$CUR_LAN_NOW"
+                            read -r NEW_L < /dev/tty || true
+                            NEW_L=$(printf "%s" "$NEW_L" | tr -d ' \t\r\n')
+                            if [ -n "$NEW_L" ]; then
+                                if apply_network_ips "$NEW_L" "$GW_IP"; then
+                                    [ "$NEW_L" != "$CUR_LAN_NOW" ] && exit 0
+                                fi
                             fi
-                        fi
-                        sleep 3
-                        ;;
-                    2)
-                        printf "Введите новый IP основного роутера [текущий %s]: " "$GW_IP"
-                        read -r NEW_G < /dev/tty || true
-                        NEW_G=$(printf "%s" "$NEW_G" | tr -d ' \t\r\n')
-                        if [ -n "$NEW_G" ]; then
-                            apply_network_ips "$CUR_LAN_NOW" "$NEW_G" || true
-                        fi
-                        sleep 3
-                        ;;
-                    3)
-                        printf "Введите новый IP для шлюза [текущий %s]: " "$CUR_LAN_NOW"
-                        read -r NEW_L < /dev/tty || true
-                        NEW_L=$(printf "%s" "$NEW_L" | tr -d ' \t\r\n')
-                        printf "Введите новый IP основного роутера [текущий %s]: " "$GW_IP"
-                        read -r NEW_G < /dev/tty || true
-                        NEW_G=$(printf "%s" "$NEW_G" | tr -d ' \t\r\n')
-                        if [ -n "$NEW_L" ] && [ -n "$NEW_G" ]; then
-                            if apply_network_ips "$NEW_L" "$NEW_G"; then
-                                [ "$NEW_L" != "$CUR_LAN_NOW" ] && exit 0
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        2)
+                            printf "Введите новый IP основного роутера [текущий %s]: " "$GW_IP"
+                            read -r NEW_G < /dev/tty || true
+                            NEW_G=$(printf "%s" "$NEW_G" | tr -d ' \t\r\n')
+                            if [ -n "$NEW_G" ]; then
+                                apply_network_ips "$CUR_LAN_NOW" "$NEW_G" || true
                             fi
-                        fi
-                        sleep 3
-                        ;;
-                    4)
-                        configure_smart_dhcp "on"
-                        sleep 3
-                        ;;
-                    5)
-                        configure_smart_dhcp "off"
-                        sleep 2
-                        ;;
-                esac
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        3)
+                            printf "Введите новый IP для шлюза [текущий %s]: " "$CUR_LAN_NOW"
+                            read -r NEW_L < /dev/tty || true
+                            NEW_L=$(printf "%s" "$NEW_L" | tr -d ' \t\r\n')
+                            printf "Введите новый IP основного роутера [текущий %s]: " "$GW_IP"
+                            read -r NEW_G < /dev/tty || true
+                            NEW_G=$(printf "%s" "$NEW_G" | tr -d ' \t\r\n')
+                            if [ -n "$NEW_L" ] && [ -n "$NEW_G" ]; then
+                                if apply_network_ips "$NEW_L" "$NEW_G"; then
+                                    [ "$NEW_L" != "$CUR_LAN_NOW" ] && exit 0
+                                fi
+                            fi
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        4)
+                            configure_smart_dhcp "on"
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                        5)
+                            configure_smart_dhcp "off"
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty
+                            ;;
+                    esac
+                done
                 ;;
             0)
                 exit 0
@@ -3692,4 +3971,4 @@ elif [ ! -f "$SB_CONF" ] || [ "${1:-}" = "install" ]; then
 else
     show_menu
 fi
-# ==================== [ КОНЕЦ ЧАСТИ 4 ИЗ 4 ] =====================
+# ==================== [ КОНЕЦ ЧАСТИ 3 ИЗ 3 ] =====================
