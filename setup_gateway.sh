@@ -1,9 +1,9 @@
 #!/bin/sh
 set -e
 
-# ==================== [ НАЧАЛО ЧАСТИ 1 ИЗ 3 ] ====================
+# ==================== [ НАЧАЛО ЧАСТИ 1 ИЗ 4 ] ====================
 # ==============================================================================
-# Глобальные пути и переменные (OpenWrt 25.x + APK — Sing-Box Extended Ноябрь 2026)
+# Глобальные пути и переменные (Universal: OpenWrt 25.x + Alpine Linux 3.x)
 # ==============================================================================
 SB_DIR="/etc/sing-box"
 SB_CONF="${SB_DIR}/config.json"
@@ -22,22 +22,48 @@ BACKUP_ARCHIVE="/root/gateway_backup.tar.gz"
 STATE_BAK_DIR="/tmp/gateway_state_bak"
 CRON_FILE="/etc/crontabs/root"
 AUTOUPDATE_LOG="/var/log/gateway_autoupdate.log"
+SB_LOG_FILE="/var/log/sing-box.log"
+VER_CACHE_FILE="/tmp/gateway_ver.cache"
 UI_VER_FILE="${SB_DIR}/ui/.ui_version"
 UI_REPO="Zephyruso/zashboard"
 UI_ZIP_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip"
 UI_TAR_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.tar.gz"
 AGH_CONF="/etc/AdGuardHome/AdGuardHome.yaml"
 SYSUPGRADE_CONF="/etc/sysupgrade.conf"
-SUB_FILTER_REGEX="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|осталось|трафик|истекает|подписк|тариф|инфо|новост|поддержк|канал|бот|t[.]me/)"
+ALPINE_NFT_CONF="/etc/nftables.nft"
+ALPINE_DHCP_CONF="/etc/dnsmasq.d/gateway-dhcp.conf"
+SUB_FILTER_STRICT="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|осталось|трафик|истекает|подписк|тариф|инфо|новост|поддержк|канал|бот|t[.]me/|🇷🇺|Россия|Russia|Москва|Moscow|СПб|Белые списки|WhiteList)"
+SUB_FILTER_WHITELIST="(?i)(剩余|过期|到期|官网|流量|套餐|重置|expire|traffic|website|official|осталось|трафик|истекает|подписк|тариф|инфо|новост|поддержк|канал|бот|t[.]me/)"
+ALLOW_RU_NODES="no"
 GH_PROXY=""
 LATEST_SB_TAG=""
 LATEST_AGH_TAG=""
 LATEST_UI_TAG=""
+OS_TYPE="openwrt"
+OS_NAME="Linux"
 SB_GOMEMLIMIT="200MiB"
 AGH_GOMEMLIMIT="100MiB"
 SYS_CONNTRACK_MAX="65536"
 SYS_BUF_MAX="16777216"
 TOTAL_RAM_MB="512"
+
+# Безопасная запись /etc/resolv.conf (предотвращает ошибку cp при симлинке в OpenWrt)
+write_resolv_conf() {
+    printf "%s\n" "$1" > /tmp/resolv.conf
+    rm -f /etc/resolv.conf 2>/dev/null || true
+    cp -f /tmp/resolv.conf /etc/resolv.conf 2>/dev/null || true
+    return 0
+}
+
+# Получение актуального регулярного выражения фильтрации подписки
+get_sub_filter_regex() {
+    if [ "${ALLOW_RU_NODES:-no}" = "yes" ]; then
+        printf "%s" "$SUB_FILTER_WHITELIST"
+    else
+        printf "%s" "$SUB_FILTER_STRICT"
+    fi
+    return 0
+}
 
 # Автоматический расчет лимитов RAM и сетевого стека под железо (256MB .. 8GB+)
 calc_hardware_limits() {
@@ -69,19 +95,26 @@ calc_hardware_limits() {
     return 0
 }
 
-# Проверка целевой платформы (OpenWrt 25.x+ с пакетным менеджером apk)
+# Автоопределение целевой платформы (OpenWrt 25.x+ или Alpine Linux 3.x)
 detect_os() {
-    if [ ! -f /etc/openwrt_release ]; then
-        echo "[X] Ошибка: Скрипт предназначен исключительно для OpenWrt."
-        exit 1
-    fi
     if ! command -v apk >/dev/null 2>&1; then
-        echo "[X] Ошибка: Не найден пакетный менеджер apk (требуется OpenWrt 25.x+)."
+        echo "[X] Ошибка: Не найден пакетный менеджер apk (требуется OpenWrt 25.x+ или Alpine Linux)."
         exit 1
     fi
 
     calc_hardware_limits
-    OS_NAME="OpenWrt ($(grep DISTRIB_RELEASE /etc/openwrt_release | cut -d"'" -f2))"
+
+    if [ -f /etc/openwrt_release ]; then
+        OS_TYPE="openwrt"
+        OS_NAME="OpenWrt ($(grep DISTRIB_RELEASE /etc/openwrt_release | cut -d"'" -f2))"
+    elif [ -f /etc/alpine-release ]; then
+        OS_TYPE="alpine"
+        OS_NAME="Alpine Linux v$(cat /etc/alpine-release 2>/dev/null | tr -d ' \t\r\n')"
+    else
+        echo "[X] Ошибка: Поддерживаются только OpenWrt 25.x+ и Alpine Linux."
+        exit 1
+    fi
+
     ARCH_RAW=$(uname -m)
     case "$ARCH_RAW" in
         x86_64)
@@ -97,6 +130,24 @@ detect_os() {
             exit 1
             ;;
     esac
+    return 0
+}
+
+# Подгрузка и фиксация ядерных модулей для Alpine Linux (tun, tcp_bbr, nf_conntrack, nftables)
+ensure_alpine_modules() {
+    [ "$OS_TYPE" = "alpine" ] || return 0
+    touch /etc/modules 2>/dev/null || true
+    for kmod in tun tcp_bbr nf_conntrack nft_chain_nat nft_masq nft_redir nft_reject_inet; do
+        modprobe "$kmod" 2>/dev/null || true
+        grep -qxF "$kmod" /etc/modules 2>/dev/null || echo "$kmod" >> /etc/modules
+    done
+    if [ ! -e /dev/net/tun ]; then
+        mkdir -p /dev/net
+        mknod /dev/net/tun c 10 200 2>/dev/null || true
+        chmod 666 /dev/net/tun 2>/dev/null || true
+    fi
+    rc-update add modules boot >/dev/null 2>&1 || true
+    rc-update add sysctl boot >/dev/null 2>&1 || true
     return 0
 }
 
@@ -118,39 +169,50 @@ is_valid_ipv4() {
 
 # Динамическое определение имени LAN-интерфейса (br-lan, eth0 и т.д.)
 get_lan_ifname() {
-    LAN_DEV=$(uci -q get network.lan.device 2>/dev/null || uci -q get network.lan.ifname 2>/dev/null || true)
-    LAN_DEV=$(printf "%s" "$LAN_DEV" | awk '{print $1}')
-    if [ -n "$LAN_DEV" ] && ip link show "$LAN_DEV" >/dev/null 2>&1; then
-        printf "%s" "$LAN_DEV"
-        return 0
+    if [ "$OS_TYPE" = "openwrt" ] && command -v uci >/dev/null 2>&1; then
+        LAN_DEV=$(uci -q get network.lan.device 2>/dev/null || uci -q get network.lan.ifname 2>/dev/null || true)
+        LAN_DEV=$(printf "%s" "$LAN_DEV" | awk '{print $1}')
+        if [ -n "$LAN_DEV" ] && ip link show "$LAN_DEV" >/dev/null 2>&1; then
+            printf "%s" "$LAN_DEV"
+            return 0
+        fi
+        if ip link show br-lan >/dev/null 2>&1; then
+            printf "br-lan"
+            return 0
+        fi
     fi
-    if ip link show br-lan >/dev/null 2>&1; then
-        printf "br-lan"
-        return 0
-    fi
+
     DEF_DEV=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev" && $(i+1)!="singbox-tun") {print $(i+1); exit}}')
     if [ -n "$DEF_DEV" ] && ip link show "$DEF_DEV" >/dev/null 2>&1; then
         printf "%s" "$DEF_DEV"
+        return 0
+    fi
+    if ip link show eth0 >/dev/null 2>&1; then
+        printf "eth0"
         return 0
     fi
     printf "br-lan"
     return 0
 }
 
-# Получение текущего LAN IP-адреса самого шлюза OpenWrt
+# Получение текущего LAN IP-адреса самого шлюза
 get_current_lan_ip() {
     L_IF=$(get_lan_ifname)
     CUR_LAN=$(ip -4 addr show "$L_IF" 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
+    [ -z "$CUR_LAN" ] && CUR_LAN=$(ip -4 addr show eth0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
     [ -z "$CUR_LAN" ] && CUR_LAN=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
-    [ -z "$CUR_LAN" ] && CUR_LAN=$(uci -q get network.lan.ipaddr | awk '{print $1}')
+    if [ -z "$CUR_LAN" ] && [ "$OS_TYPE" = "openwrt" ] && command -v uci >/dev/null 2>&1; then
+        CUR_LAN=$(uci -q get network.lan.ipaddr | awk '{print $1}')
+    fi
     CUR_LAN="${CUR_LAN%%/*}"
-    [ -z "$CUR_LAN" ] && CUR_LAN="192.168.1.1"
+    [ -z "$CUR_LAN" ] && CUR_LAN="192.168.1.2"
     printf "%s" "$CUR_LAN"
     return 0
 }
 
 # Защита файлов шлюза от удаления при обновлении прошивки OpenWrt (sysupgrade / owut)
 ensure_sysupgrade_persistence() {
+    [ "$OS_TYPE" = "openwrt" ] || return 0
     touch "$SYSUPGRADE_CONF" 2>/dev/null || return 0
     for item in \
         "/usr/bin/gateway" \
@@ -170,10 +232,11 @@ ensure_sysupgrade_persistence() {
 
 # Отключение фонового демона apache (оставляем утилиту htpasswd для генерации bcrypt)
 disable_apache_daemon() {
-    for srv in apache apache2; do
+    for srv in apache apache2 httpd; do
         if [ -f "/etc/init.d/${srv}" ]; then
             "/etc/init.d/${srv}" stop >/dev/null 2>&1 || true
             "/etc/init.d/${srv}" disable >/dev/null 2>&1 || true
+            rc-update del "$srv" default >/dev/null 2>&1 || true
             rm -f "/etc/init.d/${srv}" 2>/dev/null || true
         fi
     done
@@ -185,6 +248,7 @@ disable_legacy_mihomo() {
     if [ -x /etc/init.d/mihomo ]; then
         /etc/init.d/mihomo stop >/dev/null 2>&1 || true
         /etc/init.d/mihomo disable >/dev/null 2>&1 || true
+        rc-update del mihomo default >/dev/null 2>&1 || true
     fi
     rm -f /etc/nftables.d/98-mihomo-mss-clamp.nft /etc/nftables.d/97-mihomo-anti-leak.nft 2>/dev/null || true
     return 0
@@ -231,18 +295,26 @@ is_warp_enabled() {
     [ -f "$WARP_NODES_FILE" ] && grep -q '"type":[[:space:]]*"wireguard"' "$WARP_NODES_FILE" 2>/dev/null
 }
 
-# Проверка состояния аппаратного Kill-Switch
+# Проверка состояния аппаратного Kill-Switch (Dual-OS)
 is_killswitch_enabled() {
-    [ -f /etc/nftables.d/97-singbox-anti-leak.nft ] && grep -q "#KILLSWITCH_ACTIVE" /etc/nftables.d/97-singbox-anti-leak.nft 2>/dev/null
+    if [ "$OS_TYPE" = "alpine" ]; then
+        [ -f "$ALPINE_NFT_CONF" ] && grep -q "#KILLSWITCH_ACTIVE" "$ALPINE_NFT_CONF" 2>/dev/null
+    else
+        [ -f /etc/nftables.d/97-singbox-anti-leak.nft ] && grep -q "#KILLSWITCH_ACTIVE" /etc/nftables.d/97-singbox-anti-leak.nft 2>/dev/null
+    fi
 }
 
-# Проверка состояния Умного DHCP-сервера на самом OpenWrt (для залоченных роутеров провайдера)
+# Проверка состояния Умного DHCP-сервера на самом шлюзе (Dual-OS)
 is_dhcp_server_enabled() {
-    DHCP_IGN=$(uci -q get dhcp.lan.ignore 2>/dev/null || echo "1")
-    [ "$DHCP_IGN" = "0" ]
+    if [ "$OS_TYPE" = "alpine" ]; then
+        [ -f "$ALPINE_DHCP_CONF" ] && pgrep dnsmasq >/dev/null 2>&1
+    else
+        DHCP_IGN=$(uci -q get dhcp.lan.ignore 2>/dev/null || echo "1")
+        [ "$DHCP_IGN" = "0" ]
+    fi
 }
 
-# Настройка nftables (fw4): TCP MSS Clamping, перехват DNS 53, Блок IPv6/DoT/DoQ и Kill-Switch
+# Настройка nftables (Dual-OS: fw4 на OpenWrt / нативный nftables на Alpine Linux)
 sync_dns_firewall() {
     USE_DNS_REDIRECT="${1:-yes}"
     KS_STATE="${2:-keep}"
@@ -256,10 +328,61 @@ sync_dns_firewall() {
         fi
     fi
 
+    if [ "$OS_TYPE" = "alpine" ]; then
+        KS_COMMENT=""
+        KS_RULE=""
+        if [ "$KS_STATE" = "yes" ]; then
+            KS_COMMENT="#KILLSWITCH_ACTIVE"
+            KS_RULE="iifname \"${LAN_IF}\" oifname \"${LAN_IF}\" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject"
+        fi
+
+        DNS_RULE=""
+        if [ "$USE_DNS_REDIRECT" = "yes" ]; then
+            DNS_RULE="iifname \"${LAN_IF}\" meta l4proto { tcp, udp } th dport 53 redirect to :53"
+        fi
+
+        cat << NFT_ALPINE > "$ALPINE_NFT_CONF"
+#!/usr/sbin/nft -f
+${KS_COMMENT}
+
+table inet gateway_fw
+delete table inet gateway_fw
+
+table inet gateway_fw {
+    chain forward_mss {
+        type filter hook forward priority mangle; policy accept;
+        oifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
+        iifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
+    }
+
+    chain forward_filter {
+        type filter hook forward priority filter - 5; policy accept;
+        meta nfproto ipv6 drop
+        iifname "${LAN_IF}" meta l4proto { tcp, udp } th dport 853 reject
+        ${KS_RULE}
+    }
+
+    chain prerouting_dns {
+        type nat hook prerouting priority dstnat - 5; policy accept;
+        ${DNS_RULE}
+    }
+
+    chain postrouting_nat {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "${LAN_IF}" masquerade
+    }
+}
+NFT_ALPINE
+        chmod +x "$ALPINE_NFT_CONF" 2>/dev/null || true
+        nft -f "$ALPINE_NFT_CONF" 2>/dev/null || true
+        rc-update add nftables default >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    # Ветка для OpenWrt (fw4 /etc/nftables.d)
     mkdir -p /etc/nftables.d
     rm -f /etc/nftables.d/98-mihomo-mss-clamp.nft /etc/nftables.d/97-mihomo-anti-leak.nft 2>/dev/null || true
 
-    # 1. Выравнивание TCP MSS (защита от PMTU Blackhole и детекта MTU в Sidecar-схеме)
     cat << 'NFT_MSS' > /etc/nftables.d/98-singbox-mss-clamp.nft
 chain singbox_mss_clamp {
     type filter hook forward priority mangle; policy accept;
@@ -268,7 +391,6 @@ chain singbox_mss_clamp {
 }
 NFT_MSS
 
-    # 2. Защита от утечек (Anti-Leak): жесткий блок IPv6 форвардинга, DoT/DoQ (853) и опциональный Kill-Switch
     if [ "$KS_STATE" = "yes" ]; then
         cat << NFT_LEAK_KS > /etc/nftables.d/97-singbox-anti-leak.nft
 #KILLSWITCH_ACTIVE
@@ -289,7 +411,6 @@ chain singbox_anti_leak {
 NFT_LEAK
     fi
 
-    # 3. Принудительный перехват любых сторонних DNS-запросов в AdGuard Home (:53)
     if [ "$USE_DNS_REDIRECT" = "yes" ]; then
         cat << NFT_OWRT > /etc/nftables.d/99-agh-dns-redirect.nft
 chain agh_dns_prerouting {
@@ -328,13 +449,14 @@ update_agh_gateway_ip() {
 
 # Безопасное экранирование одинарных кавычек для записи в gateway.env
 escape_single_quotes() {
-    printf "%s" "$1" | sed "s/'/'\\\\''/g"
+    printf "%s" "$1" | tr -d '\r' | sed "s/'/'\\\\''/g"
     return 0
 }
 
 # Чтение и сохранение параметров шлюза (gateway.env) с защитой от перезаписи памяти
 load_gateway_env() {
     if [ -f "$SB_ENV" ]; then
+        sed -i 's/\r$//' "$SB_ENV" 2>/dev/null || true
         # shellcheck disable=SC1090
         . "$SB_ENV" 2>/dev/null || true
     fi
@@ -354,6 +476,7 @@ load_gateway_env() {
         *) SUB_URL="" ;;
     esac
 
+    [ -z "${ALLOW_RU_NODES:-}" ] && ALLOW_RU_NODES="no" || true
     [ -z "${GW_IP:-}" ] && GW_IP=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}') || true
     [ -z "${GW_IP:-}" ] && GW_IP="192.168.1.1" || true
     return 0
@@ -366,21 +489,26 @@ save_gateway_env() {
     ESC_PASS=$(escape_single_quotes "${ADMIN_PASS:-}")
     ESC_SUB=$(escape_single_quotes "${SUB_URL:-}")
     ESC_WLIC=$(escape_single_quotes "${WARP_LICENSE:-}")
+    ESC_ARU=$(escape_single_quotes "${ALLOW_RU_NODES:-no}")
     cat << ENV_EOF > "$SB_ENV"
 GW_IP='${ESC_GW}'
 ADMIN_PASS='${ESC_PASS}'
 SUB_URL='${ESC_SUB}'
 WARP_LICENSE='${ESC_WLIC}'
+ALLOW_RU_NODES='${ESC_ARU}'
 ENV_EOF
     chmod 600 "$SB_ENV" 2>/dev/null || true
     return 0
 }
+# ==================== [ КОНЕЦ ЧАСТИ 1 ИЗ 4 ] =====================
 
+# ==================== [ НАЧАЛО ЧАСТИ 2 ИЗ 4 ] ====================
 # Компиляция текстовых пользовательских списков доменов (.list) в JSON rule-set (version 3)
 sync_user_domain_rulesets() {
     mkdir -p "$SB_RULES_DIR"
     [ -f "$USER_DIRECT_FILE" ] || echo "+.localdomain" > "$USER_DIRECT_FILE"
     [ -f "$USER_PROXY_FILE" ] || echo "+.chatgpt.com" > "$USER_PROXY_FILE"
+    sed -i 's/\r$//' "$USER_DIRECT_FILE" "$USER_PROXY_FILE" "$CUSTOM_NODES_FILE" 2>/dev/null || true
 
     if command -v jq >/dev/null 2>&1; then
         sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^+\.//;s/^\.//' "$USER_DIRECT_FILE" 2>/dev/null | grep -v '^$' | \
@@ -408,6 +536,7 @@ get_ip_cidr_json_array() {
         printf "[]"
         return 0
     fi
+    sed -i 's/\r$//' "$SRC_FILE" 2>/dev/null || true
     awk '{
         gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", $0);
         if ($0 != "") {
@@ -427,6 +556,7 @@ generate_singbox_config() {
 
     PROVIDERS_JSON_ARR="[]"
     PROVIDER_TAGS_JSON="[]"
+    ACTIVE_SUB_REGEX=$(get_sub_filter_regex)
 
     if command -v jq >/dev/null 2>&1; then
         # Слот 1: Поддержка одной или нескольких HTTP(S) подписок
@@ -442,7 +572,7 @@ generate_singbox_config() {
                 PROVIDERS_JSON_ARR=$(printf "%s" "$PROVIDERS_JSON_ARR" | jq \
                     --arg tag "$P_TAG" \
                     --arg url "$U_ITEM" \
-                    --arg excl "$SUB_FILTER_REGEX" \
+                    --arg excl "$ACTIVE_SUB_REGEX" \
                     '. + [{
                         "tag": $tag,
                         "type": "remote",
@@ -452,7 +582,7 @@ generate_singbox_config() {
                         "exclude": $excl,
                         "health_check": {
                             "enabled": true,
-                            "url": "https://www.gstatic.com/generate_204",
+                            "url": "https://www.youtube.com/generate_204",
                             "interval": "3m",
                             "timeout": "5s"
                         }
@@ -471,7 +601,7 @@ generate_singbox_config() {
                     "path": $path,
                     "health_check": {
                         "enabled": true,
-                        "url": "https://www.gstatic.com/generate_204",
+                        "url": "https://www.youtube.com/generate_204",
                         "interval": "3m",
                         "timeout": "5s"
                     }
@@ -592,6 +722,16 @@ FORCE_GRP
       },
       {
         "rule_set": [
+          "user_proxy_domains"
+        ],
+        "query_type": [
+          "A"
+        ],
+        "server": "dns_fakeip",
+        "rewrite_ttl": 1
+      },
+      {
+        "rule_set": [
           "ntp_domain",
           "stun_domain",
           "torrent_domain",
@@ -646,7 +786,7 @@ FORCE_GRP
       "type": "urltest",
       "tag": "⚡ Авто (Самый быстрый)",
       "providers": ${PROVIDER_TAGS_JSON},
-      "url": "https://www.gstatic.com/generate_204",
+      "url": "https://www.youtube.com/generate_204",
       "interval": "3m",
       "tolerance": 35,
       "idle_timeout": "30m"
@@ -865,7 +1005,6 @@ FORCE_GRP
         "tag": "private_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/private.srs"
       },
@@ -873,7 +1012,6 @@ FORCE_GRP
         "tag": "private_ip",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/private.srs"
       },
@@ -881,7 +1019,6 @@ FORCE_GRP
         "tag": "ntp_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ntp.srs"
       },
@@ -889,7 +1026,6 @@ FORCE_GRP
         "tag": "stun_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-stun.srs"
       },
@@ -897,7 +1033,6 @@ FORCE_GRP
         "tag": "torrent_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/tracker.srs"
       },
@@ -905,7 +1040,6 @@ FORCE_GRP
         "tag": "youtube_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/youtube.srs"
       },
@@ -913,7 +1047,6 @@ FORCE_GRP
         "tag": "spotify_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/spotify.srs"
       },
@@ -921,7 +1054,6 @@ FORCE_GRP
         "tag": "ai_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ai-!cn.srs"
       },
@@ -929,7 +1061,6 @@ FORCE_GRP
         "tag": "google_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/google.srs"
       },
@@ -937,7 +1068,6 @@ FORCE_GRP
         "tag": "roblox_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/roblox.srs"
       },
@@ -945,7 +1075,6 @@ FORCE_GRP
         "tag": "telegram_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/telegram.srs"
       },
@@ -953,7 +1082,6 @@ FORCE_GRP
         "tag": "telegram_ip",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/telegram.srs"
       },
@@ -961,7 +1089,6 @@ FORCE_GRP
         "tag": "whatsapp_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/whatsapp.srs"
       },
@@ -969,7 +1096,6 @@ FORCE_GRP
         "tag": "facebook_ip",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/facebook.srs"
       },
@@ -977,7 +1103,6 @@ FORCE_GRP
         "tag": "discord_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/discord.srs"
       },
@@ -985,7 +1110,6 @@ FORCE_GRP
         "tag": "discord_voice_ip",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/sb-rule-sets/main/discord-voice-ip-list.srs"
       },
@@ -993,7 +1117,6 @@ FORCE_GRP
         "tag": "cloudflare_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cloudflare.srs"
       },
@@ -1001,7 +1124,6 @@ FORCE_GRP
         "tag": "cloudflare_ip",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cloudflare.srs"
       },
@@ -1009,7 +1131,6 @@ FORCE_GRP
         "tag": "ru_bundle",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/sb-rule-sets/main/ru-bundle.srs"
       },
@@ -1017,7 +1138,6 @@ FORCE_GRP
         "tag": "refilter_ip",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/legiz-ru/sb-rule-sets/main/rknasnblock.srs"
       },
@@ -1025,7 +1145,6 @@ FORCE_GRP
         "tag": "ru_domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ru.srs"
       },
@@ -1033,7 +1152,6 @@ FORCE_GRP
         "tag": "ru_ip",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DIRECT",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/ru.srs"
       }
@@ -1113,9 +1231,44 @@ CONFIG_EOF
     save_gateway_env
     return 0
 }
-# ==================== [ КОНЕЦ ЧАСТИ 1 ИЗ 3 ] =====================
 
-# ==================== [ НАЧАЛО ЧАСТИ 2 ИЗ 3 ] ====================
+# Универсальное управление службами (OpenWrt procd / Alpine OpenRC)
+service_ctl() {
+    SVC_NAME="$1"
+    SVC_ACT="$2"
+
+    if [ "$OS_TYPE" = "alpine" ]; then
+        [ "$SVC_NAME" = "cron" ] && SVC_NAME="crond"
+        case "$SVC_ACT" in
+            enable)  rc-update add "$SVC_NAME" default >/dev/null 2>&1 || true ;;
+            disable) rc-update del "$SVC_NAME" default >/dev/null 2>&1 || true ;;
+            reload)  rc-service "$SVC_NAME" reload >/dev/null 2>&1 || rc-service "$SVC_NAME" restart >/dev/null 2>&1 || true ;;
+            *)       rc-service "$SVC_NAME" "$SVC_ACT" >/dev/null 2>&1 || "/etc/init.d/${SVC_NAME}" "$SVC_ACT" >/dev/null 2>&1 || true ;;
+        esac
+    else
+        case "$SVC_ACT" in
+            reload) "/etc/init.d/${SVC_NAME}" reload >/dev/null 2>&1 || "/etc/init.d/${SVC_NAME}" restart >/dev/null 2>&1 || true ;;
+            *)      "/etc/init.d/${SVC_NAME}" "$SVC_ACT" >/dev/null 2>&1 || true ;;
+        esac
+    fi
+    return 0
+}
+
+# Универсальное чтение логов Sing-Box (logread на OpenWrt / файл лога на Alpine)
+show_singbox_logs() {
+    LINES_CNT="${1:-40}"
+    if [ "$OS_TYPE" = "alpine" ]; then
+        if [ -s "$SB_LOG_FILE" ]; then
+            tail -n "$LINES_CNT" "$SB_LOG_FILE" 2>/dev/null || true
+        elif [ -f /var/log/messages ]; then
+            grep -i "sing-box" /var/log/messages 2>/dev/null | tail -n "$LINES_CNT" || true
+        fi
+    elif command -v logread >/dev/null 2>&1; then
+        logread -e sing-box 2>/dev/null | tail -n "$LINES_CNT" || true
+    fi
+    return 0
+}
+
 # Снимок состояния перед изменениями в меню (для мгновенного авто-отката при сбое)
 backup_gateway_state() {
     rm -rf "$STATE_BAK_DIR"
@@ -1141,20 +1294,26 @@ restore_gateway_state() {
     chmod 600 "$SB_CONF" "$SB_ENV" 2>/dev/null || true
     sync_user_domain_rulesets
     load_gateway_env
-    /etc/init.d/sing-box restart 2>/dev/null || true
+    service_ctl sing-box restart
     return 0
 }
 
 # Наглядный отчет по 3 независимым слотам прокси
 print_proxy_slots_report() {
     load_gateway_env
+    if [ "${ALLOW_RU_NODES:-no}" = "yes" ]; then
+        RU_FLT_TAG="Каскады РФ/БС: ПОКАЗАНЫ"
+    else
+        RU_FLT_TAG="Каскады РФ/БС: СКРЫТЫ"
+    fi
+
     SUB_CNT=$(count_sub_urls)
     if [ "$SUB_CNT" -gt 1 ]; then
-        SLOT1_INFO="АКТИВНЫ (${SUB_CNT} подписки: ${SUB_URL})"
+        SLOT1_INFO="АКТИВНЫ (${SUB_CNT} подписки | ${RU_FLT_TAG})"
     elif [ "$SUB_CNT" -eq 1 ]; then
-        SLOT1_INFO="АКТИВНА (${SUB_URL})"
+        SLOT1_INFO="АКТИВНА (${SUB_URL} | ${RU_FLT_TAG})"
     else
-        SLOT1_INFO="ОТКЛЮЧЕНА"
+        SLOT1_INFO="ОТКЛЮЧЕНА (${RU_FLT_TAG})"
     fi
 
     MY_CNT=$(count_my_nodes)
@@ -1239,6 +1398,7 @@ delete_my_node_by_index() {
 # Безопасное применение изменений с проверкой старта процесса и интерфейса singbox-tun
 apply_and_verify_singbox() {
     ACTION_TITLE="${1:-Обновление конфигурации}"
+    ensure_alpine_modules
     generate_singbox_config
 
     if ! check_singbox_config; then
@@ -1250,7 +1410,7 @@ apply_and_verify_singbox() {
         return 1
     fi
 
-    /etc/init.d/sing-box restart 2>/dev/null || /etc/init.d/sing-box start 2>/dev/null || true
+    service_ctl sing-box restart
 
     WAIT_OK="no"
     W_IDX=0
@@ -1274,17 +1434,19 @@ apply_and_verify_singbox() {
         echo "---------------------------------------------------------------"
         echo "[X] Служба Sing-Box не смогла запуститься (${ACTION_TITLE})!"
         echo "--- Причина из системного журнала ---"
-        logread -e sing-box 2>/dev/null | tail -n 6 || true
+        show_singbox_logs 8
         echo "---------------------------------------------------------------"
         echo "[!] Выполняется авто-откат к предыдущей рабочей конфигурации..."
         restore_gateway_state
         return 1
     fi
 }
+# ==================== [ КОНЕЦ ЧАСТИ 2 ИЗ 4 ] =====================
 
+# ==================== [ НАЧАЛО ЧАСТИ 3 ИЗ 4 ] ====================
 # Быстрая смена единого пароля (Sing-Box Zashboard + AdGuard Home)
 change_unified_password() {
-    NEW_PASS="$1"
+    NEW_PASS=$(printf "%s" "$1" | tr -d '\r\n')
     if [ -z "$NEW_PASS" ]; then
         echo "[X] Ошибка: Пароль не может быть пустым!"
         return 1
@@ -1315,17 +1477,50 @@ change_unified_password() {
         fi
     fi
 
-    /etc/init.d/sing-box restart 2>/dev/null || true
-    /etc/init.d/adguardhome restart 2>/dev/null || true
+    service_ctl sing-box restart
+    service_ctl adguardhome restart
     echo "[✓] Единый пароль успешно обновлен для Sing-Box Zashboard и AdGuard Home!"
     return 0
 }
 
-# Управление Умным DHCP-сервером на OpenWrt (для залоченных роутеров Ростелеком/МТС/Дом.ру)
+# Управление Умным DHCP-сервером (Dual-OS: OpenWrt uci / Alpine dnsmasq)
 configure_smart_dhcp() {
     DHCP_MODE="${1:-off}"
     CUR_LAN_IP=$(get_current_lan_ip)
+    LAN_IF=$(get_lan_ifname)
+    LAN_SUB="${CUR_LAN_IP%.*}"
 
+    if [ "$OS_TYPE" = "alpine" ]; then
+        if [ "$DHCP_MODE" = "on" ]; then
+            if ! command -v dnsmasq >/dev/null 2>&1; then
+                echo "Установка пакета dnsmasq для DHCP-сервера..."
+                apk update >/dev/null 2>&1 || true
+                apk add dnsmasq >/dev/null 2>&1 || true
+            fi
+            mkdir -p /etc/dnsmasq.d
+            cat << ALP_DHCP > "$ALPINE_DHCP_CONF"
+port=5353
+interface=${LAN_IF}
+bind-interfaces
+dhcp-authoritative
+dhcp-range=${LAN_SUB}.100,${LAN_SUB}.239,255.255.255.0,12h
+dhcp-option=3,${CUR_LAN_IP}
+dhcp-option=6,${CUR_LAN_IP}
+ALP_DHCP
+            service_ctl dnsmasq enable
+            service_ctl dnsmasq restart
+            echo "[✓] Умный DHCP-сервер на Alpine ВКЛЮЧЕН (Шлюз и DNS: ${CUR_LAN_IP}, пул .100-.239)."
+            echo "    Не забудьте отключить DHCP-сервер на основном роутере провайдера!"
+        else
+            rm -f "$ALPINE_DHCP_CONF" 2>/dev/null || true
+            service_ctl dnsmasq stop
+            service_ctl dnsmasq disable
+            echo "[✓] DHCP-сервер на Alpine ВЫКЛЮЧЕН (классический режим Sidecar)."
+        fi
+        return 0
+    fi
+
+    # Ветка для OpenWrt
     uci del dhcp.lan.ra 2>/dev/null || true
     uci del dhcp.lan.dhcpv6 2>/dev/null || true
     uci del dhcp.lan.ndp 2>/dev/null || true
@@ -1356,19 +1551,38 @@ configure_smart_dhcp() {
     return 0
 }
 
-# Безопасная смена LAN IP шлюза OpenWrt и/или IP основного роутера с защитой маски /24 и nohup
+# Запись статической конфигурации сети в /etc/network/interfaces для Alpine Linux
+write_alpine_static_interfaces() {
+    A_IF="$1"
+    A_IP="$2"
+    A_GW="$3"
+    cat << NET_ALP > /etc/network/interfaces
+auto lo
+iface lo inet loopback
+
+auto ${A_IF}
+iface ${A_IF} inet static
+    address ${A_IP}
+    netmask 255.255.255.0
+    gateway ${A_GW}
+NET_ALP
+    return 0
+}
+
+# Безопасная смена LAN IP шлюза и/или IP основного роутера (Dual-OS: OpenWrt / Alpine)
 apply_network_ips() {
     TARGET_LAN_IP="$1"
     TARGET_GW_IP="$2"
 
     CUR_LAN_IP=$(get_current_lan_ip)
+    LAN_IF=$(get_lan_ifname)
     load_gateway_env
 
     [ -z "$TARGET_LAN_IP" ] && TARGET_LAN_IP="$CUR_LAN_IP"
     [ -z "$TARGET_GW_IP" ] && TARGET_GW_IP="$GW_IP"
 
     if ! is_valid_ipv4 "$TARGET_LAN_IP"; then
-        echo "[X] Ошибка: Некорректный IPv4-адрес шлюза OpenWrt (${TARGET_LAN_IP})!"
+        echo "[X] Ошибка: Некорректный IPv4-адрес шлюза (${TARGET_LAN_IP})!"
         return 1
     fi
 
@@ -1378,7 +1592,7 @@ apply_network_ips() {
     fi
 
     if [ "$TARGET_LAN_IP" = "$TARGET_GW_IP" ]; then
-        echo "[X] Ошибка: IP шлюза OpenWrt (${TARGET_LAN_IP}) не может совпадать с IP основного роутера (${TARGET_GW_IP})!"
+        echo "[X] Ошибка: IP шлюза (${TARGET_LAN_IP}) не может совпадать с IP основного роутера (${TARGET_GW_IP})!"
         return 1
     fi
 
@@ -1406,34 +1620,45 @@ apply_network_ips() {
     update_agh_gateway_ip "$GW_IP"
     [ -f "$SB_CONF" ] && generate_singbox_config || true
 
-    uci del network.lan.ipaddr 2>/dev/null || true
-    uci set network.lan.ipaddr="$TARGET_LAN_IP"
-    uci set network.lan.netmask='255.255.255.0'
-    uci set network.lan.gateway="$GW_IP"
-    uci del network.lan.dns 2>/dev/null || true
-    uci add_list network.lan.dns="$GW_IP"
-    uci add_list network.lan.dns="77.88.8.8"
-    uci commit network
+    if [ "$OS_TYPE" = "alpine" ]; then
+        write_alpine_static_interfaces "$LAN_IF" "$TARGET_LAN_IP" "$GW_IP"
+        if [ -f "$ALPINE_DHCP_CONF" ]; then
+            configure_smart_dhcp "on" >/dev/null 2>&1 || true
+        fi
+        cat << SW_ALP > /tmp/switch_lan_ip.sh
+#!/bin/sh
+sleep 1
+rc-service sing-box stop >/dev/null 2>&1 || true
+killall -9 udhcpc >/dev/null 2>&1 || true
+ip -4 addr flush dev ${LAN_IF} >/dev/null 2>&1 || true
+ip -4 addr add ${TARGET_LAN_IP}/24 dev ${LAN_IF} >/dev/null 2>&1 || true
+ip link set ${LAN_IF} up >/dev/null 2>&1 || true
+ip -4 route replace default via ${GW_IP} dev ${LAN_IF} >/dev/null 2>&1 || true
+sleep 2
+nft -f ${ALPINE_NFT_CONF} >/dev/null 2>&1 || true
+rc-service sing-box start >/dev/null 2>&1 || true
+rc-service adguardhome restart >/dev/null 2>&1 || true
+rm -f /tmp/switch_lan_ip.sh
+SW_ALP
+        chmod +x /tmp/switch_lan_ip.sh
+    else
+        uci del network.lan.ipaddr 2>/dev/null || true
+        uci set network.lan.ipaddr="$TARGET_LAN_IP"
+        uci set network.lan.netmask='255.255.255.0'
+        uci set network.lan.gateway="$GW_IP"
+        uci del network.lan.dns 2>/dev/null || true
+        uci add_list network.lan.dns="$GW_IP"
+        uci add_list network.lan.dns="77.88.8.8"
+        uci commit network
 
-    if is_dhcp_server_enabled; then
-        uci del dhcp.lan.dhcp_option 2>/dev/null || true
-        uci add_list dhcp.lan.dhcp_option="3,${TARGET_LAN_IP}"
-        uci add_list dhcp.lan.dhcp_option="6,${TARGET_LAN_IP}"
-        uci commit dhcp
-    fi
+        if is_dhcp_server_enabled; then
+            uci del dhcp.lan.dhcp_option 2>/dev/null || true
+            uci add_list dhcp.lan.dhcp_option="3,${TARGET_LAN_IP}"
+            uci add_list dhcp.lan.dhcp_option="6,${TARGET_LAN_IP}"
+            uci commit dhcp
+        fi
 
-    printf "nameserver 127.0.0.1\nnameserver %s\nnameserver 77.88.8.8\n" "$GW_IP" > /tmp/resolv.conf
-    cp -f /tmp/resolv.conf /etc/resolv.conf
-
-    echo "==============================================================="
-    echo "[✓] Сетевые настройки успешно сохранены:"
-    echo " • Новый IP шлюза OpenWrt:   ${TARGET_LAN_IP} (маска 255.255.255.0)"
-    echo " • IP основного роутера:     ${GW_IP}"
-    echo " • Веб-панель OpenWrt LuCI:  http://${TARGET_LAN_IP}"
-    echo " • Панель Sing-Box Extended: http://${TARGET_LAN_IP}:9090/ui"
-    echo " • Панель AdGuard Home:      http://${TARGET_LAN_IP}:3000"
-
-    cat << 'SW_EOF' > /tmp/switch_lan_ip.sh
+        cat << 'SW_EOF' > /tmp/switch_lan_ip.sh
 #!/bin/sh
 sleep 1
 /etc/init.d/sing-box stop >/dev/null 2>&1 || true
@@ -1446,14 +1671,25 @@ sleep 3
 /etc/init.d/adguardhome restart >/dev/null 2>&1 || true
 rm -f /tmp/switch_lan_ip.sh
 SW_EOF
-    chmod +x /tmp/switch_lan_ip.sh
+        chmod +x /tmp/switch_lan_ip.sh
+    fi
+
+    write_resolv_conf "nameserver 127.0.0.1
+nameserver ${GW_IP}
+nameserver 77.88.8.8"
+
+    echo "==============================================================="
+    echo "[✓] Сетевые настройки успешно сохранены (${OS_NAME}):"
+    echo " • Новый IP шлюза (${LAN_IF}):    ${TARGET_LAN_IP} (маска 255.255.255.0)"
+    echo " • IP основного роутера:     ${GW_IP}"
+    echo " • Панель Sing-Box Extended: http://${TARGET_LAN_IP}:9090/ui"
+    echo " • Панель AdGuard Home:      http://${TARGET_LAN_IP}:3000"
 
     if [ "$TARGET_LAN_IP" != "$CUR_LAN_IP" ]; then
         echo "---------------------------------------------------------------"
         echo "[!] ВНИМАНИЕ: IP шлюза изменился (${CUR_LAN_IP} -> ${TARGET_LAN_IP})!"
         echo " 1. Переподключитесь по SSH: ssh root@${TARGET_LAN_IP}"
-        echo " 2. Если на вашем ПК или в DHCP роутера шлюзом/DNS был указан"
-        echo "    старый адрес ${CUR_LAN_IP}, обновите его на ${TARGET_LAN_IP}!"
+        echo " 2. Обновите адрес шлюза/DNS на устройствах или в роутере на ${TARGET_LAN_IP}!"
         echo "==============================================================="
         nohup /tmp/switch_lan_ip.sh >/dev/null 2>&1 &
     else
@@ -1472,14 +1708,14 @@ is_watchdog_enabled() {
     grep -q "/usr/bin/gateway watchdog" "$CRON_FILE" 2>/dev/null
 }
 
-# Включение автообновления (ежедневно в 04:00)
+# Включение автообновления (ежедневно в 04:00, Dual-OS cron/crond)
 enable_autoupdate() {
     mkdir -p /etc/crontabs
     touch "$CRON_FILE"
     sed -i '\|/usr/bin/gateway autoupdate|d' "$CRON_FILE" 2>/dev/null || true
     echo "0 4 * * * /usr/bin/gateway autoupdate >${AUTOUPDATE_LOG} 2>&1" >> "$CRON_FILE"
-    /etc/init.d/cron enable 2>/dev/null || true
-    /etc/init.d/cron restart 2>/dev/null || true
+    service_ctl cron enable
+    service_ctl cron restart
     return 0
 }
 
@@ -1488,7 +1724,7 @@ disable_autoupdate() {
     if [ -f "$CRON_FILE" ]; then
         sed -i '\|/usr/bin/gateway autoupdate|d' "$CRON_FILE" 2>/dev/null || true
     fi
-    /etc/init.d/cron reload 2>/dev/null || /etc/init.d/cron restart 2>/dev/null || true
+    service_ctl cron reload
     return 0
 }
 
@@ -1498,8 +1734,8 @@ enable_watchdog() {
     touch "$CRON_FILE"
     sed -i '\|/usr/bin/gateway watchdog|d' "$CRON_FILE" 2>/dev/null || true
     echo "*/5 * * * * /usr/bin/gateway watchdog >/dev/null 2>&1" >> "$CRON_FILE"
-    /etc/init.d/cron enable 2>/dev/null || true
-    /etc/init.d/cron restart 2>/dev/null || true
+    service_ctl cron enable
+    service_ctl cron restart
     return 0
 }
 
@@ -1507,33 +1743,36 @@ disable_watchdog() {
     if [ -f "$CRON_FILE" ]; then
         sed -i '\|/usr/bin/gateway watchdog|d' "$CRON_FILE" 2>/dev/null || true
     fi
-    /etc/init.d/cron reload 2>/dev/null || /etc/init.d/cron restart 2>/dev/null || true
+    service_ctl cron reload
     return 0
 }
 
 # Фоновая проверка здоровья служб (Watchdog Auto-Healer)
 run_watchdog() {
+    detect_os
     [ -f "$SB_CONF" ] || return 0
+    ensure_alpine_modules
     if ! pgrep sing-box >/dev/null 2>&1 || ! ip link show singbox-tun >/dev/null 2>&1; then
-        logger -t gateway-watchdog "Sing-Box or singbox-tun down, restarting service..."
-        /etc/init.d/sing-box restart >/dev/null 2>&1 || true
+        logger -t gateway-watchdog "Sing-Box or singbox-tun down, restarting service..." 2>/dev/null || true
+        service_ctl sing-box restart
     fi
     if ! pgrep AdGuardHome >/dev/null 2>&1; then
-        logger -t gateway-watchdog "AdGuardHome down, restarting service..."
-        /etc/init.d/adguardhome restart >/dev/null 2>&1 || true
+        logger -t gateway-watchdog "AdGuardHome down, restarting service..." 2>/dev/null || true
+        service_ctl adguardhome restart
     fi
     return 0
 }
 
 # Фоновая задача автообновления для cron
 run_autoupdate() {
-    echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Запуск автообновления шлюза ==="
+    detect_os
+    echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Запуск автообновления шлюза (${OS_NAME}) ==="
     update_cores_only "yes"
     if ! pgrep sing-box >/dev/null 2>&1; then
-        /etc/init.d/sing-box start 2>/dev/null || true
+        service_ctl sing-box start
     fi
     if ! pgrep AdGuardHome >/dev/null 2>&1; then
-        /etc/init.d/adguardhome start 2>/dev/null || true
+        service_ctl adguardhome start
     fi
     reload_singbox_api
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Автообновление завершено ==="
@@ -1543,17 +1782,24 @@ run_autoupdate() {
 # Получение последнего тега релиза с GitHub
 fetch_latest_github_tag() {
     REPO="$1"
-    TAG=$(curl -fsSL --connect-timeout 2 -m 3 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n 1 | cut -d'"' -f4 || true)
+    TAG=$(curl -fsSL --curves X25519:P-256 --connect-timeout 2 -m 3 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n 1 | cut -d'"' -f4 || true)
     if [ -z "$TAG" ]; then
-        TAG=$(curl -fsSLI --connect-timeout 2 -m 3 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d '\r\n' || true)
+        TAG=$(curl -fsSLI --curves X25519:P-256 --connect-timeout 2 -m 3 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d '\r\n' || true)
         [ "$TAG" = "latest" ] && TAG="" || true
     fi
     printf "%s" "$TAG"
     return 0
 }
 
-# Кэширование актуальных версий с GitHub для быстрого отображения в меню
+# Мгновенное чтение кэша версий из /tmp (чтобы меню открывалось за 0.01 сек без паузы!)
 refresh_remote_versions() {
+    FORCE_FETCH="${1:-no}"
+    if [ "$FORCE_FETCH" != "yes" ] && [ -f "$VER_CACHE_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$VER_CACHE_FILE" 2>/dev/null || true
+        return 0
+    fi
+
     LATEST_SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
     LATEST_AGH_TAG=$(fetch_latest_github_tag "AdguardTeam/AdGuardHome")
     if [ -f "${SB_DIR}/ui/index.html" ]; then
@@ -1562,6 +1808,12 @@ refresh_remote_versions() {
             echo "$LATEST_UI_TAG" > "$UI_VER_FILE"
         fi
     fi
+
+    cat << VC_EOF > "$VER_CACHE_FILE" 2>/dev/null || true
+LATEST_SB_TAG='${LATEST_SB_TAG}'
+LATEST_AGH_TAG='${LATEST_AGH_TAG}'
+LATEST_UI_TAG='${LATEST_UI_TAG}'
+VC_EOF
     return 0
 }
 
@@ -1701,8 +1953,8 @@ print_gateway_header() {
         AU_INFO="вручную | Watchdog: ${WD_TXT}"
     fi
 
-    echo " Сеть шлюза:    [OpenWrt (${LAN_IF_NOW}): ${LAN_IP_NOW}] -> [Роутер: ${GW_IP}] | DHCP: ${DHCP_TXT}"
-    echo " Профиль ОЗУ:   [${TOTAL_RAM_MB} МБ RAM] -> Лимит Sing-Box: ${SB_GOMEMLIMIT} | Conntrack: ${SYS_CONNTRACK_MAX}"
+    echo " Платформа:     [${OS_NAME}] | [${TOTAL_RAM_MB} МБ RAM -> SB ${SB_GOMEMLIMIT}]"
+    echo " Сеть шлюза:    [${LAN_IF_NOW}: ${LAN_IP_NOW}] -> [Роутер: ${GW_IP}] | DHCP: ${DHCP_TXT}"
     echo " Sing-Box Ext:  ${S_STAT}${S_VER_INFO}"
     echo " AdGuard Home:  ${A_STAT}${A_VER_INFO} (DNS :53 + Антиреклама)"
     echo " Основной пул:  ${P_STAT}${P_INFO}"
@@ -1713,21 +1965,22 @@ print_gateway_header() {
     return 0
 }
 
-# Каскадный выбор зеркала GitHub при блокировках ТСПУ
+# Проверка прямого доступа к GitHub (с защитой от фрагментации TLS 1.3 Kyber)
 check_github_mirror() {
     TEST_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/private.srs"
-    if curl -fsSL --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null; then
+    if curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null || \
+       curl -fsSL --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null; then
         GH_PROXY=""
         return 0
     fi
-    for MIRROR in "https://ghfast.top/" "https://gh-proxy.com/" "https://ghproxy.net/"; do
-        if curl -fsSL --connect-timeout 3 -m 5 -o /dev/null "${MIRROR}${TEST_URL}" 2>/dev/null; then
+    for MIRROR in "https://gh-proxy.com/" "https://ghproxy.net/"; do
+        if curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null "${MIRROR}${TEST_URL}" 2>/dev/null; then
             echo "[!] Прямой доступ к GitHub ограничен, включено зеркало: ${MIRROR}"
             GH_PROXY="$MIRROR"
             return 0
         fi
     done
-    GH_PROXY="https://ghfast.top/"
+    GH_PROXY=""
     return 0
 }
 
@@ -1735,8 +1988,9 @@ check_github_mirror() {
 download_file() {
     DL_URL="$1"
     DL_OUT="$2"
-    for PREFIX in "$GH_PROXY" "" "https://ghfast.top/" "https://gh-proxy.com/" "https://ghproxy.net/"; do
-        if curl --retry 2 --connect-timeout 5 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null; then
+    for PREFIX in "$GH_PROXY" "" "https://gh-proxy.com/" "https://ghproxy.net/"; do
+        if curl --curves X25519:P-256 --retry 2 --connect-timeout 5 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null || \
+           curl --retry 2 --connect-timeout 5 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null; then
             return 0
         fi
     done
@@ -1758,7 +2012,7 @@ init_user_lists() {
 
 # Безопасное разделение нескольких URI-ключей без повреждения alpn=h2,http/1.1 и пробелов в #Названии
 format_uri_keys() {
-    printf "%s\n" "$1" | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|hysteria|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
+    printf "%s\n" "$1" | tr -d '\r' | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|hysteria|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
     return 0
 }
 
@@ -1801,8 +2055,8 @@ generate_amnezia_warp() {
 
     if ! command -v wg >/dev/null 2>&1; then
         echo "Установка генератора ключей wireguard-tools..."
-        apk update --allow-untrusted >/dev/null 2>&1 || true
-        apk add --allow-untrusted wireguard-tools >/dev/null 2>&1 || true
+        apk update >/dev/null 2>&1 || true
+        apk add wireguard-tools-wg >/dev/null 2>&1 || apk add wireguard-tools >/dev/null 2>&1 || true
     fi
 
     PRIV_KEY=""
@@ -1832,7 +2086,7 @@ generate_amnezia_warp() {
             "--connect-to api.devices.cloudflare.com:443:104.16.80.230:443"
         do
             # shellcheck disable=SC2086
-            RESP=$(curl -fsSL --connect-timeout 4 -m 6 $CURL_OPT \
+            RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 $CURL_OPT \
                 -H "User-Agent: okhttp/3.12.1" \
                 -H "Content-Type: application/json" \
                 -X POST "https://api.devices.cloudflare.com/v0a4471/reg" \
@@ -1848,7 +2102,7 @@ generate_amnezia_warp() {
         done
 
         if [ "$REG_OK" = "no" ]; then
-            RESP=$(curl -fsSL --connect-timeout 4 -m 6 \
+            RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 \
                 -H "User-Agent: okhttp/3.12.1" \
                 -H "Content-Type: application/json" \
                 -X POST "https://zero-trust-client.cloudflareclient.com/v0a4471/reg" \
@@ -1866,7 +2120,7 @@ generate_amnezia_warp() {
         if [ "$REG_OK" = "yes" ] && [ -n "${WARP_LICENSE:-}" ] && [ -n "$REG_ID" ] && [ -n "$REG_TOKEN" ]; then
             echo "Активация лицензионного ключа Cloudflare WARP+..."
             # shellcheck disable=SC2086
-            LIC_RESP=$(curl -fsSL --connect-timeout 4 -m 6 ${USED_CURL_OPT:-} \
+            LIC_RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 ${USED_CURL_OPT:-} \
                 -H "User-Agent: okhttp/3.12.1" \
                 -H "Authorization: Bearer ${REG_TOKEN}" \
                 -H "Content-Type: application/json" \
@@ -2062,18 +2316,18 @@ WARP_EOF
     return 0
 }
 
-# Горячая перезагрузка провайдеров и сброс Fake-IP кэша через Clash API Sing-Box
+# Горячая перезагрузка провайдеров и мгновенный выбор лучшей ноды в Авто без сброса базы FakeIP
 reload_singbox_api() {
     if ! pgrep sing-box >/dev/null 2>&1; then
         return 0
     fi
     load_gateway_env
-    curl -fsS -X POST -H "Authorization: Bearer ${ADMIN_PASS}" \
-        "http://127.0.0.1:9090/cache/fakeip/flush" >/dev/null 2>&1 || true
     for P_TAG in custom_sub custom_sub_2 custom_sub_3 my_nodes; do
         curl -fsS -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
             "http://127.0.0.1:9090/providers/proxies/${P_TAG}" >/dev/null 2>&1 || true
     done
+    curl -g -fsS --connect-timeout 2 -m 4 -H "Authorization: Bearer ${ADMIN_PASS}" \
+        "http://127.0.0.1:9090/group/%E2%9A%A1%20%D0%90%D0%B2%D1%82%D0%BE%20%28%D0%A1%D0%B0%D0%BC%D1%8B%D0%B9%20%D0%B1%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9%29/delay?url=https%3A%2F%2Fwww.youtube.com%2Fgenerate_204&timeout=3000" >/dev/null 2>&1 || true
     return 0
 }
 
@@ -2184,7 +2438,7 @@ update_cores_only() {
                 if [ -n "$SB_BIN" ] && [ -f "$SB_BIN" ]; then
                     chmod +x "$SB_BIN"
                     if "$SB_BIN" version >/dev/null 2>&1; then
-                        /etc/init.d/sing-box stop 2>/dev/null || true
+                        service_ctl sing-box stop
                         mv -f "$SB_BIN" /usr/bin/sing-box
                         echo "[✓] Sing-Box Extended безопасно обновлен до ${SB_TAG}."
                     else
@@ -2218,7 +2472,7 @@ update_cores_only() {
             if tar -xzf /tmp/agh.tar.gz -C /tmp/agh_extract 2>/dev/null && [ -f /tmp/agh_extract/AdGuardHome/AdGuardHome ]; then
                 chmod +x /tmp/agh_extract/AdGuardHome/AdGuardHome
                 if /tmp/agh_extract/AdGuardHome/AdGuardHome --version >/dev/null 2>&1; then
-                    /etc/init.d/adguardhome stop 2>/dev/null || true
+                    service_ctl adguardhome stop
                     mv -f /tmp/agh_extract/AdGuardHome/AdGuardHome /usr/bin/AdGuardHome
                     echo "[✓] AdGuard Home безопасно обновлен до ${AGH_TAG}."
                 else
@@ -2244,13 +2498,117 @@ update_cores_only() {
             install_zashboard_ui "$UI_TAG" || true
         fi
     fi
+
+    cat << VC_EOF > "$VER_CACHE_FILE" 2>/dev/null || true
+LATEST_SB_TAG='${LATEST_SB_TAG}'
+LATEST_AGH_TAG='${LATEST_AGH_TAG}'
+LATEST_UI_TAG='${LATEST_UI_TAG}'
+VC_EOF
     return 0
 }
-# ==================== [ КОНЕЦ ЧАСТИ 2 ИЗ 3 ] =====================
+# ==================== [ КОНЕЦ ЧАСТИ 3 ИЗ 4 ] =====================
 
-# ==================== [ НАЧАЛО ЧАСТИ 3 ИЗ 3 ] ====================
+# ==================== [ НАЧАЛО ЧАСТИ 4 ИЗ 4 ] ====================
+# Создание системных служб автозапуска (OpenWrt procd / Alpine OpenRC)
+setup_init_scripts() {
+    calc_hardware_limits
+
+    if [ "$OS_TYPE" = "alpine" ]; then
+        cat << INIT_SB_ALP > /etc/init.d/sing-box
+#!/sbin/openrc-run
+name="sing-box"
+description="Sing-Box Extended Gateway"
+supervisor="supervise-daemon"
+command="/usr/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json -D /etc/sing-box"
+output_log="${SB_LOG_FILE}"
+error_log="${SB_LOG_FILE}"
+rc_ulimit="-n 65535"
+export GOGC=50
+export GOMEMLIMIT=${SB_GOMEMLIMIT}
+export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+export ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true
+
+depend() {
+    need net
+    after nftables
+}
+
+start_pre() {
+    mkdir -p /dev/net
+    [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
+    : > "${SB_LOG_FILE}" 2>/dev/null || true
+}
+INIT_SB_ALP
+        chmod +x /etc/init.d/sing-box
+
+        cat << INIT_AGH_ALP > /etc/init.d/adguardhome
+#!/sbin/openrc-run
+name="adguardhome"
+description="AdGuard Home DNS Filter"
+supervisor="supervise-daemon"
+command="/usr/bin/AdGuardHome"
+command_args="-c /etc/AdGuardHome/AdGuardHome.yaml -w /etc/AdGuardHome --no-check-update"
+rc_ulimit="-n 65535"
+export GOGC=50
+export GOMEMLIMIT=${AGH_GOMEMLIMIT}
+
+depend() {
+    need net
+    after sing-box
+}
+INIT_AGH_ALP
+        chmod +x /etc/init.d/adguardhome
+    else
+        cat << INIT_SB_OWRT > /etc/init.d/sing-box
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=95
+STOP=10
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/sing-box run -c /etc/sing-box/config.json -D /etc/sing-box
+    procd_set_param env GOGC=50 GOMEMLIMIT=${SB_GOMEMLIMIT} ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true
+    procd_set_param file /etc/sing-box/config.json
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param respawn
+    procd_set_param limits nofile="65535 65535"
+    procd_close_instance
+}
+INIT_SB_OWRT
+        chmod +x /etc/init.d/sing-box
+
+        cat << INIT_AGH_OWRT > /etc/init.d/adguardhome
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=96
+STOP=09
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/AdGuardHome -c /etc/AdGuardHome/AdGuardHome.yaml -w /etc/AdGuardHome --no-check-update
+    procd_set_param env GOGC=50 GOMEMLIMIT=${AGH_GOMEMLIMIT}
+    procd_set_param file /etc/AdGuardHome/AdGuardHome.yaml
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param respawn
+    procd_set_param limits nofile="65535 65535"
+    procd_close_instance
+}
+INIT_AGH_OWRT
+        chmod +x /etc/init.d/adguardhome
+    fi
+
+    service_ctl sing-box enable
+    service_ctl sing-box restart
+    sleep 2
+    service_ctl adguardhome enable
+    service_ctl adguardhome restart
+    return 0
+}
+
 # ==============================================================================
-# Главный мастер установки и настройки (Sing-Box Extended + AdGuard Home)
+# Главный мастер установки и настройки (OpenWrt 25.x + Alpine Linux 3.x)
 # ==============================================================================
 run_installer() {
     detect_os
@@ -2258,7 +2616,7 @@ run_installer() {
     init_user_lists
 
     echo "========================================================"
-    echo " Установщик Sing-Box Extended + AdGuard Home (OpenWrt)  "
+    echo " Установщик Sing-Box Extended + AdGuard Home (Universal)"
     echo "========================================================"
     echo "Система: ${OS_NAME} [${ARCH_RAW} -> ${SB_ARCH}]"
     echo "Память:  ${TOTAL_RAM_MB} МБ RAM (Лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
@@ -2314,7 +2672,6 @@ run_installer() {
         [ -n "$INPUT_WLIC" ] && WARP_LICENSE="$INPUT_WLIC" || true
     fi
 
-    # Если введена подписка/ключ, а на диске остался старый WARP — спрашиваем, нужен ли он
     if [ "$USE_INITIAL_WARP" != "yes" ] && [ -n "$INPUT_SUB_URL" ] && is_warp_enabled; then
         printf "Обнаружен ранее созданный пул Amnezia WARP. Оставить его как резерв? (y/n) [Enter = y]: "
         read -r KEEP_WARP_ANS < /dev/tty || true
@@ -2326,8 +2683,8 @@ run_installer() {
         esac
     fi
 
-    # 2. Запрос IP-адреса самого шлюза OpenWrt и IP основного роутера
-    printf "Введите локальный IP самого шлюза OpenWrt [Enter = оставить %s]: " "$SAVED_LAN_IP"
+    # 2. Запрос IP-адреса самого шлюза и IP основного роутера
+    printf "Введите локальный IP самого шлюза (%s) [Enter = оставить %s]: " "$OS_NAME" "$SAVED_LAN_IP"
     read -r INPUT_LAN_IP < /dev/tty || true
     INPUT_LAN_IP=$(printf "%s" "$INPUT_LAN_IP" | tr -d ' \t\r\n')
     TARGET_LAN_IP="${INPUT_LAN_IP:-$SAVED_LAN_IP}"
@@ -2376,7 +2733,7 @@ run_installer() {
         exit 1
     fi
 
-    # Немедленно фиксируем введенные пользователем параметры (пароль, роутер, подписку) на диск!
+    # Немедленная фиксация пароля, роутера и подписки на диск!
     save_gateway_env
 
     # 4. Запрос на автообновление («поставил и забыл»)
@@ -2419,9 +2776,99 @@ run_installer() {
         return 0
     }
 
-    # ЭТАП 1: Сеть, TCP BBR, динамический тюнинг буферов по RAM, отключение rp_filter и NAT
-    modprobe tcp_bbr 2>/dev/null || true
+    # ЭТАП 1: Установка системных зависимостей, модулей ядра, BBR и сети (Dual-OS)
+    write_resolv_conf "nameserver ${GW_IP}
+nameserver 77.88.8.8
+nameserver 77.88.8.1"
 
+    if [ "$OS_TYPE" = "alpine" ]; then
+        if [ -f /etc/apk/repositories ]; then
+            sed -i 's|^#[[:space:]]*\(http.*/community\)|\1|' /etc/apk/repositories 2>/dev/null || true
+        fi
+        echo "Проверка и установка системных пакетов Alpine Linux..."
+        ALP_PKGS="ca-certificates curl gzip tar jq iproute2 conntrack-tools wireguard-tools-wg apache2-utils nftables tzdata"
+        apk update >/dev/null 2>&1 || true
+        # shellcheck disable=SC2086
+        apk add $ALP_PKGS || true
+        disable_apache_daemon
+        ensure_alpine_modules
+
+        if [ -f /usr/share/zoneinfo/Europe/Moscow ] && [ ! -f /etc/localtime ]; then
+            cp -f /usr/share/zoneinfo/Europe/Moscow /etc/localtime 2>/dev/null || true
+            echo "Europe/Moscow" > /etc/timezone 2>/dev/null || true
+        fi
+
+        LAN_IF_INIT=$(get_lan_ifname)
+        write_alpine_static_interfaces "$LAN_IF_INIT" "$TARGET_LAN_IP" "$GW_IP"
+        if [ "$TARGET_LAN_IP" = "$SAVED_LAN_IP" ]; then
+            killall -9 udhcpc >/dev/null 2>&1 || true
+            ip -4 addr add "${TARGET_LAN_IP}/24" dev "$LAN_IF_INIT" 2>/dev/null || true
+            ip link set "$LAN_IF_INIT" up 2>/dev/null || true
+            ip -4 route replace default via "$GW_IP" dev "$LAN_IF_INIT" 2>/dev/null || true
+        fi
+    else
+        uci del network.lan.ipaddr 2>/dev/null || true
+        uci set network.lan.ipaddr="$TARGET_LAN_IP"
+        uci set network.lan.netmask='255.255.255.0'
+        uci set network.lan.gateway="$GW_IP"
+        uci del network.lan.dns 2>/dev/null || true
+        uci add_list network.lan.dns="$GW_IP"
+        uci add_list network.lan.dns="77.88.8.8"
+        uci set network.lan.ipv6='0' 2>/dev/null || true
+        uci del network.lan.ip6assign 2>/dev/null || true
+        uci set network.lan.delegate='0' 2>/dev/null || true
+
+        if ! is_dhcp_server_enabled; then
+            uci set dhcp.lan.ignore='1'
+        fi
+        uci del dhcp.lan.ra 2>/dev/null || true
+        uci del dhcp.lan.dhcpv6 2>/dev/null || true
+        uci set dhcp.@dnsmasq[0].port='5353'
+        uci commit network
+        uci commit dhcp
+        /etc/init.d/odhcpd stop 2>/dev/null || true
+        /etc/init.d/odhcpd disable 2>/dev/null || true
+
+        if [ "$TARGET_LAN_IP" = "$SAVED_LAN_IP" ]; then
+            /etc/init.d/network reload 2>/dev/null || true
+            /etc/init.d/dnsmasq restart 2>/dev/null || true
+            sleep 2
+        fi
+
+        CUR_TZ=$(uci -q get system.@system[0].zonename || true)
+        if [ -z "$CUR_TZ" ] || [ "$CUR_TZ" = "UTC" ]; then
+            uci set system.@system[0].zonename='Europe/Moscow'
+            uci set system.@system[0].timezone='MSK-3'
+            uci commit system
+            /etc/init.d/system reload 2>/dev/null || true
+        fi
+
+        LAN_ZONE_IDX=$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='lan'$/\1/p" | head -n 1)
+        [ -z "$LAN_ZONE_IDX" ] && LAN_ZONE_IDX="@zone[0]"
+        uci set "firewall.${LAN_ZONE_IDX}.masq=1"
+        uci set "firewall.${LAN_ZONE_IDX}.forward=ACCEPT"
+        uci set firewall.@defaults[0].flow_offloading='0' 2>/dev/null || true
+        uci set firewall.@defaults[0].flow_offloading_hw='0' 2>/dev/null || true
+        uci commit firewall
+
+        REQ_PKGS="ca-certificates curl gzip tar jq kmod-tun kmod-tcp-bbr kmod-nft-tproxy kmod-nft-queue ip-full conntrack wireguard-tools apache-utils"
+        NEED_PKGS=""
+        for pkg in $REQ_PKGS; do
+            apk info -e "$pkg" >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS $pkg"
+        done
+        # shellcheck disable=SC2086
+        [ -n "$NEED_PKGS" ] && { apk update --allow-untrusted || true; apk add --allow-untrusted $NEED_PKGS || true; }
+        disable_apache_daemon
+    fi
+
+    CURRENT_IP="$TARGET_LAN_IP"
+
+    modprobe tun 2>/dev/null || true
+    modprobe tcp_bbr 2>/dev/null || true
+    modprobe nf_conntrack 2>/dev/null || true
+    [ -e /dev/net/tun ] || { mkdir -p /dev/net && mknod /dev/net/tun c 10 200 && chmod 666 /dev/net/tun; }
+
+    mkdir -p /etc/sysctl.d
     cat << SYS_EOF > /etc/sysctl.d/99-gateway-forward.conf
 net.ipv4.ip_forward = 1
 net.ipv4.conf.all.forwarding = 1
@@ -2449,72 +2896,9 @@ net.ipv4.tcp_congestion_control = bbr
 SYS_EOF
 
     sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
-    uci del network.lan.ipaddr 2>/dev/null || true
-    uci set network.lan.ipaddr="$TARGET_LAN_IP"
-    uci set network.lan.netmask='255.255.255.0'
-    uci set network.lan.gateway="$GW_IP"
-    uci del network.lan.dns 2>/dev/null || true
-    uci add_list network.lan.dns="$GW_IP"
-    uci add_list network.lan.dns="77.88.8.8"
-    uci set network.lan.ipv6='0' 2>/dev/null || true
-    uci del network.lan.ip6assign 2>/dev/null || true
-    uci set network.lan.delegate='0' 2>/dev/null || true
-
-    if ! is_dhcp_server_enabled; then
-        uci set dhcp.lan.ignore='1'
-    fi
-    uci del dhcp.lan.ra 2>/dev/null || true
-    uci del dhcp.lan.dhcpv6 2>/dev/null || true
-    uci set dhcp.@dnsmasq[0].port='5353'
-    uci commit network
-    uci commit dhcp
-    /etc/init.d/odhcpd stop 2>/dev/null || true
-    /etc/init.d/odhcpd disable 2>/dev/null || true
-
-    printf "nameserver %s\nnameserver 77.88.8.8\nnameserver 77.88.8.1\n" "$GW_IP" > /tmp/resolv.conf
-    cp -f /tmp/resolv.conf /etc/resolv.conf
-    if [ "$TARGET_LAN_IP" = "$SAVED_LAN_IP" ]; then
-        /etc/init.d/network reload 2>/dev/null || true
-        /etc/init.d/dnsmasq restart 2>/dev/null || true
-        sleep 2
-    fi
-
-    CURRENT_IP="$TARGET_LAN_IP"
-
-    CUR_TZ=$(uci -q get system.@system[0].zonename || true)
-    if [ -z "$CUR_TZ" ] || [ "$CUR_TZ" = "UTC" ]; then
-        uci set system.@system[0].zonename='Europe/Moscow'
-        uci set system.@system[0].timezone='MSK-3'
-        uci commit system
-        /etc/init.d/system reload 2>/dev/null || true
-    fi
-
     sync_clock
-    /etc/init.d/sysntpd restart 2>/dev/null || true
-
-    LAN_ZONE_IDX=$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='lan'$/\1/p" | head -n 1)
-    [ -z "$LAN_ZONE_IDX" ] && LAN_ZONE_IDX="@zone[0]"
-    uci set "firewall.${LAN_ZONE_IDX}.masq=1"
-    uci set "firewall.${LAN_ZONE_IDX}.forward=ACCEPT"
-    uci set firewall.@defaults[0].flow_offloading='0' 2>/dev/null || true
-    uci set firewall.@defaults[0].flow_offloading_hw='0' 2>/dev/null || true
-    uci commit firewall
-
+    [ "$OS_TYPE" = "openwrt" ] && /etc/init.d/sysntpd restart 2>/dev/null || true
     sync_dns_firewall "yes" "keep"
-
-    REQ_PKGS="ca-certificates curl gzip tar jq kmod-tun kmod-tcp-bbr kmod-nft-tproxy kmod-nft-queue ip-full conntrack wireguard-tools apache-utils"
-    NEED_PKGS=""
-    for pkg in $REQ_PKGS; do
-        apk info -e "$pkg" >/dev/null 2>&1 || NEED_PKGS="$NEED_PKGS $pkg"
-    done
-    [ -n "$NEED_PKGS" ] && { apk update --allow-untrusted || true; apk add --allow-untrusted $NEED_PKGS || true; }
-    disable_apache_daemon
-
-    modprobe tun 2>/dev/null || true
-    modprobe tcp_bbr 2>/dev/null || true
-    modprobe nft_queue 2>/dev/null || true
-    sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
-    [ -e /dev/net/tun ] || { mkdir -p /dev/net && mknod /dev/net/tun c 10 200; }
 
     # Если выбран режим бесплатного Amnezia WARP — генерируем пул нод со сканером
     if [ "$USE_INITIAL_WARP" = "yes" ]; then
@@ -2525,7 +2909,7 @@ SYS_EOF
     update_cores_only "no"
 
     # ЭТАП 3: Генерация конфига Sing-Box Extended и установка веб-панели Zashboard
-    /etc/init.d/sing-box stop 2>/dev/null || true
+    service_ctl sing-box stop
 
     if [ ! -f "${SB_DIR}/ui/index.html" ]; then
         install_zashboard_ui || true
@@ -2545,7 +2929,7 @@ SYS_EOF
     disable_apache_daemon
     [ -z "$AGH_PASS_HASH" ] && { echo "[X] Ошибка генерации bcrypt-хэша!"; exit 1; }
 
-    /etc/init.d/adguardhome stop 2>/dev/null || true
+    service_ctl adguardhome stop
     mkdir -p /etc/AdGuardHome/data
 
     if [ -f "$AGH_CONF" ]; then
@@ -2616,52 +3000,12 @@ AGH_EOF
         chmod 600 "$AGH_CONF" 2>/dev/null || true
     fi
 
-    # ЭТАП 5: Регистрация служб procd с динамическим GOMEMLIMIT под объем ОЗУ устройства
-    cat << INIT_SB > /etc/init.d/sing-box
-#!/bin/sh /etc/rc.common
-USE_PROCD=1
-START=95
-STOP=10
-start_service() {
-    procd_open_instance
-    procd_set_param command /usr/bin/sing-box run -c /etc/sing-box/config.json -D /etc/sing-box
-    procd_set_param env GOGC=50 GOMEMLIMIT=${SB_GOMEMLIMIT} ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true
-    procd_set_param file /etc/sing-box/config.json
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_set_param respawn
-    procd_set_param limits nofile="65535 65535"
-    procd_close_instance
-}
-INIT_SB
-    chmod +x /etc/init.d/sing-box
-    /etc/init.d/sing-box enable 2>/dev/null || true
-    /etc/init.d/sing-box restart 2>/dev/null || /etc/init.d/sing-box start 2>/dev/null || true
+    # ЭТАП 5: Регистрация и запуск служб (OpenWrt procd / Alpine OpenRC)
+    setup_init_scripts
 
-    sleep 2
-    cat << INIT_AGH > /etc/init.d/adguardhome
-#!/bin/sh /etc/rc.common
-USE_PROCD=1
-START=96
-STOP=09
-start_service() {
-    procd_open_instance
-    procd_set_param command /usr/bin/AdGuardHome -c /etc/AdGuardHome/AdGuardHome.yaml -w /etc/AdGuardHome --no-check-update
-    procd_set_param env GOGC=50 GOMEMLIMIT=${AGH_GOMEMLIMIT}
-    procd_set_param file /etc/AdGuardHome/AdGuardHome.yaml
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_set_param respawn
-    procd_set_param limits nofile="65535 65535"
-    procd_close_instance
-}
-INIT_AGH
-    chmod +x /etc/init.d/adguardhome
-    /etc/init.d/adguardhome enable 2>/dev/null || true
-    /etc/init.d/adguardhome restart 2>/dev/null || /etc/init.d/adguardhome start 2>/dev/null || true
-
-    printf "nameserver 127.0.0.1\nnameserver %s\nnameserver 77.88.8.8\n" "$GW_IP" > /tmp/resolv.conf
-    cp -f /tmp/resolv.conf /etc/resolv.conf
+    write_resolv_conf "nameserver 127.0.0.1
+nameserver ${GW_IP}
+nameserver 77.88.8.8"
 
     ensure_sysupgrade_persistence
     enable_watchdog
@@ -2673,36 +3017,20 @@ INIT_AGH
     fi
 
     # ЭТАП 6: Self-Test 2.0
+    reload_singbox_api
     run_self_test
 
     echo "========================================================"
     echo " Развертывание на ${OS_NAME} успешно завершено!"
     echo " - IP-адрес шлюза:     ${CURRENT_IP} (интерфейс $(get_lan_ifname), маска /24)"
     echo " - Основной роутер:    ${GW_IP}"
-    echo " - Панель OpenWrt:     http://${CURRENT_IP}"
     echo " - Панель Sing-Box:    http://${CURRENT_IP}:9090/ui [Zashboard] (пароль: ${ADMIN_PASS})"
     echo " - Панель AdGuard:     http://${CURRENT_IP}:3000 (логин: ${AGH_USER} / пароль: ${ADMIN_PASS})"
     echo " - Вызов меню шлюза:   gateway"
     echo "========================================================"
 
     if [ "$TARGET_LAN_IP" != "$SAVED_LAN_IP" ]; then
-        echo "[!] Переключение интерфейса OpenWrt на новый IP ${TARGET_LAN_IP}..."
-        echo "    Переподключитесь по SSH: ssh root@${TARGET_LAN_IP}"
-        cat << 'SW_EOF' > /tmp/switch_lan_ip.sh
-#!/bin/sh
-sleep 1
-/etc/init.d/sing-box stop >/dev/null 2>&1 || true
-/etc/init.d/network reload >/dev/null 2>&1 || /etc/init.d/network restart >/dev/null 2>&1 || true
-sleep 3
-/etc/init.d/firewall reload >/dev/null 2>&1 || true
-/etc/init.d/uhttpd restart >/dev/null 2>&1 || true
-/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
-/etc/init.d/sing-box start >/dev/null 2>&1 || true
-/etc/init.d/adguardhome restart >/dev/null 2>&1 || true
-rm -f /tmp/switch_lan_ip.sh
-SW_EOF
-        chmod +x /tmp/switch_lan_ip.sh
-        nohup /tmp/switch_lan_ip.sh >/dev/null 2>&1 &
+        apply_network_ips "$TARGET_LAN_IP" "$GW_IP" || true
     fi
     return 0
 }
@@ -2710,7 +3038,8 @@ SW_EOF
 # Матрица глубокой диагностики шлюза (Self-Test 2.0: RAM, Conntrack, FakeIP, Anti-Leak и HTTP Ping)
 run_self_test() {
     set +e
-    echo "=== [Self-Test 2.0] Матрица диагностики шлюза Sing-Box Extended ==="
+    detect_os
+    echo "=== [Self-Test 2.0] Матрица диагностики шлюза (${OS_NAME}) ==="
     WAIT_CNT=0
     while [ "$WAIT_CNT" -lt 12 ]; do
         if pgrep sing-box >/dev/null 2>&1 && ip link show singbox-tun >/dev/null 2>&1; then
@@ -2728,7 +3057,7 @@ run_self_test() {
     else
         DHCP_ST="ВЫКЛ"
     fi
-    echo " • Сеть шлюза: [OpenWrt (${LAN_IF_NOW}): $(get_current_lan_ip)] -> [Роутер: ${GW_IP}] | DHCP: ${DHCP_ST}"
+    echo " • Сеть шлюза: [${OS_NAME} (${LAN_IF_NOW}): $(get_current_lan_ip)] -> [Роутер: ${GW_IP}] | DHCP: ${DHCP_ST}"
     print_proxy_slots_report
 
     SB_PID=$(pgrep sing-box 2>/dev/null | head -n 1 || true)
@@ -2765,16 +3094,16 @@ run_self_test() {
     fi
 
     if [ -f "$SB_CONF" ] && [ -n "$SB_PID" ]; then
-        ACTIVE_NODE=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null | sed -n 's/.*"⚡ Авто (Самый быстрый)".*"now":"\([^"]*\)".*/\1/p' | head -n 1)
+        ACTIVE_NODE=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null | jq -r '.proxies["⚡ Авто (Самый быстрый)"].now // empty' 2>/dev/null)
         [ -n "$ACTIVE_NODE" ] && echo "[✓] Активная нода (Авто): ${ACTIVE_NODE}" || true
-        CF_TRACE=$(curl -fsS --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
+        CF_TRACE=$(curl -fsS --curves X25519:P-256 --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
         if [ -n "$CF_TRACE" ]; then
             echo "[✓] Внешний выход через туннель (Cloudflare Trace): ${CF_TRACE}"
-            PING_RU=$(curl -o /dev/null -fsS --connect-timeout 2 -w '%{time_connect}' "http://ya.ru" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
-            PING_CF=$(curl -o /dev/null -fsS --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://cp.cloudflare.com/generate_204" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
-            PING_GG=$(curl -o /dev/null -fsS --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://www.gstatic.com/generate_204" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
-            PING_AI=$(curl -o /dev/null -fsS --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_connect}' "https://api.openai.com" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
-            echo "[✓] Матрица задержек: РФ (ya.ru): ${PING_RU} | CF: ${PING_CF} | YouTube/Google: ${PING_GG} | OpenAI: ${PING_AI}"
+            PING_RU=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 2 -w '%{time_connect}' "http://ya.ru" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
+            PING_CF=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://cp.cloudflare.com/generate_204" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
+            PING_GG=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "https://www.youtube.com/generate_204" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
+            PING_AI=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_connect}' "https://api.openai.com" 2>/dev/null | awk '{printf "%.0f ms", $1*1000}' || echo "timeout")
+            echo "[✓] Матрица задержек: РФ (ya.ru): ${PING_RU} | CF: ${PING_CF} | YouTube: ${PING_GG} | OpenAI: ${PING_AI}"
         else
             echo "[!] Туннель еще прогревается или подписка недоступна."
         fi
@@ -2782,24 +3111,27 @@ run_self_test() {
     return 0
 }
 
-# Безопасная самоустановка скрипта в качестве системной команды gateway
+# Безопасная самоустановка скрипта в качестве системной команды gateway (с очисткой CRLF)
 INSTALL_PATH="/usr/bin/gateway"
 SCRIPT_BASE="$(basename "$0" 2>/dev/null || true)"
 if [ -f "$0" ] && [ "$0" != "$INSTALL_PATH" ] && [ "$SCRIPT_BASE" != "sh" ] && [ "$SCRIPT_BASE" != "ash" ] && [ "$SCRIPT_BASE" != "-sh" ] && [ "$SCRIPT_BASE" != "-ash" ]; then
+    sed -i 's/\r$//; 1s/^\xEF\xBB\xBF//' "$0" 2>/dev/null || true
     cp -f "$0" "$INSTALL_PATH"
     chmod +x "$INSTALL_PATH"
+    detect_os
     ensure_sysupgrade_persistence
-    echo "[✓] Команда 'gateway' успешно установлена в систему."
+    echo "[✓] Команда 'gateway' успешно установлена в систему (${OS_NAME})."
 fi
 
 # ==============================================================================
-# Интерактивное меню управления (OpenWrt 25.x — Sing-Box Extended Ноябрь 2026)
+# Интерактивное меню управления (Universal: OpenWrt 25.x + Alpine Linux 3.x)
 # ==============================================================================
 show_menu() {
     set +e
+    detect_os
     init_user_lists
     ensure_sysupgrade_persistence
-    refresh_remote_versions
+    refresh_remote_versions "no"
     while true; do
         clear
         echo "========================================================"
@@ -2811,7 +3143,7 @@ show_menu() {
         echo " 2) Управление прокси: Подписки / Ключи / Amnezia WARP 2.0"
         echo " 3) Обновить ядра Sing-Box Extended, AdGuard Home и Zashboard"
         echo " 4) Перезапустить службы + пересобрать конфиг и сбросить кэш"
-        echo " 5) Посмотреть живые логи Sing-Box (logread)"
+        echo " 5) Посмотреть живые логи Sing-Box"
         echo " 6) Полная перенастройка шлюза (Мастер установки)"
         echo " 7) Свои домены: добавить/очистить (В прокси / Напрямую)"
         echo " 8) Маршрутизация устройств по IP (Обход DIRECT / Full-VPN)"
@@ -2847,8 +3179,9 @@ show_menu() {
                 echo " 7) Очистить все личные ключи в my_nodes.yaml [Слот 2]"
                 echo " 8) Включить / перевыпустить Amnezia WARP 2.0 (+ WARP+) [Слот 3]"
                 echo " 9) Отключить и полностью очистить ноды Amnezia WARP 2.0 [Слот 3]"
+                echo " 10) Режим «Белые списки» (показать/скрыть РФ-каскады в подписке) [Слот 1]"
                 echo " 0) Назад"
-                printf "Выбор [0-9]: "
+                printf "Выбор [0-10]: "
                 read -r SUB_ACT < /dev/tty || true
                 case "$SUB_ACT" in
                     1)
@@ -2989,42 +3322,50 @@ show_menu() {
                         printf "\nНажмите Enter для продолжения..."
                         read -r _ < /dev/tty
                         ;;
+                    10)
+                        backup_gateway_state
+                        load_gateway_env
+                        if [ "${ALLOW_RU_NODES:-no}" = "yes" ]; then
+                            ALLOW_RU_NODES="no"
+                            ACT_MSG="Скрытие нод РФ/Белые списки в подписке (стандартный режим)"
+                        else
+                            ALLOW_RU_NODES="yes"
+                            ACT_MSG="Показ каскадных нод РФ/Белые списки в подписке (режим анти-шатдаун)"
+                        fi
+                        save_gateway_env
+                        apply_and_verify_singbox "$ACT_MSG" || true
+                        printf "\nНажмите Enter для продолжения..."
+                        read -r _ < /dev/tty
+                        ;;
                 esac
                 ;;
             3)
                 echo "Проверка и атомарное обновление ядер и веб-панели Zashboard..."
                 update_cores_only "yes"
-                /etc/init.d/sing-box restart 2>/dev/null || true
-                /etc/init.d/adguardhome restart 2>/dev/null || true
-                refresh_remote_versions
+                service_ctl sing-box restart
+                service_ctl adguardhome restart
                 printf "\nНажмите Enter для возврата в меню..."
                 read -r _ < /dev/tty
                 ;;
             4)
-                echo "Пересборка эталонного конфига Sing-Box Extended и сброс кэша..."
+                echo "Пересборка эталонного конфига Sing-Box Extended и сброс conntrack..."
                 backup_gateway_state
                 load_gateway_env
                 if apply_and_verify_singbox "Актуализация групп и перезапуск служб"; then
                     conntrack -F >/dev/null 2>&1 || true
-                    /etc/init.d/adguardhome restart 2>/dev/null || true
-                    echo "[✓] Кэш Fake-IP и таблица conntrack очищены, службы успешно перезапущены."
+                    service_ctl adguardhome restart
+                    echo "[✓] Таблица conntrack очищена, службы успешно перезапущены."
                 fi
                 sleep 2
                 ;;
             5)
-                echo "=== Последние записи лога Sing-Box Extended ==="
-                if command -v logread >/dev/null 2>&1; then
-                    logread -e sing-box | tail -n 45
-                else
-                    ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true \
-                        /usr/bin/sing-box check -c "$SB_CONF" -D "$SB_DIR"
-                fi
+                echo "=== Последние записи лога Sing-Box Extended (${OS_NAME}) ==="
+                show_singbox_logs 45
                 printf "\nНажмите Enter для возврата в меню..."
                 read -r _ < /dev/tty
                 ;;
             6)
                 run_installer
-                refresh_remote_versions
                 printf "\nНажмите Enter для возврата в меню..."
                 read -r _ < /dev/tty
                 ;;
@@ -3174,8 +3515,8 @@ show_menu() {
                     4)
                         if [ -f "$BACKUP_ARCHIVE" ]; then
                             if tar -xzf "$BACKUP_ARCHIVE" -C / 2>/dev/null; then
-                                /etc/init.d/sing-box restart 2>/dev/null || true
-                                /etc/init.d/adguardhome restart 2>/dev/null || true
+                                service_ctl sing-box restart
+                                service_ctl adguardhome restart
                                 echo "[✓] Конфигурация успешно восстановлена из ${BACKUP_ARCHIVE}"
                             else
                                 echo "[X] Ошибка: Архив ${BACKUP_ARCHIVE} поврежден!"
@@ -3248,7 +3589,7 @@ show_menu() {
                 esac
                 ;;
             11)
-                echo "=== Аппаратный Kill-Switch (fw4 / nftables на $(get_lan_ifname)) ==="
+                echo "=== Аппаратный Kill-Switch (nftables на $(get_lan_ifname)) ==="
                 echo "Блокирует любую прямую маршрутизацию из LAN в основной роутер в обход singbox-tun."
                 echo "Если служба Sing-Box упадет, клиенты не «светят» реальный российский IP провайдера."
                 echo "--------------------------------------------------------"
@@ -3275,21 +3616,21 @@ show_menu() {
                 load_gateway_env
                 echo ""
                 echo "=== Сетевые настройки шлюза и Умный DHCP Sidecar ==="
-                echo " • Текущий IP шлюза (OpenWrt):    ${CUR_LAN_NOW} (интерфейс $(get_lan_ifname), /24)"
+                echo " • Текущий IP шлюза (${OS_NAME}): ${CUR_LAN_NOW} (интерфейс $(get_lan_ifname), /24)"
                 echo " • Текущий IP основного роутера:  ${GW_IP}"
-                echo " • Умный DHCP-сервер на OpenWrt:  $(is_dhcp_server_enabled && echo "ВКЛЮЧЕН (раздает шлюз и DNS ${CUR_LAN_NOW})" || echo "ВЫКЛЮЧЕН (раздает главный роутер)")"
+                echo " • Умный DHCP-сервер на шлюзе:    $(is_dhcp_server_enabled && echo "ВКЛЮЧЕН (раздает шлюз и DNS ${CUR_LAN_NOW})" || echo "ВЫКЛЮЧЕН (раздает главный роутер)")"
                 echo "----------------------------------------------------------"
-                echo " 1) Сменить IP-адрес самого шлюза OpenWrt (network.lan.ipaddr)"
+                echo " 1) Сменить IP-адрес самого шлюза (${OS_NAME})"
                 echo " 2) Сменить IP-адрес основного роутера (Gateway / Local DNS)"
                 echo " 3) Сменить оба адреса сразу (при переезде в другую подсеть)"
-                echo " 4) ВКЛЮЧИТЬ Умный DHCP-сервер на OpenWrt (для залоченных роутеров РТК/МТС)"
-                echo " 5) ВЫКЛЮЧИТЬ DHCP-сервер на OpenWrt (классический Sidecar)"
+                echo " 4) ВКЛЮЧИТЬ Умный DHCP-сервер на шлюзе (для залоченных роутеров РТК/МТС)"
+                echo " 5) ВЫКЛЮЧИТЬ DHCP-сервер на шлюзе (классический Sidecar)"
                 echo " 0) Назад"
                 printf "Выбор [0-5]: "
                 read -r NET_ACT < /dev/tty || true
                 case "$NET_ACT" in
                     1)
-                        printf "Введите новый IP для шлюза OpenWrt [текущий %s]: " "$CUR_LAN_NOW"
+                        printf "Введите новый IP для шлюза [текущий %s]: " "$CUR_LAN_NOW"
                         read -r NEW_L < /dev/tty || true
                         NEW_L=$(printf "%s" "$NEW_L" | tr -d ' \t\r\n')
                         if [ -n "$NEW_L" ]; then
@@ -3309,7 +3650,7 @@ show_menu() {
                         sleep 3
                         ;;
                     3)
-                        printf "Введите новый IP для шлюза OpenWrt [текущий %s]: " "$CUR_LAN_NOW"
+                        printf "Введите новый IP для шлюза [текущий %s]: " "$CUR_LAN_NOW"
                         read -r NEW_L < /dev/tty || true
                         NEW_L=$(printf "%s" "$NEW_L" | tr -d ' \t\r\n')
                         printf "Введите новый IP основного роутера [текущий %s]: " "$GW_IP"
@@ -3351,4 +3692,4 @@ elif [ ! -f "$SB_CONF" ] || [ "${1:-}" = "install" ]; then
 else
     show_menu
 fi
-# ==================== [ КОНЕЦ ЧАСТИ 3 ИЗ 3 ] =====================
+# ==================== [ КОНЕЦ ЧАСТИ 4 ИЗ 4 ] =====================
