@@ -25,6 +25,7 @@ AUTOUPDATE_LOG="/var/log/gateway_autoupdate.log"
 SB_LOG_FILE="/var/log/sing-box.log"
 VER_CACHE_FILE="/tmp/gateway_ver.cache"
 LAN_SCAN_CACHE="/tmp/gateway_lan_scan.cache"
+GATEWAY_LOCK_DIR="/tmp/gateway_op.lock"
 UI_VER_FILE="${SB_DIR}/ui/.ui_version"
 UI_REPO="Zephyruso/zashboard"
 UI_ZIP_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip"
@@ -75,9 +76,35 @@ init_colors
 
 # Безопасная запись /etc/resolv.conf (предотвращает ошибку cp при симлинке в OpenWrt)
 write_resolv_conf() {
-    printf "%s\n" "$1" > /tmp/resolv.conf
+    printf "%s\n" "$1" > "/tmp/resolv.conf.$$"
+    mv -f "/tmp/resolv.conf.$$" /tmp/resolv.conf 2>/dev/null || true
     rm -f /etc/resolv.conf 2>/dev/null || true
     cp -f /tmp/resolv.conf /etc/resolv.conf 2>/dev/null || true
+    return 0
+}
+
+# Механизм межпроцессной блокировки (защита от гонки cron autoupdate и watchdog в 04:00)
+acquire_gateway_lock() {
+    LOCK_OWNER="${1:-op}"
+    if mkdir "$GATEWAY_LOCK_DIR" 2>/dev/null; then
+        printf "%s %s\n" "$$" "$LOCK_OWNER" > "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true
+        return 0
+    fi
+    if [ -f "${GATEWAY_LOCK_DIR}/pid" ]; then
+        OLD_PID=$(awk '{print $1}' "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true)
+        if [ -n "$OLD_PID" ] && ! kill -0 "$OLD_PID" 2>/dev/null; then
+            rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
+            if mkdir "$GATEWAY_LOCK_DIR" 2>/dev/null; then
+                printf "%s %s\n" "$$" "$LOCK_OWNER" > "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true
+                return 0
+            fi
+        fi
+    fi
+    return 1
+}
+
+release_gateway_lock() {
+    rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
     return 0
 }
 
@@ -177,14 +204,14 @@ ensure_alpine_modules() {
     return 0
 }
 
-# Проверка корректности IPv4-адреса (X.X.X.X, октеты 0..255, хост 1..254)
+# Проверка корректности IPv4-адреса (X.X.X.X, без восьмеричных ведущих нулей, октеты 0..255, хост 1..254)
 is_valid_ipv4() {
     IP_CAND="$1"
     printf "%s" "$IP_CAND" | awk -F'.' '
         NF != 4 { exit 1 }
         {
             for (i = 1; i <= 4; i++) {
-                if ($i !~ /^[0-9]+$/) exit 1
+                if ($i !~ /^(0|[1-9][0-9]*)$/) exit 1
                 if ($i + 0 < 0 || $i + 0 > 255) exit 1
             }
             if ($1 + 0 < 1 || $1 + 0 > 223 || $1 + 0 == 127) exit 1
@@ -310,12 +337,12 @@ count_sub_urls() {
 
 has_my_nodes() {
     [ -s "$CUSTOM_NODES_FILE" ] && ! grep -q '^proxies:[[:space:]]*\[\][[:space:]]*$' "$CUSTOM_NODES_FILE" 2>/dev/null && \
-        awk 'NF && $0 !~ /^proxies:/ {found=1} END {exit !found}' "$CUSTOM_NODES_FILE" 2>/dev/null
+        awk 'NF && $0 !~ /^[[:space:]]*#/ && $0 !~ /^proxies:/ {found=1} END {exit !found}' "$CUSTOM_NODES_FILE" 2>/dev/null
 }
 
 count_my_nodes() {
     if [ -s "$CUSTOM_NODES_FILE" ] && ! grep -q '^proxies:[[:space:]]*\[\][[:space:]]*$' "$CUSTOM_NODES_FILE" 2>/dev/null; then
-        awk 'NF && $0 !~ /^proxies:/ {c++} END {print c+0}' "$CUSTOM_NODES_FILE" 2>/dev/null
+        awk 'NF && $0 !~ /^[[:space:]]*#/ && $0 !~ /^proxies:/ {c++} END {print c+0}' "$CUSTOM_NODES_FILE" 2>/dev/null
     else
         echo "0"
     fi
@@ -349,7 +376,26 @@ is_dhcp_server_enabled() {
     fi
 }
 
-# Настройка nftables (Dual-OS: fw4 на OpenWrt / нативный nftables на Alpine Linux)
+# Формирование списка IP-исключений (bypass_devices.conf) для корректной работы DIRECT при включенном Kill-Switch
+get_nft_bypass_saddr_clause() {
+    if [ ! -s "$USER_BYPASS_IPS" ]; then
+        printf ""
+        return 0
+    fi
+    BYP_CSV=$(awk '{
+        gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", $0);
+        if ($0 != "" && $0 !~ /^#/) {
+            if (c++) printf ", %s", $0;
+            else printf "%s", $0;
+        }
+    }' "$USER_BYPASS_IPS" 2>/dev/null || true)
+    if [ -n "$BYP_CSV" ]; then
+        printf "ip saddr != { %s } " "$BYP_CSV"
+    fi
+    return 0
+}
+
+# Настройка nftables (Dual-OS: fw4 на OpenWrt / нативный nftables на Alpine Linux с защитой input и Kill-Switch 2.0)
 sync_dns_firewall() {
     USE_DNS_REDIRECT="${1:-yes}"
     KS_STATE="${2:-keep}"
@@ -363,12 +409,14 @@ sync_dns_firewall() {
         fi
     fi
 
+    BYP_SADDR_CLAUSE=$(get_nft_bypass_saddr_clause)
+
     if [ "$OS_TYPE" = "alpine" ]; then
         KS_COMMENT=""
         KS_RULE=""
         if [ "$KS_STATE" = "yes" ]; then
             KS_COMMENT="#KILLSWITCH_ACTIVE"
-            KS_RULE="iifname \"${LAN_IF}\" oifname \"${LAN_IF}\" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject"
+            KS_RULE="iifname \"${LAN_IF}\" oifname != { \"singbox-tun\", \"lo\" } ${BYP_SADDR_CLAUSE}ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject"
         fi
 
         DNS_RULE=""
@@ -376,7 +424,7 @@ sync_dns_firewall() {
             DNS_RULE="iifname \"${LAN_IF}\" meta l4proto { tcp, udp } th dport 53 redirect to :53"
         fi
 
-        cat << NFT_ALPINE > "$ALPINE_NFT_CONF"
+        cat << NFT_ALPINE > "${ALPINE_NFT_CONF}.tmp.$$"
 #!/usr/sbin/nft -f
 ${KS_COMMENT}
 
@@ -384,6 +432,15 @@ table inet gateway_fw
 delete table inet gateway_fw
 
 table inet gateway_fw {
+    chain input_protect {
+        type filter hook input priority filter - 5; policy accept;
+        iifname "lo" accept
+        ct state established,related accept
+        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8 } tcp dport { 53, 3000, 7890, 9090 } accept
+        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8 } udp dport { 53, 7890 } accept
+        tcp dport { 3000, 7890, 9090 } drop
+    }
+
     chain forward_mss {
         type filter hook forward priority mangle; policy accept;
         oifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
@@ -408,8 +465,9 @@ table inet gateway_fw {
     }
 }
 NFT_ALPINE
-        chmod +x "$ALPINE_NFT_CONF" 2>/dev/null || true
-        nft -f "$ALPINE_NFT_CONF" 2>/dev/null || true
+        chmod +x "${ALPINE_NFT_CONF}.tmp.$$" 2>/dev/null || true
+        mv -f "${ALPINE_NFT_CONF}.tmp.$$" "$ALPINE_NFT_CONF"
+        nft --check -f "$ALPINE_NFT_CONF" 2>/dev/null && nft -f "$ALPINE_NFT_CONF" 2>/dev/null || true
         rc-update add nftables default >/dev/null 2>&1 || true
         return 0
     fi
@@ -433,7 +491,7 @@ chain singbox_anti_leak {
     type filter hook forward priority filter - 5; policy accept;
     meta nfproto ipv6 drop
     iifname "${LAN_IF}" meta l4proto { tcp, udp } th dport 853 reject
-    iifname "${LAN_IF}" oifname "${LAN_IF}" ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject
+    iifname "${LAN_IF}" oifname != { "singbox-tun", "lo" } ${BYP_SADDR_CLAUSE}ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject
 }
 NFT_LEAK_KS
     else
@@ -806,6 +864,17 @@ FORCE_GRP
       },
       {
         "tag": "dns_ru",
+        "type": "https",
+        "server": "77.88.8.8",
+        "server_port": 443,
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "common.dot.dns.yandex.net"
+        }
+      },
+      {
+        "tag": "dns_ru_udp",
         "type": "udp",
         "server": "77.88.8.8",
         "server_port": 53
@@ -1047,7 +1116,8 @@ FORCE_GRP
       {
         "rule_set": [
           "youtube_domain",
-          "spotify_domain"
+          "spotify_domain",
+          "twitch_domain"
         ],
         "outbound": "▶️ YouTube & Spotify"
       },
@@ -1089,6 +1159,7 @@ FORCE_GRP
           "telegram_domain",
           "telegram_ip",
           "whatsapp_domain",
+          "meta_domain",
           "facebook_ip",
           "discord_domain",
           "discord_voice_ip",
@@ -1175,6 +1246,20 @@ FORCE_GRP
         "format": "binary",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/spotify.srs"
+      },
+      {
+        "tag": "twitch_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/twitch.srs"
+      },
+      {
+        "tag": "meta_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/meta.srs"
       },
       {
         "tag": "ai_domain",
@@ -1286,7 +1371,7 @@ FORCE_GRP
 }
 CONFIG_EOF
 
-    # Безопасная подстановка секретов и сборка гибридного пула "☁️ Amnezia WARP" (4 UDP AWG 2.0 + 1 TCP MASQUE H2)
+    # Атомарная подстановка секретов и сборка гибридного пула "☁️ Amnezia WARP" (4 UDP AWG + 1 TCP MASQUE H2 v1.14.3-extended-2.7.3)
     if command -v jq >/dev/null 2>&1; then
         if is_warp_enabled; then
             if [ "$PROVIDER_TAGS_JSON" != "[]" ]; then
@@ -1295,6 +1380,7 @@ CONFIG_EOF
                         "type": "masque",
                         "tag": "☁️ WARP MASQUE (TCP/H2)",
                         "use_http2": true,
+                        "use_l4_proxy": false,
                         "use_ipv6": false,
                         "profile": {
                             "detour": "DIRECT",
@@ -1307,12 +1393,14 @@ CONFIG_EOF
                         "udp_timeout": "5m0s",
                         "udp_keepalive_period": "30s",
                         "reconnect_delay": "5s",
+                        "handshake_timeout": "10s",
                         "congestion_controller": "bbr",
                         "tls": {
-                            "server_name": "www.cloudflare.com",
+                            "server_name": "",
                             "insecure": false,
                             "fragment": true,
-                            "fragment_fallback_delay": "500ms"
+                            "fragment_fallback_delay": "500ms",
+                            "record_fragment": true
                         }
                     }) as $msq
                     | (($w[0].outbounds | map(.tag)) + [$msq.tag]) as $warp_tags
@@ -1331,13 +1419,14 @@ CONFIG_EOF
                             "idle_timeout": "30m"
                         }] + .outbounds[1:-1] + [$msq, .outbounds[-1]]
                     )
-                ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
+                ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
             else
                 jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
                     ($w[0].masque // {
                         "type": "masque",
                         "tag": "☁️ WARP MASQUE (TCP/H2)",
                         "use_http2": true,
+                        "use_l4_proxy": false,
                         "use_ipv6": false,
                         "profile": {
                             "detour": "DIRECT",
@@ -1350,12 +1439,14 @@ CONFIG_EOF
                         "udp_timeout": "5m0s",
                         "udp_keepalive_period": "30s",
                         "reconnect_delay": "5s",
+                        "handshake_timeout": "10s",
                         "congestion_controller": "bbr",
                         "tls": {
-                            "server_name": "www.cloudflare.com",
+                            "server_name": "",
                             "insecure": false,
                             "fragment": true,
-                            "fragment_fallback_delay": "500ms"
+                            "fragment_fallback_delay": "500ms",
+                            "record_fragment": true
                         }
                     }) as $msq
                     | (($w[0].outbounds | map(.tag)) + [$msq.tag]) as $warp_tags
@@ -1382,7 +1473,7 @@ CONFIG_EOF
                             "idle_timeout": "30m"
                         }] + .outbounds[1:-1] + [$msq, .outbounds[-1]]
                     )
-                ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
+                ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
             fi
         elif [ "$PROVIDER_TAGS_JSON" = "[]" ]; then
             jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" '
@@ -1393,14 +1484,23 @@ CONFIG_EOF
                     del(.providers)
                     | .outbounds = (if (.outbounds == null or (.outbounds | length) == 0) then ["DIRECT"] else .outbounds end)
                 )
-            ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
+            ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
         else
             jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" '
                 .experimental.clash_api.secret = $secret
                 | (.dns.servers[] | select(.tag=="dns_local") | .server) = $gw
-            ' "${SB_CONF}.tmp" > "$SB_CONF" && rm -f "${SB_CONF}.tmp"
+            ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
+        fi
+        rm -f "${SB_CONF}.tmp"
+        if [ -s "${SB_CONF}.final.$$" ]; then
+            chmod 600 "${SB_CONF}.final.$$" 2>/dev/null || true
+            mv -f "${SB_CONF}.final.$$" "$SB_CONF"
+        else
+            rm -f "${SB_CONF}.final.$$"
+            [ -f "${SB_CONF}.bak" ] && cp -f "${SB_CONF}.bak" "$SB_CONF" || true
         fi
     else
+        chmod 600 "${SB_CONF}.tmp" 2>/dev/null || true
         mv -f "${SB_CONF}.tmp" "$SB_CONF"
     fi
     chmod 600 "$SB_CONF" 2>/dev/null || true
@@ -1523,7 +1623,7 @@ list_my_nodes() {
     fi
     echo " ${C_CYN}--- Список ваших ключей в ${CUSTOM_NODES_FILE} ---${C_RES}"
     awk -v c="${C_CYN}" -v r="${C_RES}" '
-        NF && $0 !~ /^proxies:/ {
+        NF && $0 !~ /^[[:space:]]*#/ && $0 !~ /^proxies:/ {
             idx++
             line = $0
             proto = line
@@ -1558,7 +1658,7 @@ delete_my_node_by_index() {
         return 1
     fi
     awk -v target="$DEL_IDX" '
-        NF && $0 !~ /^proxies:/ {
+        NF && $0 !~ /^[[:space:]]*#/ && $0 !~ /^proxies:/ {
             idx++
             if (idx == target) next
             print $0
@@ -1600,6 +1700,7 @@ apply_and_verify_singbox() {
     done
 
     if [ "$WAIT_OK" = "yes" ]; then
+        sync_dns_firewall "yes" "keep" >/dev/null 2>&1 || true
         reload_singbox_api
         echo "---------------------------------------------------------------"
         echo "${C_GRN}[✓] ${ACTION_TITLE}: УСПЕШНО (Sing-Box ЗАПУЩЕН | singbox-tun АКТИВЕН)${C_RES}"
@@ -1875,8 +1976,17 @@ inspect_domain_route() {
         echo " • Списки пользователя: ${C_DIM}Не числится (маршрутизируется по базам .srs)${C_RES}"
     fi
 
-    # 2. DNS-резолв через AdGuard Home -> Sing-Box
-    RESOLVED_IP=$(nslookup "$CLEAN_HOST" 127.0.0.1 2>/dev/null | awk '/^Name:/ {f=1; next} f && /Address/ {for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {print $i; exit}}')
+    # 2. DNS-резолв через AdGuard Home -> Sing-Box (совместимо с BusyBox 1.36/1.37 OpenWrt 25.x и Alpine 3.24)
+    RESOLVED_IP=$(nslookup "$CLEAN_HOST" 127.0.0.1 2>/dev/null | awk '
+        /^Server:/ { next }
+        /^Address.*127\.0\.0\.1/ { next }
+        /^Name:|^Non-authoritative answer:/ { f=1; next }
+        f && /Address/ {
+            for (i=1; i<=NF; i++) {
+                if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; exit }
+            }
+        }
+    ')
     case "$RESOLVED_IP" in
         0.0.0.0|127.0.0.1)
             echo " • Вердикт DNS (:53):   ${C_RED}ЗАБЛОКИРОВАН фильтром рекламы AdGuard Home (${RESOLVED_IP})!${C_RES}"
@@ -2404,11 +2514,18 @@ disable_watchdog() {
     return 0
 }
 
-# Фоновая проверка здоровья служб и ротация логов (Watchdog Auto-Healer)
+# Фоновая проверка здоровья служб и ротация логов (Watchdog Auto-Healer с защитой от гонки с autoupdate)
 run_watchdog() {
+    set +e
+    acquire_gateway_lock "watchdog" || return 0
+    trap 'release_gateway_lock' EXIT INT TERM HUP
     detect_os
     rotate_gateway_logs
-    [ -f "$SB_CONF" ] || return 0
+    if [ ! -f "$SB_CONF" ]; then
+        release_gateway_lock
+        trap - EXIT INT TERM HUP
+        return 0
+    fi
     ensure_alpine_modules
     RECOVERED_MSG=""
     if ! pgrep sing-box >/dev/null 2>&1 || ! ip link show singbox-tun >/dev/null 2>&1; then
@@ -2426,11 +2543,21 @@ run_watchdog() {
     if [ -n "$RECOVERED_MSG" ]; then
         send_telegram_msg "$RECOVERED_MSG" >/dev/null 2>&1 || true
     fi
+    release_gateway_lock
+    trap - EXIT INT TERM HUP
     return 0
 }
 
-# Фоновая задача автообновления для cron
+# Фоновая задача автообновления для cron (с эксклюзивной блокировкой против гонки с Watchdog в 04:00)
 run_autoupdate() {
+    set +e
+    WAIT_LCK=0
+    while ! acquire_gateway_lock "autoupdate"; do
+        sleep 1
+        WAIT_LCK=$((WAIT_LCK + 1))
+        [ "$WAIT_LCK" -ge 15 ] && break
+    done
+    trap 'release_gateway_lock' EXIT INT TERM HUP
     detect_os
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Запуск автообновления шлюза (${OS_NAME}) ==="
     update_cores_only "yes"
@@ -2444,6 +2571,8 @@ run_autoupdate() {
     rotate_gateway_logs
     send_telegram_msg "🔄 [Автообновление 04:00] Шлюз (${OS_NAME} | $(get_current_lan_ip)) проверил обновления. Текущие версии: Sing-Box ${LATEST_SB_TAG}, AdGuard ${LATEST_AGH_TAG}." >/dev/null 2>&1 || true
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Автообновление завершено ==="
+    release_gateway_lock
+    trap - EXIT INT TERM HUP
     return 0
 }
 
@@ -2684,9 +2813,9 @@ init_user_lists() {
     return 0
 }
 
-# Безопасное разделение нескольких URI-ключей без повреждения alpn=h2,http/1.1 и пробелов в #Названии
+# Безопасное разделение нескольких URI-ключей (включая протоколы sing-box-extended 2026: trusttunnel, sudoku, call, naive, snell, openvpn, ssh)
 format_uri_keys() {
-    printf "%s\n" "$1" | tr -d '\r' | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|hysteria|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
+    printf "%s\n" "$1" | tr -d '\r' | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|hysteria|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5|trusttunnel|sudoku|call|naive\+https|naive\+quic|naive|snell|openvpn|ssh):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
     return 0
 }
 # ==================== [ КОНЕЦ ЧАСТИ 3 ИЗ 4 ] =====================
@@ -2880,9 +3009,23 @@ generate_amnezia_warp() {
     EP4_IP="${EP4%:*}"; EP4_PORT="${EP4#*:}"
 
     RAND_BYTE=$(od -An -N1 -tu1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "5")
-    AWG_JC=$(( (RAND_BYTE % 4) + 4 ))
+    AWG_JC1=$(( (RAND_BYTE % 4) + 3 ))
+    AWG_JC2=$(( ((RAND_BYTE + 1) % 4) + 4 ))
+    AWG_JC3=$(( ((RAND_BYTE + 2) % 4) + 3 ))
+    AWG_JC4=$(( ((RAND_BYTE + 3) % 4) + 5 ))
 
-    cat << WARP_EOF > "$WARP_NODES_FILE"
+    # Полиморфная генерация CPS-сигнатур i1 (устраняет статический отпечаток Issue #2857 на ТСПУ)
+    HEX_R1=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "a1b2c3d4")
+    HEX_R2=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "e5f60718")
+    HEX_R3=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "99887766")
+    HEX_R4=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "55443322")
+
+    AWG_I1_1="<b 0xc70000000108${HEX_R1}00><r 16><t>"
+    AWG_I1_2="<b 0xc30000000108${HEX_R2}00><r 24><t>"
+    AWG_I1_3="<r 2><b 0x818000010001000000000361706905647a656e0272750000010001c00c000100010000003c0004${HEX_R3}>"
+    AWG_I1_4="<b 0xcb0000000108${HEX_R4}00><t><r 20>"
+
+    cat << WARP_EOF > "${WARP_NODES_FILE}.tmp.$$"
 {
   "outbounds": [
     {
@@ -2904,16 +3047,16 @@ generate_amnezia_warp() {
         }
       ],
       "amnezia": {
-        "jc": ${AWG_JC},
-        "jmin": 40,
-        "jmax": 70,
+        "jc": ${AWG_JC1},
+        "jmin": 36,
+        "jmax": 68,
         "s1": 0,
         "s2": 0,
         "h1": 1,
         "h2": 2,
         "h3": 3,
         "h4": 4,
-        "i1": "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
+        "i1": "${AWG_I1_1}"
       }
     },
     {
@@ -2935,16 +3078,16 @@ generate_amnezia_warp() {
         }
       ],
       "amnezia": {
-        "jc": ${AWG_JC},
-        "jmin": 40,
-        "jmax": 70,
+        "jc": ${AWG_JC2},
+        "jmin": 42,
+        "jmax": 76,
         "s1": 0,
         "s2": 0,
         "h1": 1,
         "h2": 2,
         "h3": 3,
         "h4": 4,
-        "i1": "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
+        "i1": "${AWG_I1_2}"
       }
     },
     {
@@ -2966,16 +3109,16 @@ generate_amnezia_warp() {
         }
       ],
       "amnezia": {
-        "jc": ${AWG_JC},
-        "jmin": 40,
-        "jmax": 70,
+        "jc": ${AWG_JC3},
+        "jmin": 38,
+        "jmax": 72,
         "s1": 0,
         "s2": 0,
         "h1": 1,
         "h2": 2,
         "h3": 3,
         "h4": 4,
-        "i1": "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
+        "i1": "${AWG_I1_3}"
       }
     },
     {
@@ -2997,16 +3140,16 @@ generate_amnezia_warp() {
         }
       ],
       "amnezia": {
-        "jc": ${AWG_JC},
-        "jmin": 40,
-        "jmax": 70,
+        "jc": ${AWG_JC4},
+        "jmin": 44,
+        "jmax": 82,
         "s1": 0,
         "s2": 0,
         "h1": 1,
         "h2": 2,
         "h3": 3,
         "h4": 4,
-        "i1": "<r 2><b 0x8580000100010000000004796162730679616e6465780272750000010001c00c000100010000026d000457fa27d1>"
+        "i1": "${AWG_I1_4}"
       }
     }
   ],
@@ -3014,6 +3157,7 @@ generate_amnezia_warp() {
     "type": "masque",
     "tag": "☁️ WARP MASQUE (TCP/H2)",
     "use_http2": true,
+    "use_l4_proxy": false,
     "use_ipv6": false,
     "profile": {
       "detour": "DIRECT",
@@ -3026,16 +3170,20 @@ generate_amnezia_warp() {
     "udp_timeout": "5m0s",
     "udp_keepalive_period": "30s",
     "reconnect_delay": "5s",
+    "handshake_timeout": "10s",
     "congestion_controller": "bbr",
     "tls": {
-      "server_name": "www.cloudflare.com",
+      "server_name": "",
       "insecure": false,
       "fragment": true,
-      "fragment_fallback_delay": "500ms"
+      "fragment_fallback_delay": "500ms",
+      "record_fragment": true
     }
   }
 }
 WARP_EOF
+    chmod 600 "${WARP_NODES_FILE}.tmp.$$" 2>/dev/null || true
+    mv -f "${WARP_NODES_FILE}.tmp.$$" "$WARP_NODES_FILE"
     chmod 600 "$WARP_NODES_FILE" 2>/dev/null || true
     echo "${C_GRN}[✓] Гибридный пул WARP 2.0 (4 ноды UDP AWG: ${EP1}, ${EP2}, ${EP3}, ${EP4} + 1 нода TCP MASQUE H2) создан!${C_RES}"
     return 0
@@ -3100,7 +3248,7 @@ apply_subscription_input() {
             SUB_URL="$CLEAN_SUB_URL"
             USE_INITIAL_WARP="no"
             ;;
-        vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|hysteria://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|xhttp://*|splithttp://*|socks5://*)
+        vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|hysteria://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|xhttp://*|splithttp://*|socks5://*|trusttunnel://*|sudoku://*|call://*|naive+https://*|naive+quic://*|naive://*|snell://*|openvpn://*|ssh://*)
             sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
             format_uri_keys "$RAW_INPUT" >> "$CUSTOM_NODES_FILE"
             SUB_URL=""
@@ -3139,7 +3287,31 @@ install_zashboard_ui() {
     fi
 }
 
-# Атомарное обновление бинарников Sing-Box Extended, AdGuard Home и Zashboard
+# Криптографическая проверка SHA-256 скачанного архива через GitHub Releases API (защита от подмены на зеркалах gh-proxy)
+verify_github_asset_sha256() {
+    REPO_NAME="$1"
+    ASSET_NAME="$2"
+    LOCAL_FILE="$3"
+    command -v sha256sum >/dev/null 2>&1 || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    REL_JSON=$(curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO_NAME}/releases/latest" 2>/dev/null || true)
+    [ -z "$REL_JSON" ] && return 0
+
+    EXP_DIGEST=$(printf "%s" "$REL_JSON" | jq -r --arg name "$ASSET_NAME" '.assets[]? | select(.name == $name) | .digest // empty' 2>/dev/null | sed 's/^sha256://' | tr -d ' \t\r\n')
+    [ -z "$EXP_DIGEST" ] && return 0
+
+    ACT_DIGEST=$(sha256sum "$LOCAL_FILE" 2>/dev/null | awk '{print $1}' | tr -d ' \t\r\n')
+    if [ -n "$ACT_DIGEST" ] && [ "$ACT_DIGEST" != "$EXP_DIGEST" ]; then
+        echo "${C_RED}[X] КРИТИЧЕСКАЯ ОШИБКА БЕЗОПАСНОСТИ: Несовпадение SHA-256 для ${ASSET_NAME}!${C_RES}" >&2
+        echo "    Ожидался: ${EXP_DIGEST}" >&2
+        echo "    Получен:  ${ACT_DIGEST}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Атомарное обновление бинарников Sing-Box Extended, AdGuard Home и Zashboard (с верификацией SHA-256)
 update_cores_only() {
     CHECK_UI_UPDATE="${1:-no}"
     detect_os
@@ -3161,8 +3333,9 @@ update_cores_only() {
     else
         echo "Загрузка Sing-Box Extended ${SB_TAG} (${SB_ARCH})..."
         rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
-        SB_URL="https://github.com/shtorm-7/sing-box-extended/releases/download/${SB_TAG}/sing-box-${SB_VER_NO_V}-linux-${SB_ARCH}.tar.gz"
-        if download_file "$SB_URL" "/tmp/sing-box.tar.gz"; then
+        SB_ASSET="sing-box-${SB_VER_NO_V}-linux-${SB_ARCH}.tar.gz"
+        SB_URL="https://github.com/shtorm-7/sing-box-extended/releases/download/${SB_TAG}/${SB_ASSET}"
+        if download_file "$SB_URL" "/tmp/sing-box.tar.gz" && verify_github_asset_sha256 "shtorm-7/sing-box-extended" "$SB_ASSET" "/tmp/sing-box.tar.gz"; then
             mkdir -p /tmp/sb_extract
             if tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb_extract 2>/dev/null; then
                 SB_BIN=$(find /tmp/sb_extract -type f -name "sing-box" | head -n 1)
@@ -3197,8 +3370,9 @@ update_cores_only() {
     else
         echo "Загрузка AdGuard Home ${AGH_TAG}..."
         rm -rf /tmp/agh.tar.gz /tmp/agh_extract
-        AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/${AGH_TAG}/AdGuardHome_linux_${AGH_ARCH}.tar.gz"
-        if download_file "$AGH_URL" "/tmp/agh.tar.gz"; then
+        AGH_ASSET="AdGuardHome_linux_${AGH_ARCH}.tar.gz"
+        AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/${AGH_TAG}/${AGH_ASSET}"
+        if download_file "$AGH_URL" "/tmp/agh.tar.gz" && verify_github_asset_sha256 "AdguardTeam/AdGuardHome" "$AGH_ASSET" "/tmp/agh.tar.gz"; then
             mkdir -p /tmp/agh_extract
             if tar -xzf /tmp/agh.tar.gz -C /tmp/agh_extract 2>/dev/null && [ -f /tmp/agh_extract/AdGuardHome/AdGuardHome ]; then
                 chmod +x /tmp/agh_extract/AdGuardHome/AdGuardHome
