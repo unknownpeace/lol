@@ -4717,20 +4717,36 @@ list_available_external_disks() {
     touch "$EXT_DISK_SCAN_CACHE"
 
     ui_box_top "🔌 ОБНАРУЖЕННЫЕ ВНЕШНИЕ НАКОПИТЕЛИ (Системный диск ${ROOT_DISK} защищен)"
-    lsblk -rnpo NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null | awk \
+    lsblk -P -p -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null | awk \
         -v root_d="$ROOT_DISK" \
         -v cache_f="$EXT_DISK_SCAN_CACHE" \
         -v c_cyn="$C_CYN" -v c_grn="$C_GRN" -v c_yel="$C_YEL" -v c_dim="$C_DIM" -v c_res="$C_RES" '
-        $2 == "part" || $2 == "disk" || $2 == "crypt" {
-            dev = $1; dtype = $2; sz = $3; fs = ($4 != "" ? $4 : "без ФС"); mp = ($5 != "" ? $5 : "не смонтирован")
-            model = ""
-            for (i=6; i<=NF; i++) model = model (i>6 ? " " : "") $i
-            gsub(/\\x20/, " ", model)
+        function get_val(line, key,    s, res_str) {
+            s = key "=\""
+            if (index(line, s) > 0) {
+                res_str = substr(line, index(line, s) + length(s))
+                sub(/".*$/, "", res_str)
+                return res_str
+            }
+            return ""
+        }
+        {
+            dev = get_val($0, "NAME")
+            dtype = get_val($0, "TYPE")
+            sz = get_val($0, "SIZE")
+            fs = get_val($0, "FSTYPE")
+            mp = get_val($0, "MOUNTPOINT")
+            model = get_val($0, "MODEL")
+            sub(/[[:space:]]+$/, "", model)
+
+            if (dtype != "part" && dtype != "disk" && dtype != "crypt") next
             if (dev == root_d || index(dev, root_d "p") == 1 || index(dev, root_d "1") == 1 || index(dev, root_d "2") == 1 || index(dev, root_d "3") == 1 || index(dev, root_d "4") == 1) next
             if (mp == "/" || mp == "/boot" || mp == "/var" || mp == "[SWAP]") next
+
             idx++
-            tag = (fs == "crypto_LUKS") ? c_yel "[◆ LUKS2 Зашифрован]" c_res : c_grn "[● " fs "]" c_res
-            printf "%s│%s  %s[%d]%s %-18s │ %-5s │ %-7s │ %-22s │ Точка: %-15s %s\n", c_cyn, c_res, c_cyn, idx, c_res, dev, dtype, sz, tag, mp, model
+            tag = (fs == "crypto_LUKS") ? c_yel "[◆ LUKS2 Зашифрован]" c_res : (fs != "" ? c_grn "[● " fs "]" c_res : c_dim "[без ФС]" c_res)
+            mp_str = (mp != "" ? mp : "не смонтирован")
+            printf "%s│%s  %s[%d]%s %-18s │ %-5s │ %-7s │ %-22s │ Точка: %-15s %s\n", c_cyn, c_res, c_cyn, idx, c_res, dev, dtype, sz, tag, mp_str, model
             print dev > cache_f
         }
         END {
