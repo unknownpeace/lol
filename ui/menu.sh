@@ -199,7 +199,7 @@ show_menu() {
         clear
         ui_banner "UNIVERSAL SIDECAR GATEWAY & HOMELAB // ALPINE LINUX EDITION"
         print_gateway_header
-        ui_box_top "🎛️ ГЛАВНОЕ МЕНЮ УПРАВЛЕНИЯ СЕРВЕРОМ [0-15 / u / d]"
+        ui_box_top "🎛️ ГЛАВНОЕ МЕНЮ УПРАВЛЕНИЯ СЕРВЕРОМ [0-16 / u / d]"
         ui_box_row "${C_CYN}1)${C_RES}  📊 Статус служб, матрица пинга и рентген сайтов (Self-Test 2.0)"
         ui_box_row "${C_CYN}2)${C_RES}  🌐 Управление прокси: Подписки / Ключи / WARP + ${C_GRN}⚡ SSH-пульт нод${C_RES}"
         ui_box_row "${C_CYN}3)${C_RES}  🔄 Полное обновление: скрипт шлюза (Git) + ядра (Sing-Box, AGH) + Homelab"
@@ -213,12 +213,13 @@ show_menu() {
         ui_box_row "${C_CYN}11)${C_RES} 🛡️  Аппаратный Kill-Switch (защита от утечек при падении Sing-Box)"
         ui_box_row "${C_CYN}12)${C_RES} 🖧  Сетевые настройки: IP сервера / роутера + Умный DHCP Sidecar"
         ui_box_row "${C_CYN}13)${C_RES} ${C_GRN}🏠 Управление домашним сервером (Homelab & Media Stack + Диски LUKS2)${C_RES}"
-        ui_box_row "${C_CYN}14)${C_RES} ${C_YEL}🩺 Авто-Доктор одной кнопкой (gateway doctor — починка сети, БД и диска)${C_RES}"
-        ui_box_row "${C_CYN}15)${C_RES} ${C_CYN}⚡ Безопасное выключение / перезагрузка сервера или разблокировка LUKS2${C_RES}"
+        ui_box_row "${C_CYN}14)${C_RES} ${C_MAG}📦 Управление контейнерами LXC (Alpine, Debian, Ubuntu, Снапшоты)${C_RES}"
+        ui_box_row "${C_CYN}15)${C_RES} ${C_YEL}🩺 Авто-Доктор одной кнопкой (gateway doctor — починка сети, БД и диска)${C_RES}"
+        ui_box_row "${C_CYN}16)${C_RES} ${C_CYN}⚡ Безопасное выключение / перезагрузка сервера или разблокировка LUKS2${C_RES}"
         ui_box_row "${C_CYN}u)${C_RES}  🔗 Показать все веб-ссылки (https://*.lan), сетевые папки и доступы"
         ui_box_row "${C_CYN}0)${C_RES}  Выход"
         ui_box_bottom
-        printf "Выберите действие [0-15 / u]: "
+        printf "Выберите действие [0-16 / u]: "
         read -r CHOICE < /dev/tty || true
 
         case "$CHOICE" in
@@ -228,13 +229,16 @@ show_menu() {
                 printf "\nНажмите Enter для возврата в меню..."
                 read -r _ < /dev/tty || true
                 ;;
-            14|d|D)
+            14)
+                lxc_interactive_menu
+                ;;
+            15|d|D)
                 echo ""
                 run_gateway_doctor
                 printf "\nНажмите Enter для возврата в меню..."
                 read -r _ < /dev/tty || true
                 ;;
-            15)
+            16)
                 echo ""
                 ui_box_top "⚡ УПРАВЛЕНИЕ ПИТАНИЕМ И КРИПТОКОНТЕЙНЕРОМ LUKS2"
                 ui_box_row "1) 🔓 Разблокировать и смонтировать внешний диск LUKS2 (gateway unlock)"

@@ -53,6 +53,7 @@ nameserver 77.88.8.8"
     else
         stop_storage_dependent_services
     fi
+    check_and_heal_lxc_doctor
     backup_gateway_state
     ui_ok_msg "Авто-починка (gateway doctor) успешно завершена!"
     ui_box_bottom

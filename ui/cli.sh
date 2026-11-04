@@ -161,6 +161,47 @@ gateway_cli_dispatch() {
             *)                  show_homelab_menu ;;
         esac
         ;;
+    lxc|container|containers)
+        case "${2:-list}" in
+            list|ls)
+                lxc_list_containers
+                ;;
+            create|new)
+                lxc_create_wizard
+                ;;
+            start)
+                lxc_control "start" "${3:-}"
+                ;;
+            stop)
+                lxc_control "stop" "${3:-}"
+                ;;
+            restart)
+                lxc_control "restart" "${3:-}"
+                ;;
+            attach|shell|console|exec)
+                lxc_control "attach" "${3:-}"
+                ;;
+            snap|snapshot|snapshots)
+                lxc_manage_snapshots "${3:-list}" "${4:-}" "${5:-}"
+                ;;
+            autostart)
+                lxc_control "autostart" "${3:-}" "${4:-}"
+                ;;
+            rm|del|delete|destroy)
+                lxc_control "delete" "${3:-}"
+                ;;
+            menu)
+                lxc_interactive_menu
+                ;;
+            doctor|heal)
+                check_and_heal_lxc_doctor
+                ui_ok_msg "Диагностика и автоисцеление LXC завершены."
+                ;;
+            *)
+                echo "Использование: gw lxc [list|create|start|stop|restart|attach|snap|autostart|rm|menu]"
+                ;;
+        esac
+        ;;
     backup)
         case "${2:-create}" in
             create)   create_unified_backup "no" ;;

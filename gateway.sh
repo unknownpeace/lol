@@ -100,6 +100,9 @@ fi
 . "${GATEWAY_DIR}/modules/homelab/dispatch.sh"
 . "${GATEWAY_DIR}/modules/homelab/selftest.sh"
 
+# Загрузка подсистемы контейнеров LXC
+. "${GATEWAY_DIR}/modules/lxc/lxc.sh"
+
 # Загрузка системных утилит, мониторинга и бэкапа
 . "${GATEWAY_DIR}/modules/tools/telegram.sh"
 . "${GATEWAY_DIR}/modules/tools/maintenance.sh"

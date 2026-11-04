@@ -55,10 +55,14 @@ if [ -n "$BASH_VERSION" ]; then
         local cur prev
         cur="${COMP_WORDS[COMP_CWORD]}"
         prev="${COMP_WORDS[COMP_CWORD-1]}"
-        local commands="status test doctor restart reload update autoupdate watchdog check unlock lock eject safe-reboot safe-poweroff logs proxy domain ssl links storage disk homelab backup passwd answers motd help"
+        local commands="status test doctor restart reload update autoupdate watchdog check unlock lock eject safe-reboot safe-poweroff logs proxy domain ssl links storage disk homelab lxc backup passwd answers motd help"
         case "$prev" in
             gateway|gw)
                 COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+                return 0
+                ;;
+            lxc|container|containers)
+                COMPREPLY=($(compgen -W "list create start stop restart attach snap autostart rm menu doctor" -- "$cur"))
                 return 0
                 ;;
             proxy)
