@@ -6,17 +6,28 @@ set -e
 # Точка входа и загрузчик модулей ядра, сети, Sing-Box и Homelab
 # ==============================================================================
 
-# Определение реального каталога расположения шлюза (с поддержкой symlink)
-TARGET="$0"
-while [ -h "$TARGET" ]; do
-    DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
-    TARGET="$(readlink "$TARGET")"
-    case "$TARGET" in
-        /*) ;;
-        *) TARGET="$DIR/$TARGET" ;;
-    esac
-done
-GATEWAY_DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
+# Определение реального каталога расположения шлюза (с поддержкой symlink и source)
+if [ -z "${GATEWAY_DIR:-}" ]; then
+    TARGET="${BASH_SOURCE:-$0}"
+    T_BASE="$(basename "$TARGET" 2>/dev/null || true)"
+    if [ ! -f "$TARGET" ] || [ "$T_BASE" = "sh" ] || [ "$T_BASE" = "ash" ] || [ "$T_BASE" = "-sh" ] || [ "$T_BASE" = "-ash" ]; then
+        for cand in "/opt/gateway/gateway.sh" "/etc/gateway/gateway.sh" "./gateway.sh"; do
+            if [ -f "$cand" ]; then
+                TARGET="$cand"
+                break
+            fi
+        done
+    fi
+    while [ -h "$TARGET" ]; do
+        DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
+        TARGET="$(readlink "$TARGET")"
+        case "$TARGET" in
+            /*) ;;
+            *) TARGET="$DIR/$TARGET" ;;
+        esac
+    done
+    GATEWAY_DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
+fi
 export GATEWAY_DIR
 
 # Автоматическая привязка глобальной команды /usr/bin/gateway (при наличии прав)
