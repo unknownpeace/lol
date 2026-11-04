@@ -22,8 +22,8 @@ fi
 
 # 1.5. Проверка и установка базовых зависимостей
 if command -v apk >/dev/null 2>&1; then
-    echo "[*] Проверка системных пакетов (jq, curl, nftables, ca-certificates)..."
-    apk add --no-cache jq curl nftables ca-certificates >/dev/null 2>&1 || true
+    echo "[*] Проверка системных пакетов (jq, curl, nftables, ca-certificates, git)..."
+    apk add --no-cache jq curl nftables ca-certificates git >/dev/null 2>&1 || true
 fi
 
 # 2. Выставление прав на исполнение
@@ -99,7 +99,7 @@ chmod 644 /etc/profile.d/gateway-completion.sh 2>/dev/null || true
 
 echo "[✓] Глобальные команды зарегистрированы: ${INSTALL_BIN} и /usr/bin/gw"
 echo "[✓] Системный баннер и Tab-автодополнение установлены в /etc/profile.d"
-echo "[*] Теперь вы можете обновлять шлюз в любое время через 'cd ${GATEWAY_DIR} && git pull'."
+echo "[*] Теперь вы можете обновлять шлюз в любое время через 'gw update' или 'cd ${GATEWAY_DIR} && git pull'."
 echo "[*] Запуск шлюза..."
 echo ""
 

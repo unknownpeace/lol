@@ -181,12 +181,13 @@ ensure_alpine_modules() {
     return 0
 }
 
-# Гарантированная проверка и автоустановка критических утилит (jq, curl, nftables, ca-certificates)
+# Гарантированная проверка и автоустановка критических утилит (jq, curl, nftables, ca-certificates, git)
 ensure_core_tools() {
     MISSING_PKGS=""
     command -v jq >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS jq"
     command -v curl >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS curl"
     command -v nft >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS nftables"
+    command -v git >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS git"
     [ -d /etc/ssl/certs ] || MISSING_PKGS="$MISSING_PKGS ca-certificates"
     if [ -n "$MISSING_PKGS" ]; then
         if command -v apk >/dev/null 2>&1; then
