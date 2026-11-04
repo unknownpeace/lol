@@ -40,16 +40,14 @@ gateway_cli_dispatch() {
         fi
         ;;
     update|upgrade)
-        ui_banner "GATEWAY UPDATE // ОБНОВЛЕНИЕ ЯДЕР И МОДУЛЕЙ HOMELAB"
-        update_cores_only "yes"
-        service_ctl sing-box restart
-        service_ctl adguardhome restart
-        if [ -f "$HOMELAB_STATE" ]; then
-            while IFS='|' read -r M_ID M_EN _REST; do
-                case "$M_ID" in ''|\#*) continue ;; esac
-                [ "$M_EN" = "yes" ] && homelab_module_dispatch "$M_ID" "update"
-            done < "$HOMELAB_STATE"
-        fi
+        case "${2:-}" in
+            check|status)
+                self_update_gateway "check"
+                ;;
+            *)
+                self_update_gateway
+                ;;
+        esac
         ;;
     logs|log)
         show_service_logs_cli "${2:-sing-box}" "${3:-45}"

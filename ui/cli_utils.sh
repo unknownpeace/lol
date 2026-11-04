@@ -257,7 +257,7 @@ print_gateway_cli_help() {
     ui_box_row "${C_CYN}gw doctor${C_RES} (или ${C_CYN}gw fix${C_RES})         — Умная авто-починка одной командой (модули, DNS, nftables, БД, диск)"
     ui_box_row "${C_CYN}gw passwd [новый_пароль]${C_RES}   — Ротация единого пароля (Sing-Box, AdGuard, Samba, Vaultwarden)"
     ui_box_row "${C_CYN}gw restart${C_RES}                  — Быстрая пересборка конфига, сброс conntrack и перезапуск шлюза"
-    ui_box_row "${C_CYN}gw update${C_RES}                   — Обновление ядер Sing-Box Extended, AdGuard Home, Zashboard и Homelab"
+    ui_box_row "${C_CYN}gw update${C_RES} (или ${C_CYN}check${C_RES})        — Полное обновление: скрипты Git + ядра Sing-Box/AGH + Homelab"
     ui_box_row "${C_CYN}gw links${C_RES} (или ${C_CYN}gw urls${C_RES})         — Карточка всех веб-адресов https://*.lan, сертификата и шары Samba"
     ui_box_row "${C_CYN}gw logs [служба]${C_RES}            — Живые логи (sing-box|adguard|caddy|vaultwarden|jellyfin|samba|...)"
     ui_box_sep "🤖 АВТОМАТИЧЕСКАЯ УСТАНОВКА И ФАЙЛЫ ОТВЕТОВ (ZERO-TOUCH)"

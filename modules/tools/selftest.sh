@@ -227,6 +227,10 @@ print_gateway_motd() {
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Ядро шлюза:${C_RES}   Sing-Box [%b] │ AdGuard Home (:53) [%b] │ singbox-tun [%b]\n" "$SB_ST" "$AGH_ST" "$TUN_ST"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Homelab:${C_RES}     %s\n" "$HL_SUMMARY"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• SSL / Домен:${C_RES}  %s\n" "$SSL_INFO"
+    UPDATE_BADGE=$(get_gateway_update_badge 2>/dev/null || echo "")
+    if [ -n "$UPDATE_BADGE" ]; then
+        printf "${C_BLU}║${C_RES}  ${C_BLD}• Обновление:${C_RES}   %b\n" "$UPDATE_BADGE"
+    fi
     echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
     echo "${C_BLU}║${C_RES}  ⚡ Быстрая команда: ${C_GRN}${C_BLD}gw${C_RES} │ Меню: ${C_CYN}gateway${C_RES} │ Ссылки: ${C_CYN}gw links${C_RES} │ Доктор: ${C_CYN}gw doctor${C_RES}"
     echo "${C_BLU}╚══════════════════════════════════════════════════════════════════════════════╝${C_RES}"

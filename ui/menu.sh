@@ -202,7 +202,7 @@ show_menu() {
         ui_box_top "🎛️ ГЛАВНОЕ МЕНЮ УПРАВЛЕНИЯ СЕРВЕРОМ [0-15 / u / d]"
         ui_box_row "${C_CYN}1)${C_RES}  📊 Статус служб, матрица пинга и рентген сайтов (Self-Test 2.0)"
         ui_box_row "${C_CYN}2)${C_RES}  🌐 Управление прокси: Подписки / Ключи / WARP + ${C_GRN}⚡ SSH-пульт нод${C_RES}"
-        ui_box_row "${C_CYN}3)${C_RES}  🔄 Обновить ядра Sing-Box Extended, AdGuard Home и Zashboard"
+        ui_box_row "${C_CYN}3)${C_RES}  🔄 Полное обновление: скрипт шлюза (Git) + ядра (Sing-Box, AGH) + Homelab"
         ui_box_row "${C_CYN}4)${C_RES}  ♻️  Перезапустить службы + пересобрать конфиг и сбросить conntrack"
         ui_box_row "${C_CYN}5)${C_RES}  📜 Посмотреть живые логи Sing-Box и служб сервера"
         ui_box_row "${C_CYN}6)${C_RES}  🛠️  Полная перенастройка сервера (Мастер установки)"
@@ -418,11 +418,8 @@ show_menu() {
                 done
                 ;;
             3)
-                ui_box_top "🔄 АТОМАРНОЕ ОБНОВЛЕНИЕ ЯДЕР И ПАНЕЛИ ZASHBOARD"
-                update_cores_only "yes"
-                service_ctl sing-box restart
-                service_ctl adguardhome restart
-                ui_box_bottom
+                echo ""
+                self_update_gateway || true
                 printf "\nНажмите Enter для возврата в меню..."
                 read -r _ < /dev/tty || true
                 ;;

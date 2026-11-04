@@ -81,6 +81,10 @@ if [ -n "$BASH_VERSION" ]; then
                 COMPREPLY=($(compgen -W "create full restore telegram" -- "$cur"))
                 return 0
                 ;;
+            update)
+                COMPREPLY=($(compgen -W "check status" -- "$cur"))
+                return 0
+                ;;
             answers)
                 COMPREPLY=($(compgen -W "template show verify" -- "$cur"))
                 return 0

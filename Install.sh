@@ -2488,6 +2488,165 @@ rotate_gateway_logs() {
     return 0
 }
 
+# ==============================================================================
+# Движок проверки обновлений Git и самообновления всего комплекса Gateway
+# ==============================================================================
+
+# Проверка наличия обновлений в Git-репозитории шлюза (с кэшированием на 2 часа для нулевых задержек)
+check_gateway_repo_updates() {
+    FORCE_CHK="${1:-no}"
+    CACHE_F="/tmp/gateway_update_check.cache"
+    NOW_TS=$(date +%s 2>/dev/null || echo 0)
+
+    if [ "$FORCE_CHK" != "force" ] && [ -f "$CACHE_F" ]; then
+        IFS='|' read -r C_STAT C_BEHIND C_REM C_TIME < "$CACHE_F" 2>/dev/null || true
+        AGE=$(( NOW_TS - ${C_TIME:-0} ))
+        if [ "$AGE" -ge 0 ] && [ "$AGE" -lt 7200 ]; then
+            [ "$C_STAT" = "UPDATE_AVAILABLE" ] && return 0 || return 1
+        fi
+    fi
+
+    if [ ! -d "${GATEWAY_DIR}/.git" ] || ! command -v git >/dev/null 2>&1; then
+        echo "NO_GIT|0||${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
+        return 1
+    fi
+
+    # Быстрый fetch с таймаутом без блокировки консоли
+    if ! git -C "${GATEWAY_DIR}" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=4 fetch --quiet origin main >/dev/null 2>&1; then
+        return 1
+    fi
+
+    LOCAL_H=$(git -C "${GATEWAY_DIR}" rev-parse HEAD 2>/dev/null || true)
+    REMOTE_H=$(git -C "${GATEWAY_DIR}" rev-parse origin/main 2>/dev/null || true)
+
+    if [ -n "$LOCAL_H" ] && [ -n "$REMOTE_H" ] && [ "$LOCAL_H" != "$REMOTE_H" ]; then
+        BEHIND_CNT=$(git -C "${GATEWAY_DIR}" rev-list --count HEAD..origin/main 2>/dev/null || echo 1)
+        echo "UPDATE_AVAILABLE|${BEHIND_CNT}|${REMOTE_H}|${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
+        return 0
+    else
+        echo "UP_TO_DATE|0|${LOCAL_H}|${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
+        return 1
+    fi
+}
+
+# Получение компактного статуса версии для баннера MOTD и шапки меню
+get_gateway_update_badge() {
+    if check_gateway_repo_updates "no"; then
+        B_CNT=$(awk -F'|' '{print $2}' /tmp/gateway_update_check.cache 2>/dev/null || echo 1)
+        printf "%b" "${C_YEL}🔔 Доступно обновление (${B_CNT} комм.) ➔ gw update${C_RES}"
+    else
+        if [ -d "${GATEWAY_DIR}/.git" ] && command -v git >/dev/null 2>&1; then
+            CUR_SHORT=$(git -C "${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo "main")
+            printf "%b" "${C_GRN}v2026.11 (${CUR_SHORT}) [актуальна ●]${C_RES}"
+        else
+            printf "%b" "${C_GRN}v2026.11 (Standalone) [актуальна ●]${C_RES}"
+        fi
+    fi
+}
+
+# Полное атомарное самообновление: Git-репозиторий + ядра + модули Homelab
+self_update_gateway() {
+    SU_MODE="${1:-}"
+
+    if [ "$SU_MODE" = "check" ] || [ "$SU_MODE" = "status" ]; then
+        ui_banner "GATEWAY UPDATE // ПРОВЕРКА ОБНОВЛЕНИЙ ИЗ GIT"
+        ui_step_progress 1 1 "Связь с удаленным Git-репозиторием..."
+        if check_gateway_repo_updates "force"; then
+            B_CNT=$(awk -F'|' '{print $2}' /tmp/gateway_update_check.cache 2>/dev/null || echo 1)
+            ui_box_top "🔔 ДОСТУПНА НОВАЯ ВЕРСИЯ ШЛЮЗА (новых коммитов: ${B_CNT})"
+            git -C "${GATEWAY_DIR}" log --oneline -n 5 HEAD..origin/main 2>/dev/null | while read -r line; do
+                ui_box_row "  • ${line}"
+            done
+            ui_box_bottom
+            echo "Для установки обновления выполните: ${C_CYN}gw update${C_RES}"
+        else
+            CUR_H=$(git -C "${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo "HEAD")
+            ui_ok_msg "У вас установлена последняя версия Gateway (${CUR_H}), обновлений нет."
+        fi
+        return 0
+    fi
+
+    ui_banner "GATEWAY UPDATE // ПОЛНОЕ ОБНОВЛЕНИЕ ШЛЮЗА, ЯДЕР И HOMELAB"
+
+    # 1. Обновление кодовой базы из Git
+    UPDATED_REPO="no"
+    if [ -d "${GATEWAY_DIR}/.git" ] && command -v git >/dev/null 2>&1; then
+        ui_step_progress 1 5 "Загрузка обновлений скриптов шлюза из Git-репозитория..."
+        cd "${GATEWAY_DIR}"
+        if git fetch --quiet origin main 2>/dev/null; then
+            LOC_H=$(git rev-parse HEAD 2>/dev/null || true)
+            REM_H=$(git rev-parse origin/main 2>/dev/null || true)
+            if [ -n "$LOC_H" ] && [ -n "$REM_H" ] && [ "$LOC_H" != "$REM_H" ]; then
+                ui_info_msg "Обнаружены новые изменения. Применение (git pull)..."
+                if git pull --ff-only origin main 2>/dev/null || git pull origin main 2>/dev/null; then
+                    UPDATED_REPO="yes"
+                    ui_ok_msg "Кодовая база шлюза успешно обновлена до $(git rev-parse --short HEAD 2>/dev/null)!"
+                else
+                    ui_warn_box "Не удалось автоматически слить изменения Git (возможен локальный конфликт)." \
+                                "Проверьте git status в каталоге ${GATEWAY_DIR}."
+                fi
+            else
+                ui_ok_msg "Скрипты шлюза уже соответствуют последней версии в репозитории."
+            fi
+        else
+            ui_warn_box "Не удалось подключиться к Git-репозиторию." "Продолжаем обновление локальных бинарников и ядер."
+        fi
+        chmod +x "${GATEWAY_DIR}/gateway.sh" "${GATEWAY_DIR}/setup.sh" 2>/dev/null || true
+        [ -d "${GATEWAY_DIR}/scripts" ] && chmod +x "${GATEWAY_DIR}/scripts/"*.sh 2>/dev/null || true
+        ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gateway 2>/dev/null || true
+        ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gw 2>/dev/null || true
+        rm -f /tmp/gateway_update_check.cache 2>/dev/null || true
+    fi
+
+    # 2. Обновление ядер Sing-Box Extended, AdGuard Home и панели Zashboard
+    ui_step_progress 2 5 "Обновление ядер Sing-Box Extended, AdGuard Home и панели Zashboard..."
+    update_cores_only "yes"
+
+    # 3. Обновление активных модулей Homelab
+    ui_step_progress 3 5 "Проверка обновлений для активных модулей Homelab..."
+    if [ -f "$HOMELAB_STATE" ]; then
+        while IFS='|' read -r M_ID M_EN _REST; do
+            case "$M_ID" in ''|\#*) continue ;; esac
+            if [ "$M_EN" = "yes" ]; then
+                homelab_module_dispatch "$M_ID" "update" 2>/dev/null || true
+            fi
+        done < "$HOMELAB_STATE"
+    fi
+
+    # 4. Пересборка конфига, сброс conntrack и перезапуск
+    ui_step_progress 4 5 "Пересборка конфигурации Sing-Box и перезапуск служб..."
+    backup_gateway_state
+    load_gateway_env
+    if apply_and_verify_singbox "Полное обновление шлюза и компонентов"; then
+        conntrack -F >/dev/null 2>&1 || true
+        service_ctl sing-box restart || true
+        service_ctl adguardhome restart || true
+    fi
+
+    # 5. Итоговый отчет о готовности
+    ui_step_progress 5 5 "Верификация состояния обновленной системы..."
+    sleep 2
+    echo ""
+    ui_box_top "🎉 РЕЗУЛЬТАТ ПОЛНОГО ОБНОВЛЕНИЯ СЕРВЕРА"
+    if pgrep sing-box >/dev/null 2>&1 && pgrep AdGuardHome >/dev/null 2>&1; then
+        ui_box_row "${C_GRN}[✔] Все службы шлюза и модули Homelab активны и работают стабильно!${C_RES}"
+    else
+        ui_box_row "${C_YEL}[▲] Некоторые службы перезапускаются или требуют внимания (запустите: gw doctor)${C_RES}"
+    fi
+    ui_box_row "• Версия скриптов: $(git -C "${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'Standalone')"
+    ui_box_row "• Ядро Sing-Box:   $(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || echo 'OK')"
+    ui_box_row "• AdGuard Home:    $(/usr/bin/AdGuardHome --version 2>&1 | sed -n 's/.*version \(v[0-9.a-zA-Z_.-]*\).*/\1/p' | head -n 1 || echo 'OK')"
+    ui_box_bottom
+    echo ""
+
+    if [ "$UPDATED_REPO" = "yes" ]; then
+        ui_info_msg "Процесс шлюза будет перезапущен для применения обновленного кода..."
+        sleep 1
+        exec /usr/bin/gw motd
+    fi
+    return 0
+}
+
 # Активное сканирование всей /24 подсети LAN (прогрев ARP-таблицы за ~1.5 сек)
 scan_lan_subnet() {
     CUR_LAN=$(get_current_lan_ip)
@@ -8811,6 +8970,10 @@ print_gateway_motd() {
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Ядро шлюза:${C_RES}   Sing-Box [%b] │ AdGuard Home (:53) [%b] │ singbox-tun [%b]\n" "$SB_ST" "$AGH_ST" "$TUN_ST"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Homelab:${C_RES}     %s\n" "$HL_SUMMARY"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• SSL / Домен:${C_RES}  %s\n" "$SSL_INFO"
+    UPDATE_BADGE=$(get_gateway_update_badge 2>/dev/null || echo "")
+    if [ -n "$UPDATE_BADGE" ]; then
+        printf "${C_BLU}║${C_RES}  ${C_BLD}• Обновление:${C_RES}   %b\n" "$UPDATE_BADGE"
+    fi
     echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
     echo "${C_BLU}║${C_RES}  ⚡ Быстрая команда: ${C_GRN}${C_BLD}gw${C_RES} │ Меню: ${C_CYN}gateway${C_RES} │ Ссылки: ${C_CYN}gw links${C_RES} │ Доктор: ${C_CYN}gw doctor${C_RES}"
     echo "${C_BLU}╚══════════════════════════════════════════════════════════════════════════════╝${C_RES}"
@@ -9077,7 +9240,7 @@ print_gateway_cli_help() {
     ui_box_row "${C_CYN}gw doctor${C_RES} (или ${C_CYN}gw fix${C_RES})         — Умная авто-починка одной командой (модули, DNS, nftables, БД, диск)"
     ui_box_row "${C_CYN}gw passwd [новый_пароль]${C_RES}   — Ротация единого пароля (Sing-Box, AdGuard, Samba, Vaultwarden)"
     ui_box_row "${C_CYN}gw restart${C_RES}                  — Быстрая пересборка конфига, сброс conntrack и перезапуск шлюза"
-    ui_box_row "${C_CYN}gw update${C_RES}                   — Обновление ядер Sing-Box Extended, AdGuard Home, Zashboard и Homelab"
+    ui_box_row "${C_CYN}gw update${C_RES} (или ${C_CYN}check${C_RES})        — Полное обновление: скрипты Git + ядра Sing-Box/AGH + Homelab"
     ui_box_row "${C_CYN}gw links${C_RES} (или ${C_CYN}gw urls${C_RES})         — Карточка всех веб-адресов https://*.lan, сертификата и шары Samba"
     ui_box_row "${C_CYN}gw logs [служба]${C_RES}            — Живые логи (sing-box|adguard|caddy|vaultwarden|jellyfin|samba|...)"
     ui_box_sep "🤖 АВТОМАТИЧЕСКАЯ УСТАНОВКА И ФАЙЛЫ ОТВЕТОВ (ZERO-TOUCH)"
@@ -9310,7 +9473,7 @@ show_menu() {
         ui_box_top "🎛️ ГЛАВНОЕ МЕНЮ УПРАВЛЕНИЯ СЕРВЕРОМ [0-15 / u / d]"
         ui_box_row "${C_CYN}1)${C_RES}  📊 Статус служб, матрица пинга и рентген сайтов (Self-Test 2.0)"
         ui_box_row "${C_CYN}2)${C_RES}  🌐 Управление прокси: Подписки / Ключи / WARP + ${C_GRN}⚡ SSH-пульт нод${C_RES}"
-        ui_box_row "${C_CYN}3)${C_RES}  🔄 Обновить ядра Sing-Box Extended, AdGuard Home и Zashboard"
+        ui_box_row "${C_CYN}3)${C_RES}  🔄 Полное обновление: скрипт шлюза (Git) + ядра (Sing-Box, AGH) + Homelab"
         ui_box_row "${C_CYN}4)${C_RES}  ♻️  Перезапустить службы + пересобрать конфиг и сбросить conntrack"
         ui_box_row "${C_CYN}5)${C_RES}  📜 Посмотреть живые логи Sing-Box и служб сервера"
         ui_box_row "${C_CYN}6)${C_RES}  🛠️  Полная перенастройка сервера (Мастер установки)"
@@ -9526,11 +9689,8 @@ show_menu() {
                 done
                 ;;
             3)
-                ui_box_top "🔄 АТОМАРНОЕ ОБНОВЛЕНИЕ ЯДЕР И ПАНЕЛИ ZASHBOARD"
-                update_cores_only "yes"
-                service_ctl sing-box restart
-                service_ctl adguardhome restart
-                ui_box_bottom
+                echo ""
+                self_update_gateway || true
                 printf "\nНажмите Enter для возврата в меню..."
                 read -r _ < /dev/tty || true
                 ;;
@@ -10004,16 +10164,14 @@ gateway_cli_dispatch() {
         fi
         ;;
     update|upgrade)
-        ui_banner "GATEWAY UPDATE // ОБНОВЛЕНИЕ ЯДЕР И МОДУЛЕЙ HOMELAB"
-        update_cores_only "yes"
-        service_ctl sing-box restart
-        service_ctl adguardhome restart
-        if [ -f "$HOMELAB_STATE" ]; then
-            while IFS='|' read -r M_ID M_EN _REST; do
-                case "$M_ID" in ''|\#*) continue ;; esac
-                [ "$M_EN" = "yes" ] && homelab_module_dispatch "$M_ID" "update"
-            done < "$HOMELAB_STATE"
-        fi
+        case "${2:-}" in
+            check|status)
+                self_update_gateway "check"
+                ;;
+            *)
+                self_update_gateway
+                ;;
+        esac
         ;;
     logs|log)
         show_service_logs_cli "${2:-sing-box}" "${3:-45}"
