@@ -7766,16 +7766,22 @@ create_unified_backup() {
 }
 
 restore_unified_backup() {
-    if [ ! -f "$BACKUP_ARCHIVE" ]; then
-        echo "${C_RED}[X] Файл бэкапа ${BACKUP_ARCHIVE} не найден!${C_RES}"
+    TARGET_BAK="${1:-$BACKUP_ARCHIVE}"
+    if [ ! -f "$TARGET_BAK" ] && [ -f "${STORAGE_BACKUPS:-/srv/storage/Backups}/gateway_backup_latest.tar.gz" ]; then
+        TARGET_BAK="${STORAGE_BACKUPS:-/srv/storage/Backups}/gateway_backup_latest.tar.gz"
+        echo "${C_CYN}[*] Найден бэкап на внешнем накопителе: ${TARGET_BAK}${C_RES}"
+    fi
+
+    if [ ! -f "$TARGET_BAK" ]; then
+        echo "${C_RED}[X] Файл бэкапа ${TARGET_BAK} не найден!${C_RES}"
         return 1
     fi
-    if ! tar -tzf "$BACKUP_ARCHIVE" >/dev/null 2>&1; then
-        echo "${C_RED}[X] Ошибка: Архив ${BACKUP_ARCHIVE} поврежден!${C_RES}"
+    if ! tar -tzf "$TARGET_BAK" >/dev/null 2>&1; then
+        echo "${C_RED}[X] Ошибка: Архив ${TARGET_BAK} поврежден!${C_RES}"
         return 1
     fi
 
-    echo "${C_CYN}[*] Восстановление конфигурации шлюза и сервисов Homelab из ${BACKUP_ARCHIVE}...${C_RES}"
+    echo "${C_CYN}[*] Восстановление конфигурации шлюза и сервисов Homelab из ${TARGET_BAK}...${C_RES}"
     service_ctl sing-box stop
     service_ctl adguardhome stop
     if [ -f "$HOMELAB_STATE" ]; then
@@ -7786,7 +7792,7 @@ restore_unified_backup() {
     fi
     rm -f /etc/sing-box/cache.db 2>/dev/null || true
 
-    tar -xzf "$BACKUP_ARCHIVE" -C / 2>/dev/null || true
+    tar -xzf "$TARGET_BAK" -C / 2>/dev/null || true
 
     # Восстановление консистентных SQLite-дампов поверх распакованных баз
     STAGE_RESTORE="/var/lib/gateway_backup_stage/sqlite_dumps"
@@ -7815,8 +7821,8 @@ restore_unified_backup() {
 
     load_gateway_env
     sync_all_homelab_permissions >/dev/null 2>&1 || true
-    sync_user_domain_rulesets
-    sync_dns_firewall "yes" "keep"
+    sync_user_domain_rulesets >/dev/null 2>&1 || true
+    sync_dns_firewall "yes" "keep" >/dev/null 2>&1 || true
     service_ctl sing-box start || true
     service_ctl adguardhome start || true
 
@@ -7830,7 +7836,7 @@ restore_unified_backup() {
             fi
         done < "$HOMELAB_STATE"
     fi
-    build_pki_portal
+    build_pki_portal >/dev/null 2>&1 || true
     echo "${C_GRN}[✓] Система (Шлюз + Homelab + БД SQLite + локальный CA Caddy) успешно восстановлена!${C_RES}"
     return 0
 }
