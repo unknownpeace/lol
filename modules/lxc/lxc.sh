@@ -146,12 +146,12 @@ lxc_list_containers() {
 
         # Цветовая подсветка
         if [ "$STATE" = "RUNNING" ]; then
-            STATE_FMT="${C_GRN}● RUNNING${C_RES}"
+            STATE_FMT="${C_GRN}● RUNNING${C_RES} "
         else
-            STATE_FMT="${C_DGR}○ STOPPED${C_RES}"
+            STATE_FMT="${C_DGR}○ STOPPED${C_RES} "
         fi
 
-        printf "  %-16s %-21b %-16s %-10s %-8s %-10s\n" \
+        printf "  %-16s %b %-16s %-10s %-8s %-10s\n" \
                "$CT_NAME" "$STATE_FMT" "$IPV4" "$MEM_USE" "$AUTO_VAL" "${SNAPS_COUNT} шт."
     done
 
