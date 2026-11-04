@@ -258,5 +258,44 @@ disable_apache_daemon() {
     return 0
 }
 
+# Универсальное управление системными службами (OpenRC / systemd)
+service_ctl() {
+    SVC_NAME="$1"
+    SVC_ACT="$2"
+    [ "$SVC_NAME" = "cron" ] && SVC_NAME="crond"
+
+    case "$SVC_ACT" in
+        enable)
+            rc-update add "$SVC_NAME" default >/dev/null 2>&1 || true
+            return 0
+            ;;
+        disable)
+            rc-update del "$SVC_NAME" default >/dev/null 2>&1 || true
+            return 0
+            ;;
+        stop)
+            rc-service "$SVC_NAME" stop >/dev/null 2>&1 || "/etc/init.d/${SVC_NAME}" stop >/dev/null 2>&1 || true
+            return 0
+            ;;
+        reload)
+            if rc-service "$SVC_NAME" reload >/dev/null 2>&1 || rc-service "$SVC_NAME" restart >/dev/null 2>&1; then
+                return 0
+            fi
+            "/etc/init.d/${SVC_NAME}" restart >/dev/null 2>&1 || return 1
+            return 0
+            ;;
+        status)
+            rc-service "$SVC_NAME" status >/dev/null 2>&1 || "/etc/init.d/${SVC_NAME}" status >/dev/null 2>&1
+            return $?
+            ;;
+        *)
+            if rc-service "$SVC_NAME" "$SVC_ACT" >/dev/null 2>&1 || "/etc/init.d/${SVC_NAME}" "$SVC_ACT" >/dev/null 2>&1; then
+                return 0
+            fi
+            return 1
+            ;;
+    esac
+}
+
 
 # Проверка валидности конфигурации sing-box-extended
