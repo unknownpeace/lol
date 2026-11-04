@@ -13,29 +13,82 @@
 
 🔗 **Прямая ссылка на скрипт в репозитории:** [`setup_gateway.sh`](https://raw.githubusercontent.com/unknownpeace/lol/refs/heads/main/setup_gateway.sh)
 
-## ⚡ Быстрая установка (в одну строку)
+## ⚡ Быстрая установка
 
-Подключитесь к вашему устройству по SSH (`root`) и выполните одну из команд ниже. Скрипт автоматически синхронизирует системные часы (даже на платах без батарейки RTC при сбитом годе), проверит зависимости через `apk`, зарегистрирует системную команду **`gateway`** и запустит интерактивный мастер настройки шлюза и модулей Homelab.
+Подключитесь к вашему устройству по SSH (`root`) и выполните одну из команд ниже. Скрипт автоматически проверит зависимости через `apk`, зарегистрирует системную команду **`gateway`** и запустит интерактивный мастер настройки шлюза и модулей Homelab.
 
-### Вариант 1: Через `wget` (работает из коробки на чистой Alpine 3.x и OpenWrt 25.x)
+### Вариант 1 (Рекомендуемый): Установка через Git (Модульная версия с простым обновлением)
+```sh
+apk add --no-cache git
+git clone https://forgejo.lan/neko/Gateway.git /opt/gateway
+cd /opt/gateway
+./setup.sh
+```
+> 🔄 **Обновление в будущем:** в любой момент выполняйте `cd /opt/gateway && git pull && gateway reload`.
+
+### Вариант 2: Автономный установщик в одну строчку через `wget`
 ```sh
 wget -O /tmp/install.sh "https://forgejo.lan/neko/Gateway/raw/branch/main/Install.sh" && chmod +x /tmp/install.sh && /tmp/install.sh
 ```
 
-### Вариант 2: Через `curl` (с защитой от фрагментации TLS 1.3 Post-Quantum Kyber/ML-KEM на ТСПУ)
+### Вариант 3: Через `curl` (с защитой от фрагментации TLS 1.3 на ТСПУ)
 ```sh
 curl -fsSL --curves X25519:P-256 "https://raw.githubusercontent.com/unknownpeace/lol/refs/heads/main/setup_gateway.sh" -o /tmp/setup_gateway.sh && chmod +x /tmp/setup_gateway.sh && /tmp/setup_gateway.sh
 ```
 
-### Вариант 3: Через каскадное зеркало GitHub (если провайдер режет `raw.githubusercontent.com`)
+### Вариант 4: Через каскадное зеркало GitHub (если провайдер режет `raw.githubusercontent.com`)
 ```sh
 wget -O /tmp/setup_gateway.sh "https://gh-proxy.com/https://raw.githubusercontent.com/unknownpeace/lol/refs/heads/main/setup_gateway.sh" && chmod +x /tmp/setup_gateway.sh && /tmp/setup_gateway.sh
 ```
 
-> 💡 После первой установки вызывать интерактивную панель управления шлюзом и домашним сервером из терминала можно в любой момент одной командой:
+> 💡 После установки вызывать панель управления шлюзом и домашним сервером из терминала можно в любой момент командой:
 > ```sh
 > gateway
 > ```
+
+---
+
+## 🧩 Модульная архитектура проекта
+
+Репозиторий разделен на изолированные компоненты по принципу единой ответственности:
+
+```text
+Gateway/
+├── gateway.sh                  # Точка входа и оркестратор модулей
+├── setup.sh                    # Быстрая установка симлинка /usr/bin/gateway из Git
+├── Install.sh                  # Автономный монолитный скрипт (для curl/wget в одну строку)
+├── config/                     # Примеры и шаблоны переменных окружения
+│   ├── gateway.env.example     # Сеть, Sing-Box, подписки, ключи
+│   └── homelab.env.example     # Хранилище, Samba, параметры сервисов
+├── lib/                        # Базовые библиотеки ядра
+│   ├── constants.sh            # Глобальные пути и переменные
+│   ├── ui.sh                   # ASCII-интерфейс, неоновые цвета, прогресс-бары
+│   ├── core.sh                 # Атомарная запись конфигов, локи, детекция ОС
+│   ├── env.sh                  # Валидаторы и флаги окружения
+│   ├── env_store.sh            # Загрузка и сохранение параметров .env
+│   └── metrics.sh              # Метрики RAM, диска, защита от сбоев питания
+├── modules/                    # Изолированные сервисные модули
+│   ├── network/                # nftables, TProxy, Smart DHCP (dnsmasq), сканер LAN
+│   ├── singbox/                # Генератор config.json, подписки, WARP, ноды, диагностика
+│   ├── adguard/                # AdGuard Home: интеграция rewrites (*.lan) и DNS
+│   ├── storage/                # LUKS2 шифрование, ext4/btrfs, монтирование, перенос данных
+│   ├── caddy/                  # Caddy HTTPS, локальный Root CA PKI, домены *.lan
+│   ├── samba/                  # Файловый сервер SMB3, wsdd (Windows 11), avahi
+│   ├── homelab/                # Реестр модулей и прикладные сервисы:
+│   │   ├── services/           # Отдельный установщик под каждый сервис (Vaultwarden,
+│   │   │                       # Forgejo, Code-Server, Navidrome, Jellyfin, yt-dlp, qBittorrent)
+│   │   ├── advisor.sh          # Советник по архитектуре медиатеки
+│   │   └── selftest.sh         # Сводная таблица демонов OpenRC
+│   └── tools/                  # Бэкап, Telegram-бот, Watchdog, Доктор шлюза
+├── ui/                         # TUI интерфейс
+│   ├── wizard.sh               # Мастер первоначальной настройки
+│   ├── menu.sh                 # Главное меню и подменю Homelab
+│   ├── cli.sh                  # Маршрутизатор CLI команд (`gateway <cmd>`)
+│   └── cli_utils.sh            # Логи, добавление прокси/доменов из консоли
+└── scripts/
+    ├── bundle.sh               # Сборщик модулей в автономный Install.sh (sh)
+    └── bundle.py               # Кроссплатформенный Python-сборщик
+```
 
 ## 🛡️ Архитектура шлюза под реалии РФ (Ноябрь 2026): чем эта сборка превосходит аналоги
 

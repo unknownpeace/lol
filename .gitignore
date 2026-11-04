@@ -1,0 +1,17 @@
+# Temporary runtime files & caches
+*.tmp
+*.bak
+*.cache
+*.lock
+.last_good_state
+.power_loss_recovered
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
