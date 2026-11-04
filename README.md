@@ -19,7 +19,7 @@
 
 ### Вариант 1: Через `wget` (работает из коробки на чистой Alpine 3.x и OpenWrt 25.x)
 ```sh
-wget -O /tmp/setup_gateway.sh "https://raw.githubusercontent.com/unknownpeace/lol/refs/heads/main/setup_gateway.sh" && chmod +x /tmp/setup_gateway.sh && /tmp/setup_gateway.sh
+wget -O /tmp/install.sh "https://forgejo.lan/neko/Gateway/raw/branch/main/Install.sh" && chmod +x /tmp/install.sh && /tmp/install.sh
 ```
 
 ### Вариант 2: Через `curl` (с защитой от фрагментации TLS 1.3 Post-Quantum Kyber/ML-KEM на ТСПУ)
