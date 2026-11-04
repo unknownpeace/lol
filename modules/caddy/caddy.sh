@@ -189,7 +189,10 @@ reload_caddy_safe() {
         chmod -R u+rwX /var/lib/caddy 2>/dev/null || true
         service_ctl caddy enable
         if rc-service caddy status >/dev/null 2>&1; then
-            rc-service caddy restart >/dev/null 2>&1 || true
+            if ! su -s /bin/sh caddy -c "XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/var/lib/caddy HOME=/var/lib/caddy /usr/sbin/caddy reload --config '$CADDY_CONF' --adapter caddyfile" >/dev/null 2>&1 && \
+               ! /usr/sbin/caddy reload --config "$CADDY_CONF" --adapter caddyfile >/dev/null 2>&1; then
+                rc-service caddy restart >/dev/null 2>&1 || true
+            fi
         else
             rc-service caddy start >/dev/null 2>&1 || true
         fi
@@ -240,7 +243,7 @@ register_caddy_site() {
     fi
 
     if [ "$SITE_MOD" = "vaultwarden" ]; then
-        # Чистый эталонный профиль проксирования для Vaultwarden (с передачей X-Forwarded-Proto и без модификации заводских заголовков)
+        # Чистый эталонный профиль проксирования для Vaultwarden
         cat << VW_SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
 https://${SITE_DOM} {
     tls internal
@@ -253,8 +256,6 @@ https://${SITE_DOM} {
     reverse_proxy 127.0.0.1:${SITE_PORT} {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
     }
 }
 VW_SITE_EOF

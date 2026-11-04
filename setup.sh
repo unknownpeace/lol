@@ -20,6 +20,12 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# 1.5. Проверка и установка базовых зависимостей
+if command -v apk >/dev/null 2>&1; then
+    echo "[*] Проверка системных пакетов (jq, curl, nftables, ca-certificates)..."
+    apk add --no-cache jq curl nftables ca-certificates >/dev/null 2>&1 || true
+fi
+
 # 2. Выставление прав на исполнение
 chmod +x "${GATEWAY_DIR}/gateway.sh"
 [ -d "${GATEWAY_DIR}/scripts" ] && chmod +x "${GATEWAY_DIR}/scripts/"*.sh 2>/dev/null || true

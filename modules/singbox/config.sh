@@ -1,8 +1,9 @@
 generate_singbox_config() {
     check_github_mirror
     sync_user_domain_rulesets
-    [ -z "${ADMIN_PASS:-}" ] && load_gateway_env || true
+    load_gateway_env || true
     [ -z "${ADMIN_PASS:-}" ] && ADMIN_PASS="admin" || true
+    [ -z "${GW_IP:-}" ] && GW_IP="127.0.0.1" || true
     CUR_LIP_SB=$(get_current_lan_ip)
 
     PROVIDERS_JSON_ARR="[]"
@@ -153,7 +154,7 @@ FORCE_GRP
       {
         "tag": "dns_local",
         "type": "udp",
-        "server": "PLACEHOLDER_GW_IP",
+        "server": "127.0.0.1",
         "server_port": 53
       },
       {
@@ -263,7 +264,8 @@ FORCE_GRP
     ],
     "final": "${DNS_FINAL_TAG}",
     "strategy": "ipv4_only",
-    "reverse_mapping": true
+    "reverse_mapping": true,
+    "independent_cache": true
   },
   "inbounds": [
     {
@@ -701,7 +703,7 @@ CONFIG_EOF
     if command -v jq >/dev/null 2>&1; then
         if is_warp_enabled; then
             if [ "$PROVIDER_TAGS_JSON" != "[]" ]; then
-                jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
+                jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP:-127.0.0.1}" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
                     ($w[0].masque // {
                         "type": "masque",
                         "tag": "☁️ WARP MASQUE (TCP/H2)",
@@ -747,7 +749,7 @@ CONFIG_EOF
                     )
                 ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
             else
-                jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
+                jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP:-127.0.0.1}" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
                     ($w[0].masque // {
                         "type": "masque",
                         "tag": "☁️ WARP MASQUE (TCP/H2)",
@@ -802,7 +804,7 @@ CONFIG_EOF
                 ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
             fi
         elif [ "$PROVIDER_TAGS_JSON" = "[]" ]; then
-            jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" '
+            jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP:-127.0.0.1}" '
                 .experimental.clash_api.secret = $secret
                 | (.dns.servers[] | select(.tag=="dns_local") | .server) = $gw
                 | del(.providers)
@@ -812,7 +814,7 @@ CONFIG_EOF
                 )
             ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
         else
-            jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" '
+            jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP:-127.0.0.1}" '
                 .experimental.clash_api.secret = $secret
                 | (.dns.servers[] | select(.tag=="dns_local") | .server) = $gw
             ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"

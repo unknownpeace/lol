@@ -134,6 +134,8 @@ WEBUI_PORT=${PORT_TORRENT_WEB}
 command_user="qbittorrent:${MEDIA_GROUP}"
 directory="/var/lib/qbittorrent"
 umask="0002"
+rc_nice="10"
+rc_oom_score_adj="500"
 QB_CONF_D
 
     cat << QB_INIT > /etc/init.d/qbittorrent-nox
@@ -149,6 +151,8 @@ umask="0002"
 output_log="/var/log/qbittorrent-nox.log"
 error_log="/var/log/qbittorrent-nox.log"
 rc_ulimit="-n 50000"
+rc_nice="10"
+rc_oom_score_adj="500"
 export HOME="/var/lib/qbittorrent"
 export XDG_CONFIG_HOME="/var/lib/qbittorrent/.config"
 export XDG_DATA_HOME="/var/lib/qbittorrent/.local/share"

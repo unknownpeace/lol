@@ -5,6 +5,8 @@ set -e
 # Глобальные пути и переменные (Alpine Linux Homelab Edition)
 # Сетевой шлюз (Sing-Box Extended + AdGuard Home) + Модульный Homelab стек
 # ==============================================================================
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
 SB_DIR="/etc/sing-box"
 SB_CONF="${SB_DIR}/config.json"
 SB_ENV="${SB_DIR}/gateway.env"
@@ -515,6 +517,22 @@ ensure_alpine_modules() {
     fi
     rc-update add modules boot >/dev/null 2>&1 || true
     rc-update add sysctl boot >/dev/null 2>&1 || true
+    ensure_core_tools
+    return 0
+}
+
+# Гарантированная проверка и автоустановка критических утилит (jq, curl, nftables, ca-certificates)
+ensure_core_tools() {
+    MISSING_PKGS=""
+    command -v jq >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS jq"
+    command -v curl >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS curl"
+    command -v nft >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS nftables"
+    [ -d /etc/ssl/certs ] || MISSING_PKGS="$MISSING_PKGS ca-certificates"
+    if [ -n "$MISSING_PKGS" ]; then
+        if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache $MISSING_PKGS >/dev/null 2>&1 || true
+        fi
+    fi
     return 0
 }
 
@@ -875,10 +893,10 @@ sync_agh_homelab_rewrites() {
     fi
 
     awk -v lip="$TARGET_LAN_IP" '
-        /^filtering:/ {
-            print "filtering:"
-            print "  protection_enabled: true"
-            print "  filtering_enabled: true"
+        BEGIN { in_flt=0; in_rew=0 }
+        /^filtering:/ { in_flt=1; print; next }
+        in_flt && /^[^[:space:]]/ { in_flt=0; in_rew=0; print; next }
+        in_flt && /^[[:space:]]*rewrites:/ {
             print "  rewrites:"
             split("*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan music.lan jellyfin.lan downloads.lan torrents.lan code.lan", doms, " ")
             for (i = 1; i <= 12; i++) {
@@ -886,11 +904,16 @@ sync_agh_homelab_rewrites() {
                 print "      answer: " lip
                 print "      enabled: true"
             }
-            in_flt=1
+            in_rew=1
             next
         }
-        in_flt && /^[^[:space:]]/ { in_flt=0 }
-        in_flt { next }
+        in_rew {
+            if (/^[[:space:]]*-/ || /^[[:space:]]+(domain|answer|enabled):/) {
+                next
+            } else {
+                in_rew=0
+            }
+        }
         { print }
     ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$"
     atomic_commit_tmp "${AGH_CONF}.tmp.$$" "$AGH_CONF" 0600 "root:root" || true
@@ -1219,8 +1242,9 @@ get_ip_cidr_json_array() {
 generate_singbox_config() {
     check_github_mirror
     sync_user_domain_rulesets
-    [ -z "${ADMIN_PASS:-}" ] && load_gateway_env || true
+    load_gateway_env || true
     [ -z "${ADMIN_PASS:-}" ] && ADMIN_PASS="admin" || true
+    [ -z "${GW_IP:-}" ] && GW_IP="127.0.0.1" || true
     CUR_LIP_SB=$(get_current_lan_ip)
 
     PROVIDERS_JSON_ARR="[]"
@@ -1371,7 +1395,7 @@ FORCE_GRP
       {
         "tag": "dns_local",
         "type": "udp",
-        "server": "PLACEHOLDER_GW_IP",
+        "server": "127.0.0.1",
         "server_port": 53
       },
       {
@@ -1481,7 +1505,8 @@ FORCE_GRP
     ],
     "final": "${DNS_FINAL_TAG}",
     "strategy": "ipv4_only",
-    "reverse_mapping": true
+    "reverse_mapping": true,
+    "independent_cache": true
   },
   "inbounds": [
     {
@@ -1919,7 +1944,7 @@ CONFIG_EOF
     if command -v jq >/dev/null 2>&1; then
         if is_warp_enabled; then
             if [ "$PROVIDER_TAGS_JSON" != "[]" ]; then
-                jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
+                jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP:-127.0.0.1}" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
                     ($w[0].masque // {
                         "type": "masque",
                         "tag": "☁️ WARP MASQUE (TCP/H2)",
@@ -1965,7 +1990,7 @@ CONFIG_EOF
                     )
                 ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
             else
-                jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
+                jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP:-127.0.0.1}" --arg wlic "${WARP_LICENSE:-}" --slurpfile w "$WARP_NODES_FILE" '
                     ($w[0].masque // {
                         "type": "masque",
                         "tag": "☁️ WARP MASQUE (TCP/H2)",
@@ -2020,7 +2045,7 @@ CONFIG_EOF
                 ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
             fi
         elif [ "$PROVIDER_TAGS_JSON" = "[]" ]; then
-            jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" '
+            jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP:-127.0.0.1}" '
                 .experimental.clash_api.secret = $secret
                 | (.dns.servers[] | select(.tag=="dns_local") | .server) = $gw
                 | del(.providers)
@@ -2030,7 +2055,7 @@ CONFIG_EOF
                 )
             ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
         else
-            jq --arg secret "$ADMIN_PASS" --arg gw "$GW_IP" '
+            jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP:-127.0.0.1}" '
                 .experimental.clash_api.secret = $secret
                 | (.dns.servers[] | select(.tag=="dns_local") | .server) = $gw
             ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
@@ -5431,7 +5456,10 @@ reload_caddy_safe() {
         chmod -R u+rwX /var/lib/caddy 2>/dev/null || true
         service_ctl caddy enable
         if rc-service caddy status >/dev/null 2>&1; then
-            rc-service caddy restart >/dev/null 2>&1 || true
+            if ! su -s /bin/sh caddy -c "XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/var/lib/caddy HOME=/var/lib/caddy /usr/sbin/caddy reload --config '$CADDY_CONF' --adapter caddyfile" >/dev/null 2>&1 && \
+               ! /usr/sbin/caddy reload --config "$CADDY_CONF" --adapter caddyfile >/dev/null 2>&1; then
+                rc-service caddy restart >/dev/null 2>&1 || true
+            fi
         else
             rc-service caddy start >/dev/null 2>&1 || true
         fi
@@ -5482,7 +5510,7 @@ register_caddy_site() {
     fi
 
     if [ "$SITE_MOD" = "vaultwarden" ]; then
-        # Чистый эталонный профиль проксирования для Vaultwarden (с передачей X-Forwarded-Proto и без модификации заводских заголовков)
+        # Чистый эталонный профиль проксирования для Vaultwarden
         cat << VW_SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
 https://${SITE_DOM} {
     tls internal
@@ -5495,8 +5523,6 @@ https://${SITE_DOM} {
     reverse_proxy 127.0.0.1:${SITE_PORT} {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
     }
 }
 VW_SITE_EOF
@@ -7085,6 +7111,8 @@ WEBUI_PORT=${PORT_TORRENT_WEB}
 command_user="qbittorrent:${MEDIA_GROUP}"
 directory="/var/lib/qbittorrent"
 umask="0002"
+rc_nice="10"
+rc_oom_score_adj="500"
 QB_CONF_D
 
     cat << QB_INIT > /etc/init.d/qbittorrent-nox
@@ -7100,6 +7128,8 @@ umask="0002"
 output_log="/var/log/qbittorrent-nox.log"
 error_log="/var/log/qbittorrent-nox.log"
 rc_ulimit="-n 50000"
+rc_nice="10"
+rc_oom_score_adj="500"
 export HOME="/var/lib/qbittorrent"
 export XDG_CONFIG_HOME="/var/lib/qbittorrent/.config"
 export XDG_DATA_HOME="/var/lib/qbittorrent/.local/share"
@@ -8067,6 +8097,65 @@ run_self_test() {
     if [ "$(count_enabled_homelab_modules)" -gt 0 ]; then
         run_homelab_self_test
     fi
+    return 0
+}
+
+# Быстрая неинвазивная проверка синтаксиса и доступности ключевых сервисов (без перезапусков)
+run_gateway_quick_check() {
+    set +e
+    detect_os
+    load_gateway_env
+    ui_box_top "🩺 НЕИНВАЗИВНЫЙ АУДИТ СИСТЕМЫ (GATEWAY CHECK)"
+
+    # 1. Синтаксис Sing-Box
+    if [ -x /usr/bin/sing-box ] && [ -s "$SB_CONF" ]; then
+        if /usr/bin/sing-box check -c "$SB_CONF" -D /etc/sing-box >/dev/null 2>&1; then
+            ui_box_row "${C_GRN}[✔]${C_RES} Sing-Box Config:      ${C_GRN}КОРРЕКТЕН${C_RES} (${SB_CONF})"
+        else
+            ui_box_row "${C_RED}[✖] Sing-Box Config:      ОШИБКА ВАЛИДАЦИИ СИНТАКСИСА${C_RES}"
+        fi
+    else
+        ui_box_row "${C_YEL}[▲] Sing-Box Config:      НЕ НАЙДЕН (${SB_CONF})${C_RES}"
+    fi
+
+    # 2. Синтаксис Caddy
+    if [ -x /usr/sbin/caddy ] && [ -s "$CADDY_CONF" ]; then
+        if su -s /bin/sh caddy -c "XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/var/lib/caddy HOME=/var/lib/caddy /usr/sbin/caddy validate --config '$CADDY_CONF' --adapter caddyfile" >/dev/null 2>&1 || \
+           /usr/sbin/caddy validate --config "$CADDY_CONF" --adapter caddyfile >/dev/null 2>&1; then
+            ui_box_row "${C_GRN}[✔]${C_RES} Caddyfile & PKI:      ${C_GRN}КОРРЕКТЕН${C_RES} (${CADDY_CONF})"
+        else
+            ui_box_row "${C_RED}[✖] Caddyfile & PKI:      ОШИБКА ВАЛИДАЦИИ CADDYFILE${C_RES}"
+        fi
+    fi
+
+    # 3. AdGuard Home DNS (:53)
+    if nc -z -u -w 1 127.0.0.1 53 >/dev/null 2>&1 || pgrep AdGuardHome >/dev/null 2>&1; then
+        ui_box_row "${C_GRN}[✔]${C_RES} AdGuard Home DNS:     ${C_GRN}АКТИВЕН${C_RES} (127.0.0.1:53 слушает запросы)"
+    else
+        ui_box_row "${C_RED}[✖] AdGuard Home DNS:     НЕ ОТВЕЧАЕТ НА ПОРТУ 53${C_RES}"
+    fi
+
+    # 4. Sing-Box Clash API (:9090)
+    if curl -fsS -m 2 -H "Authorization: Bearer ${ADMIN_PASS:-admin}" "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
+        ui_box_row "${C_GRN}[✔]${C_RES} Clash API (:9090):    ${C_GRN}АКТИВЕН${C_RES} (REST API отвечает, токен валиден)"
+    else
+        ui_box_row "${C_YEL}[▲] Clash API (:9090):    НЕДОСТУПЕН ИЛИ НЕВЕРНЫЙ СЕКРЕТ${C_RES}"
+    fi
+
+    # 5. Состояние памяти и Conntrack
+    MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    MEM_AVAIL_KB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    if [ "$MEM_TOTAL_KB" -gt 0 ]; then
+        MEM_USE_PCT=$(( (MEM_TOTAL_KB - MEM_AVAIL_KB) * 100 / MEM_TOTAL_KB ))
+        ui_box_row "${C_GRN}[✔]${C_RES} Оперативная память:   ${MEM_USE_PCT}% занято ($((MEM_AVAIL_KB/1024)) МБ свободно из $((MEM_TOTAL_KB/1024)) МБ)"
+    fi
+
+    CT_NOW=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
+    CT_MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 1)
+    CT_PCT=$(( CT_NOW * 100 / (CT_MAX > 0 ? CT_MAX : 1) ))
+    ui_box_row "${C_GRN}[✔]${C_RES} Таблица Conntrack:    ${CT_NOW} / ${CT_MAX} сессий (${CT_PCT}%)"
+
+    ui_box_bottom
     return 0
 }
 
@@ -9119,6 +9208,9 @@ gateway_cli_dispatch() {
         ;;
     watchdog)
         run_watchdog
+        ;;
+    check|verify|lint)
+        run_gateway_quick_check
         ;;
     test|status)
         run_self_test

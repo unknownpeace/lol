@@ -16,10 +16,10 @@ sync_agh_homelab_rewrites() {
     fi
 
     awk -v lip="$TARGET_LAN_IP" '
-        /^filtering:/ {
-            print "filtering:"
-            print "  protection_enabled: true"
-            print "  filtering_enabled: true"
+        BEGIN { in_flt=0; in_rew=0 }
+        /^filtering:/ { in_flt=1; print; next }
+        in_flt && /^[^[:space:]]/ { in_flt=0; in_rew=0; print; next }
+        in_flt && /^[[:space:]]*rewrites:/ {
             print "  rewrites:"
             split("*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan music.lan jellyfin.lan downloads.lan torrents.lan code.lan", doms, " ")
             for (i = 1; i <= 12; i++) {
@@ -27,11 +27,16 @@ sync_agh_homelab_rewrites() {
                 print "      answer: " lip
                 print "      enabled: true"
             }
-            in_flt=1
+            in_rew=1
             next
         }
-        in_flt && /^[^[:space:]]/ { in_flt=0 }
-        in_flt { next }
+        in_rew {
+            if (/^[[:space:]]*-/ || /^[[:space:]]+(domain|answer|enabled):/) {
+                next
+            } else {
+                in_rew=0
+            }
+        }
         { print }
     ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$"
     atomic_commit_tmp "${AGH_CONF}.tmp.$$" "$AGH_CONF" 0600 "root:root" || true

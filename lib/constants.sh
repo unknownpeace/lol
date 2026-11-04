@@ -5,6 +5,8 @@ set -e
 # Глобальные пути и переменные (Alpine Linux Homelab Edition)
 # Сетевой шлюз (Sing-Box Extended + AdGuard Home) + Модульный Homelab стек
 # ==============================================================================
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+
 SB_DIR="/etc/sing-box"
 SB_CONF="${SB_DIR}/config.json"
 SB_ENV="${SB_DIR}/gateway.env"

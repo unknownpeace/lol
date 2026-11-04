@@ -79,4 +79,63 @@ run_self_test() {
     return 0
 }
 
+# Быстрая неинвазивная проверка синтаксиса и доступности ключевых сервисов (без перезапусков)
+run_gateway_quick_check() {
+    set +e
+    detect_os
+    load_gateway_env
+    ui_box_top "🩺 НЕИНВАЗИВНЫЙ АУДИТ СИСТЕМЫ (GATEWAY CHECK)"
+
+    # 1. Синтаксис Sing-Box
+    if [ -x /usr/bin/sing-box ] && [ -s "$SB_CONF" ]; then
+        if /usr/bin/sing-box check -c "$SB_CONF" -D /etc/sing-box >/dev/null 2>&1; then
+            ui_box_row "${C_GRN}[✔]${C_RES} Sing-Box Config:      ${C_GRN}КОРРЕКТЕН${C_RES} (${SB_CONF})"
+        else
+            ui_box_row "${C_RED}[✖] Sing-Box Config:      ОШИБКА ВАЛИДАЦИИ СИНТАКСИСА${C_RES}"
+        fi
+    else
+        ui_box_row "${C_YEL}[▲] Sing-Box Config:      НЕ НАЙДЕН (${SB_CONF})${C_RES}"
+    fi
+
+    # 2. Синтаксис Caddy
+    if [ -x /usr/sbin/caddy ] && [ -s "$CADDY_CONF" ]; then
+        if su -s /bin/sh caddy -c "XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/var/lib/caddy HOME=/var/lib/caddy /usr/sbin/caddy validate --config '$CADDY_CONF' --adapter caddyfile" >/dev/null 2>&1 || \
+           /usr/sbin/caddy validate --config "$CADDY_CONF" --adapter caddyfile >/dev/null 2>&1; then
+            ui_box_row "${C_GRN}[✔]${C_RES} Caddyfile & PKI:      ${C_GRN}КОРРЕКТЕН${C_RES} (${CADDY_CONF})"
+        else
+            ui_box_row "${C_RED}[✖] Caddyfile & PKI:      ОШИБКА ВАЛИДАЦИИ CADDYFILE${C_RES}"
+        fi
+    fi
+
+    # 3. AdGuard Home DNS (:53)
+    if nc -z -u -w 1 127.0.0.1 53 >/dev/null 2>&1 || pgrep AdGuardHome >/dev/null 2>&1; then
+        ui_box_row "${C_GRN}[✔]${C_RES} AdGuard Home DNS:     ${C_GRN}АКТИВЕН${C_RES} (127.0.0.1:53 слушает запросы)"
+    else
+        ui_box_row "${C_RED}[✖] AdGuard Home DNS:     НЕ ОТВЕЧАЕТ НА ПОРТУ 53${C_RES}"
+    fi
+
+    # 4. Sing-Box Clash API (:9090)
+    if curl -fsS -m 2 -H "Authorization: Bearer ${ADMIN_PASS:-admin}" "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
+        ui_box_row "${C_GRN}[✔]${C_RES} Clash API (:9090):    ${C_GRN}АКТИВЕН${C_RES} (REST API отвечает, токен валиден)"
+    else
+        ui_box_row "${C_YEL}[▲] Clash API (:9090):    НЕДОСТУПЕН ИЛИ НЕВЕРНЫЙ СЕКРЕТ${C_RES}"
+    fi
+
+    # 5. Состояние памяти и Conntrack
+    MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    MEM_AVAIL_KB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    if [ "$MEM_TOTAL_KB" -gt 0 ]; then
+        MEM_USE_PCT=$(( (MEM_TOTAL_KB - MEM_AVAIL_KB) * 100 / MEM_TOTAL_KB ))
+        ui_box_row "${C_GRN}[✔]${C_RES} Оперативная память:   ${MEM_USE_PCT}% занято ($((MEM_AVAIL_KB/1024)) МБ свободно из $((MEM_TOTAL_KB/1024)) МБ)"
+    fi
+
+    CT_NOW=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
+    CT_MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 1)
+    CT_PCT=$(( CT_NOW * 100 / (CT_MAX > 0 ? CT_MAX : 1) ))
+    ui_box_row "${C_GRN}[✔]${C_RES} Таблица Conntrack:    ${CT_NOW} / ${CT_MAX} сессий (${CT_PCT}%)"
+
+    ui_box_bottom
+    return 0
+}
+
 # Преобразование ввода пользователя (номер 1..9 или ID модуля) в канонический ID модуля

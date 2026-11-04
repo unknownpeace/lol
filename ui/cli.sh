@@ -9,6 +9,9 @@ gateway_cli_dispatch() {
     watchdog)
         run_watchdog
         ;;
+    check|verify|lint)
+        run_gateway_quick_check
+        ;;
     test|status)
         run_self_test
         ;;
