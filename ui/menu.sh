@@ -14,7 +14,7 @@ show_homelab_menu() {
         ui_box_row "${C_CYN}6)${C_RES}  📜 Просмотр живых логов сервисов Homelab"
         ui_box_row "${C_CYN}7)${C_RES}  ${C_GRN}💽 Внешние накопители (USB/SATA/NVMe), LUKS2, ФС (ext4/btrfs/f2fs) и перенос данных${C_RES}"
         ui_box_row "${C_CYN}8)${C_RES}  📁 Настройка сетевого диска Samba и обнаружения (Windows 11 24H2+ / Linux)"
-        ui_box_row "${C_CYN}9)${C_RES}  🔒 Локальные домены (*.lan) и установка сертификата HTTPS (http://ca.lan)"
+        ui_box_row "${C_CYN}9)${C_RES}  🔒 Управление SSL/TLS: Валидный Let's Encrypt (DuckDNS) vs Локальный PKI (*.lan)"
         ui_box_row "${C_CYN}10)${C_RES} 📦 Резервное копирование и восстановление (Шлюз + БД SQLite + Telegram)"
         ui_box_row "${C_CYN}11)${C_RES} 🎬🎵 Архитектура медиатеки: режим работы Jellyfin и Navidrome"
         ui_box_row "${C_CYN}12)${C_RES} ${C_YEL}🔓 Быстро разблокировать внешний диск LUKS2 (gateway unlock)${C_RES}"
@@ -138,11 +138,7 @@ show_homelab_menu() {
                 read -r _ < /dev/tty || true
                 ;;
             9)
-                sync_agh_homelab_rewrites "$(get_current_lan_ip)"
-                reload_caddy_safe || true
-                show_https_ca_instructions
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                prompt_ssl_management_menu
                 ;;
             10)
                 echo ""

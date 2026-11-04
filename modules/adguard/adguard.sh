@@ -15,14 +15,19 @@ sync_agh_homelab_rewrites() {
         rc-service adguardhome stop >/dev/null 2>&1 || /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
     fi
 
-    awk -v lip="$TARGET_LAN_IP" '
+    DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan music.lan jellyfin.lan downloads.lan torrents.lan code.lan"
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN}"
+    fi
+
+    awk -v lip="$TARGET_LAN_IP" -v dom_list="$DOMS_STR" '
         BEGIN { in_flt=0; in_rew=0 }
         /^filtering:/ { in_flt=1; print; next }
         in_flt && /^[^[:space:]]/ { in_flt=0; in_rew=0; print; next }
         in_flt && /^[[:space:]]*rewrites:/ {
             print "  rewrites:"
-            split("*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan music.lan jellyfin.lan downloads.lan torrents.lan code.lan", doms, " ")
-            for (i = 1; i <= 12; i++) {
+            cnt = split(dom_list, doms, " ")
+            for (i = 1; i <= cnt; i++) {
                 print "    - domain: '\''" doms[i] "'\''"
                 print "      answer: " lip
                 print "      enabled: true"

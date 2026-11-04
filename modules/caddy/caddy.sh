@@ -110,6 +110,28 @@ sync_caddy_main_config() {
     mkdir -p /etc/caddy "$CADDY_CONFD" "$PKI_PORTAL_DIR"
     chmod 755 /etc/caddy "$CADDY_CONFD" 2>/dev/null || true
     CUR_LIP_CDY=$(get_current_lan_ip)
+    LE_MAIN_BLOCKS=""
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        LE_MAIN_BLOCKS="https://adguard.${SSL_DOMAIN} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+
+https://zashboard.${SSL_DOMAIN}, https://singbox.${SSL_DOMAIN} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    encode zstd gzip
+    @root_ui path /
+    redir @root_ui /ui/ 302
+    reverse_proxy 127.0.0.1:9090 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}"
+    fi
     cat << CADDY_MAIN > "${CADDY_CONF}.tmp.$$"
 {
     local_certs
@@ -167,6 +189,8 @@ https://${DOM_ZASHBOARD}, https://${DOM_SINGBOX} {
         header_up X-Real-IP {remote_host}
     }
 }
+
+${LE_MAIN_BLOCKS}
 
 import ${CADDY_CONFD}/*.caddy
 CADDY_MAIN
@@ -242,6 +266,37 @@ register_caddy_site() {
         fi
     fi
 
+    LE_SITE_BLOCK=""
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        if [ "$SITE_MOD" = "vaultwarden" ]; then
+            LE_SITE_BLOCK="
+https://${SITE_MOD}.${SSL_DOMAIN} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    encode zstd gzip
+
+    request_body {
+        max_size 525MB
+    }
+
+    reverse_proxy 127.0.0.1:${SITE_PORT} {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}"
+        else
+            LE_SITE_BLOCK="
+https://${SITE_MOD}.${SSL_DOMAIN} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    encode zstd gzip
+${AUTH_BLOCK}
+    reverse_proxy 127.0.0.1:${SITE_PORT} {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}"
+        fi
+    fi
+
     if [ "$SITE_MOD" = "vaultwarden" ]; then
         # Чистый эталонный профиль проксирования для Vaultwarden
         cat << VW_SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
@@ -258,6 +313,7 @@ https://${SITE_DOM} {
         header_up X-Real-IP {remote_host}
     }
 }
+${LE_SITE_BLOCK}
 VW_SITE_EOF
     else
         cat << SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
@@ -270,6 +326,7 @@ ${AUTH_BLOCK}
         header_up X-Real-IP {remote_host}
     }
 }
+${LE_SITE_BLOCK}
 SITE_EOF
     fi
     chmod 644 "${CADDY_CONFD}/${SITE_MOD}.caddy" 2>/dev/null || true

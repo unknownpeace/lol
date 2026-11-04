@@ -57,6 +57,10 @@ load_gateway_env() {
     [ -z "${EXT_STORAGE_UUID:-}" ] && EXT_STORAGE_UUID=""
     [ -z "${EXT_STORAGE_LUKS_UUID:-}" ] && EXT_STORAGE_LUKS_UUID=""
     [ -z "${EXT_STORAGE_FSTYPE:-}" ] && EXT_STORAGE_FSTYPE="ext4"
+    [ -z "${SSL_TYPE:-}" ] && SSL_TYPE="local"
+    [ -z "${SSL_PROVIDER:-}" ] && SSL_PROVIDER="duckdns"
+    [ -z "${SSL_DOMAIN:-}" ] && SSL_DOMAIN=""
+    [ -z "${DUCKDNS_TOKEN:-}" ] && DUCKDNS_TOKEN=""
     STORAGE_MUSIC="${STORAGE_ROOT}/Music"
     STORAGE_VIDEOS="${STORAGE_ROOT}/Videos"
     STORAGE_VIDEOS_MOVIES="${STORAGE_VIDEOS}/Movies"
@@ -116,6 +120,10 @@ save_homelab_env() {
     ESC_EUUID=$(escape_single_quotes "${EXT_STORAGE_UUID:-}")
     ESC_LUUID=$(escape_single_quotes "${EXT_STORAGE_LUKS_UUID:-}")
     ESC_EFST=$(escape_single_quotes "${EXT_STORAGE_FSTYPE:-ext4}")
+    ESC_SSL_TYPE=$(escape_single_quotes "${SSL_TYPE:-local}")
+    ESC_SSL_PROV=$(escape_single_quotes "${SSL_PROVIDER:-duckdns}")
+    ESC_SSL_DOM=$(escape_single_quotes "${SSL_DOMAIN:-}")
+    ESC_DUCK_TOK=$(escape_single_quotes "${DUCKDNS_TOKEN:-}")
     atomic_write_file "$HOMELAB_ENV" 0600 "root:root" << HL_ENV_EOF
 SMB_USER='${ESC_SMBU}'
 SMB_PASS='${ESC_SMBP}'
@@ -125,6 +133,10 @@ EXT_STORAGE_EXPECTED='${ESC_EXP}'
 EXT_STORAGE_UUID='${ESC_EUUID}'
 EXT_STORAGE_LUKS_UUID='${ESC_LUUID}'
 EXT_STORAGE_FSTYPE='${ESC_EFST}'
+SSL_TYPE='${ESC_SSL_TYPE}'
+SSL_PROVIDER='${ESC_SSL_PROV}'
+SSL_DOMAIN='${ESC_SSL_DOM}'
+DUCKDNS_TOKEN='${ESC_DUCK_TOK}'
 HL_ENV_EOF
     # Единый источник истины: симлинк для обратной совместимости в ${HOMELAB_DIR}/homelab.env
     if [ "${HOMELAB_DIR}/homelab.env" != "$HOMELAB_ENV" ]; then

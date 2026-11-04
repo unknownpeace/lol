@@ -24,6 +24,8 @@ create_unified_backup() {
     [ -f "$AGH_CONF" ] && BACKUP_PATHS="$BACKUP_PATHS $AGH_CONF"
     [ -f "$ALPINE_NFT_CONF" ] && BACKUP_PATHS="$BACKUP_PATHS $ALPINE_NFT_CONF"
     [ -d /etc/caddy ] && BACKUP_PATHS="$BACKUP_PATHS /etc/caddy"
+    [ -d /etc/ssl/caddy ] && BACKUP_PATHS="$BACKUP_PATHS /etc/ssl/caddy"
+    [ -d /root/.acme.sh ] && BACKUP_PATHS="$BACKUP_PATHS /root/.acme.sh"
     [ -d /var/lib/caddy ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/caddy"
     [ -d /etc/samba ] && BACKUP_PATHS="$BACKUP_PATHS /etc/samba"
     [ -d /var/lib/samba/private ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/samba/private"

@@ -107,6 +107,13 @@ run_gateway_quick_check() {
         fi
     fi
 
+    # 2.5. Статус SSL/TLS
+    if is_letsencrypt_ssl_active 2>/dev/null; then
+        ui_box_row "${C_GRN}[✔]${C_RES} SSL/TLS Сертификат:   ${C_GRN}Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
+    else
+        ui_box_row "${C_CYN}[✔]${C_RES} SSL/TLS Сертификат:   Локальный PKI (*.lan)"
+    fi
+
     # 3. AdGuard Home DNS (:53)
     if nc -z -u -w 1 127.0.0.1 53 >/dev/null 2>&1 || pgrep AdGuardHome >/dev/null 2>&1; then
         ui_box_row "${C_GRN}[✔]${C_RES} AdGuard Home DNS:     ${C_GRN}АКТИВЕН${C_RES} (127.0.0.1:53 слушает запросы)"

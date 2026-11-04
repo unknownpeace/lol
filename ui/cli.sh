@@ -86,6 +86,33 @@ gateway_cli_dispatch() {
                 ;;
         esac
         ;;
+    ssl|cert|certs|tls)
+        case "${2:-}" in
+            status)
+                show_ssl_status
+                ;;
+            renew)
+                renew_duckdns_cert_force
+                ;;
+            local|lan)
+                switch_to_local_pki
+                ;;
+            duckdns|setup)
+                if [ -n "${3:-}" ] && [ -n "${4:-}" ]; then
+                    if issue_duckdns_cert "$3" "$4"; then
+                        sync_caddy_main_config
+                        reload_caddy_safe
+                        sync_agh_homelab_rewrites
+                    fi
+                else
+                    prompt_ssl_management_menu
+                fi
+                ;;
+            *)
+                prompt_ssl_management_menu
+                ;;
+        esac
+        ;;
     links|urls|info)
         print_quick_access_card
         ;;

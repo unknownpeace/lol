@@ -40,6 +40,7 @@ MODULES = [
     "modules/singbox/setup.sh",
     "modules/homelab/registry.sh",
     "modules/storage/disks.sh",
+    "modules/caddy/ssl.sh",
     "modules/caddy/caddy.sh",
     "modules/samba/samba.sh",
     "modules/homelab/services/vaultwarden.sh",

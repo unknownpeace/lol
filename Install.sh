@@ -68,6 +68,9 @@ PKI_PORTAL_DIR="/srv/homelab/pki-portal"
 CADDY_CONF="/etc/caddy/Caddyfile"
 CADDY_CONFD="/etc/caddy/conf.d"
 CADDY_ROOT_CERT="/var/lib/caddy/caddy/pki/authorities/local/root.crt"
+SSL_CERTS_DIR="/etc/ssl/caddy"
+SSL_FULLCHAIN_FILE="${SSL_CERTS_DIR}/fullchain.pem"
+SSL_KEY_FILE="${SSL_CERTS_DIR}/key.pem"
 MEDIA_GROUP="media"
 MEDIA_GID="990"
 SMB_USER="homelab"
@@ -892,14 +895,19 @@ sync_agh_homelab_rewrites() {
         rc-service adguardhome stop >/dev/null 2>&1 || /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
     fi
 
-    awk -v lip="$TARGET_LAN_IP" '
+    DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan music.lan jellyfin.lan downloads.lan torrents.lan code.lan"
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN}"
+    fi
+
+    awk -v lip="$TARGET_LAN_IP" -v dom_list="$DOMS_STR" '
         BEGIN { in_flt=0; in_rew=0 }
         /^filtering:/ { in_flt=1; print; next }
         in_flt && /^[^[:space:]]/ { in_flt=0; in_rew=0; print; next }
         in_flt && /^[[:space:]]*rewrites:/ {
             print "  rewrites:"
-            split("*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan music.lan jellyfin.lan downloads.lan torrents.lan code.lan", doms, " ")
-            for (i = 1; i <= 12; i++) {
+            cnt = split(dom_list, doms, " ")
+            for (i = 1; i <= cnt; i++) {
                 print "    - domain: '\''" doms[i] "'\''"
                 print "      answer: " lip
                 print "      enabled: true"
@@ -1015,6 +1023,10 @@ load_gateway_env() {
     [ -z "${EXT_STORAGE_UUID:-}" ] && EXT_STORAGE_UUID=""
     [ -z "${EXT_STORAGE_LUKS_UUID:-}" ] && EXT_STORAGE_LUKS_UUID=""
     [ -z "${EXT_STORAGE_FSTYPE:-}" ] && EXT_STORAGE_FSTYPE="ext4"
+    [ -z "${SSL_TYPE:-}" ] && SSL_TYPE="local"
+    [ -z "${SSL_PROVIDER:-}" ] && SSL_PROVIDER="duckdns"
+    [ -z "${SSL_DOMAIN:-}" ] && SSL_DOMAIN=""
+    [ -z "${DUCKDNS_TOKEN:-}" ] && DUCKDNS_TOKEN=""
     STORAGE_MUSIC="${STORAGE_ROOT}/Music"
     STORAGE_VIDEOS="${STORAGE_ROOT}/Videos"
     STORAGE_VIDEOS_MOVIES="${STORAGE_VIDEOS}/Movies"
@@ -1074,6 +1086,10 @@ save_homelab_env() {
     ESC_EUUID=$(escape_single_quotes "${EXT_STORAGE_UUID:-}")
     ESC_LUUID=$(escape_single_quotes "${EXT_STORAGE_LUKS_UUID:-}")
     ESC_EFST=$(escape_single_quotes "${EXT_STORAGE_FSTYPE:-ext4}")
+    ESC_SSL_TYPE=$(escape_single_quotes "${SSL_TYPE:-local}")
+    ESC_SSL_PROV=$(escape_single_quotes "${SSL_PROVIDER:-duckdns}")
+    ESC_SSL_DOM=$(escape_single_quotes "${SSL_DOMAIN:-}")
+    ESC_DUCK_TOK=$(escape_single_quotes "${DUCKDNS_TOKEN:-}")
     atomic_write_file "$HOMELAB_ENV" 0600 "root:root" << HL_ENV_EOF
 SMB_USER='${ESC_SMBU}'
 SMB_PASS='${ESC_SMBP}'
@@ -1083,6 +1099,10 @@ EXT_STORAGE_EXPECTED='${ESC_EXP}'
 EXT_STORAGE_UUID='${ESC_EUUID}'
 EXT_STORAGE_LUKS_UUID='${ESC_LUUID}'
 EXT_STORAGE_FSTYPE='${ESC_EFST}'
+SSL_TYPE='${ESC_SSL_TYPE}'
+SSL_PROVIDER='${ESC_SSL_PROV}'
+SSL_DOMAIN='${ESC_SSL_DOM}'
+DUCKDNS_TOKEN='${ESC_DUCK_TOK}'
 HL_ENV_EOF
     # Единый источник истины: симлинк для обратной совместимости в ${HOMELAB_DIR}/homelab.env
     if [ "${HOMELAB_DIR}/homelab.env" != "$HOMELAB_ENV" ]; then
@@ -5265,6 +5285,232 @@ manage_external_disks_menu() {
 # ==============================================================================
 
 # Поиск актуального пути корневого сертификата Caddy Root CA
+#!/bin/sh
+set -e
+
+# ==============================================================================
+# 🔒 Управление SSL/TLS сертификатами (Local PKI vs Let's Encrypt Wildcard)
+# Поддержка DNS-01 через DuckDNS API без открытия портов наружу
+# ==============================================================================
+
+is_letsencrypt_ssl_active() {
+    [ "${SSL_TYPE:-local}" = "letsencrypt" ] && \
+    [ -n "${SSL_DOMAIN:-}" ] && \
+    [ -s "${SSL_FULLCHAIN_FILE:-/etc/ssl/caddy/fullchain.pem}" ] && \
+    [ -s "${SSL_KEY_FILE:-/etc/ssl/caddy/key.pem}" ]
+}
+
+# Гарантированная установка acme.sh и необходимых утилит в Alpine Linux
+install_acme_core() {
+    if ! command -v acme.sh >/dev/null 2>&1; then
+        echo "${C_CYN}[*] Установка acme.sh и криптографических утилит...${C_RES}"
+        ensure_alpine_community_repo
+        if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache acme.sh socat curl openssl >/dev/null 2>&1 || apk add acme.sh socat curl openssl >/dev/null 2>&1 || true
+        fi
+    fi
+    if ! command -v acme.sh >/dev/null 2>&1; then
+        echo "${C_RED}[X] Ошибка: Не удалось установить acme.sh!${C_RES}"
+        return 1
+    fi
+    return 0
+}
+
+# Настройка автоматического продления сертификата в crond Alpine
+ensure_acme_cron_job() {
+    CRON_CMD='acme.sh --cron --reloadcmd "/usr/sbin/caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile" >/dev/null 2>&1'
+    if [ -f "$CRON_FILE" ]; then
+        grep -Fq "acme.sh --cron" "$CRON_FILE" 2>/dev/null || echo "0 3 * * * ${CRON_CMD}" >> "$CRON_FILE"
+    else
+        mkdir -p "$(dirname "$CRON_FILE")"
+        echo "0 3 * * * ${CRON_CMD}" > "$CRON_FILE"
+    fi
+    chmod 600 "$CRON_FILE" 2>/dev/null || true
+    service_ctl cron enable >/dev/null 2>&1 || true
+    service_ctl cron start >/dev/null 2>&1 || true
+    return 0
+}
+
+# Выпуск боевого wildcard-сертификата Let's Encrypt через DuckDNS DNS-01 API
+issue_duckdns_cert() {
+    TARGET_SUB="$1"
+    TARGET_TOKEN="$2"
+    TARGET_SUB="$(printf "%s" "$TARGET_SUB" | tr 'A-Z' 'a-z' | sed 's/\.duckdns\.org$//;s/^\*\.//;s/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+    if [ -z "$TARGET_SUB" ] || [ -z "$TARGET_TOKEN" ]; then
+        echo "${C_RED}[X] Ошибка: Укажите субдомен и токен DuckDNS!${C_RES}"
+        return 1
+    fi
+
+    install_acme_core || return 1
+    FULL_DOMAIN="${TARGET_SUB}.duckdns.org"
+
+    echo "${C_CYN}[*] Регистрация аккаунта в Let's Encrypt ACME...${C_RES}"
+    acme.sh --register-account -m "admin@${FULL_DOMAIN}" --server letsencrypt >/dev/null 2>&1 || true
+
+    echo "${C_CYN}[*] Запрос Let's Encrypt Wildcard (*.${FULL_DOMAIN}) через DuckDNS DNS-01...${C_RES}"
+    echo "    (Добавление TXT-записи без открытия портов наружу, ожидание DNS 60 сек)..."
+
+    if ! DuckDNS_Token="$TARGET_TOKEN" acme.sh --server letsencrypt --issue --dns dns_duckdns -d "*.${FULL_DOMAIN}" --dnssleep 60 --force; then
+        echo "${C_RED}[X] Ошибка выпуска сертификата Let's Encrypt! Проверьте правильность токена DuckDNS.${C_RES}"
+        return 1
+    fi
+
+    mkdir -p "$SSL_CERTS_DIR"
+    chmod 755 /etc/ssl "$SSL_CERTS_DIR" 2>/dev/null || true
+    acme.sh --install-cert -d "*.${FULL_DOMAIN}" \
+        --cert-file "${SSL_CERTS_DIR}/cert.pem" \
+        --key-file "${SSL_KEY_FILE}" \
+        --fullchain-file "${SSL_FULLCHAIN_FILE}" >/dev/null 2>&1
+
+    chown -R caddy:caddy "$SSL_CERTS_DIR" 2>/dev/null || true
+    chmod 644 "$SSL_CERTS_DIR"/*.pem 2>/dev/null || true
+
+    ensure_acme_cron_job
+
+    SSL_TYPE="letsencrypt"
+    SSL_PROVIDER="duckdns"
+    SSL_DOMAIN="${FULL_DOMAIN}"
+    DUCKDNS_TOKEN="${TARGET_TOKEN}"
+    save_homelab_env
+
+    echo "${C_GRN}[✓] Wildcard-сертификат Let's Encrypt (*.${FULL_DOMAIN}) успешно получен и установлен!${C_RES}"
+    return 0
+}
+
+# Принудительное ручное продление сертификата
+renew_duckdns_cert_force() {
+    load_gateway_env
+    if [ -z "${SSL_DOMAIN:-}" ]; then
+        echo "${C_RED}[X] Ошибка: Домен Let's Encrypt не настроен!${C_RES}"
+        return 1
+    fi
+    echo "${C_CYN}[*] Принудительное продление сертификата для *.${SSL_DOMAIN}...${C_RES}"
+    if DuckDNS_Token="${DUCKDNS_TOKEN:-}" acme.sh --renew -d "*.${SSL_DOMAIN}" --force; then
+        acme.sh --install-cert -d "*.${SSL_DOMAIN}" \
+            --cert-file "${SSL_CERTS_DIR}/cert.pem" \
+            --key-file "${SSL_KEY_FILE}" \
+            --fullchain-file "${SSL_FULLCHAIN_FILE}" >/dev/null 2>&1
+        chmod 644 "$SSL_CERTS_DIR"/*.pem 2>/dev/null || true
+        reload_caddy_safe
+        echo "${C_GRN}[✓] Сертификат успешно обновлен, Caddy перезагружен.${C_RES}"
+        return 0
+    else
+        echo "${C_RED}[X] Ошибка продления сертификата!${C_RES}"
+        return 1
+    fi
+}
+
+# Переключение обратно на локальный самоподписной PKI (*.lan)
+switch_to_local_pki() {
+    load_gateway_env
+    SSL_TYPE="local"
+    save_homelab_env
+    echo "${C_CYN}[*] Переключение HTTPS на локальный PKI (*.lan)...${C_RES}"
+    sync_caddy_main_config
+    reload_caddy_safe
+    sync_agh_homelab_rewrites
+    echo "${C_GRN}[✓] Шлюз переведен в оффлайн-режим Local PKI (*.lan).${C_RES}"
+    return 0
+}
+
+# Наглядный отчет о текущем статусе SSL/TLS
+show_ssl_status() {
+    load_gateway_env
+    ui_box_top "🔒 СТАТУС SSL/TLS СЕРТИФИКАТА ШЛЮЗА"
+
+    if is_letsencrypt_ssl_active; then
+        ui_box_row "Режим HTTPS:       ${C_GRN}● Валидный Let's Encrypt Wildcard${C_RES} (Глобально доверенный)"
+        ui_box_row "Рабочий домен:     ${C_CYN}*.${SSL_DOMAIN}${C_RES} (Провайдер: ${SSL_PROVIDER})"
+        ui_box_row "Файлы ключей:      ${SSL_FULLCHAIN_FILE}"
+
+        if [ -s "$SSL_FULLCHAIN_FILE" ] && command -v openssl >/dev/null 2>&1; then
+            ISSUER_NAME=$(openssl x509 -in "$SSL_FULLCHAIN_FILE" -noout -issuer 2>/dev/null | sed 's/.*CN[[:space:]]*=[[:space:]]*//' || echo "Let's Encrypt")
+            NOT_AFTER=$(openssl x509 -in "$SSL_FULLCHAIN_FILE" -noout -enddate 2>/dev/null | cut -d= -f2 || true)
+            CLEAN_DATE=$(printf "%s" "$NOT_AFTER" | sed -E 's/  +/ 0/')
+            EXP_SEC=$(date -D '%b %d %T %Y GMT' -d "$CLEAN_DATE" +%s 2>/dev/null || date -d "$NOT_AFTER" +%s 2>/dev/null || echo 0)
+            NOW_SEC=$(date +%s 2>/dev/null || echo 0)
+            if [ "$EXP_SEC" -gt "$NOW_SEC" ]; then
+                DAYS_LEFT=$(( (EXP_SEC - NOW_SEC) / 86400 ))
+                ui_box_row "Действителен до:   ${NOT_AFTER} (${C_GRN}${DAYS_LEFT} дн. осталось${C_RES}, эмитент: ${ISSUER_NAME})"
+            else
+                ui_box_row "Действителен до:   ${NOT_AFTER} (эмитент: ${ISSUER_NAME})"
+            fi
+        fi
+        ui_box_row "Авто-продление:    ${C_GRN}● АКТИВНО${C_RES} (crond проверяет продление раз в сутки в 03:00)"
+    else
+        ui_box_row "Режим HTTPS:       ${C_CYN}● Локальный CA (Local PKI / *.lan)${C_RES}"
+        ui_box_row "Корневой CA:       http://${DOM_CA:-ca.lan} (установка сертификата на устройства)"
+        ui_box_row "Статус доверия:    Требует однократной установки homelab-root-ca.crt на клиентах"
+        ui_box_row "Альтернатива:      Возможно переключение на бесплатный Let's Encrypt (DuckDNS)"
+    fi
+
+    ui_box_bottom
+    return 0
+}
+
+# Интерактивное TUI-меню управления SSL/TLS сертификатами
+prompt_ssl_management_menu() {
+    load_gateway_env
+    while true; do
+        show_ssl_status
+        echo ""
+        echo " ${C_BLD}Выберите действие:${C_RES}"
+        echo "   ${C_CYN}1${C_RES}) Подключить / перевыпустить Let's Encrypt Wildcard (DuckDNS)"
+        echo "   ${C_CYN}2${C_RES}) Переключиться на локальный самоподписной PKI (*.lan)"
+        echo "   ${C_CYN}3${C_RES}) Принудительно продлить сертификат (Force Renew)"
+        echo "   ${C_CYN}0${C_RES}) Назад в главное меню"
+        echo ""
+        printf " Ваш выбор [0-3]: "
+        read -r SSL_CHOICE || break
+        case "$SSL_CHOICE" in
+            1)
+                echo ""
+                echo "${C_BLD}--- Настройка Let's Encrypt Wildcard через DuckDNS (DNS-01) ---${C_RES}"
+                echo " Сертификат будет действовать на все сервисы (zashboard, adguard, vaultwarden и др.)"
+                echo " Регистрация и получение токена: ${C_CYN}https://www.duckdns.org${C_RES}"
+                echo ""
+                printf " Введите субдомен DuckDNS (например, 'dmzzone' для dmzzone.duckdns.org) [${SSL_DOMAIN%%.*}]: "
+                read -r IN_SUB
+                [ -z "$IN_SUB" ] && IN_SUB="${SSL_DOMAIN%%.*}"
+                printf " Введите токен DuckDNS (UUID) [${DUCKDNS_TOKEN:-}]: "
+                read -r IN_TOKEN
+                [ -z "$IN_TOKEN" ] && IN_TOKEN="${DUCKDNS_TOKEN:-}"
+
+                if [ -n "$IN_SUB" ] && [ -n "$IN_TOKEN" ]; then
+                    if issue_duckdns_cert "$IN_SUB" "$IN_TOKEN"; then
+                        sync_caddy_main_config
+                        reload_caddy_safe
+                        sync_agh_homelab_rewrites
+                        ui_ok_msg "Все сервисы переведены на официальный Let's Encrypt Wildcard!"
+                        echo "   Панель Sing-Box: https://zashboard.${IN_SUB}.duckdns.org"
+                        echo "   Панель AdGuard:  https://adguard.${IN_SUB}.duckdns.org"
+                    fi
+                else
+                    echo "${C_RED}[X] Отменено: субдомен или токен не указаны.${C_RES}"
+                fi
+                printf "\nНажмите Enter для продолжения..."
+                read -r _
+                ;;
+            2)
+                switch_to_local_pki
+                printf "\nНажмите Enter для продолжения..."
+                read -r _
+                ;;
+            3)
+                renew_duckdns_cert_force
+                printf "\nНажмите Enter для продолжения..."
+                read -r _
+                ;;
+            0|q|exit)
+                break
+                ;;
+            *)
+                ;;
+        esac
+    done
+    return 0
+}
 find_caddy_root_cert() {
     for c_cand in \
         "$CADDY_ROOT_CERT" \
@@ -5377,6 +5623,28 @@ sync_caddy_main_config() {
     mkdir -p /etc/caddy "$CADDY_CONFD" "$PKI_PORTAL_DIR"
     chmod 755 /etc/caddy "$CADDY_CONFD" 2>/dev/null || true
     CUR_LIP_CDY=$(get_current_lan_ip)
+    LE_MAIN_BLOCKS=""
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        LE_MAIN_BLOCKS="https://adguard.${SSL_DOMAIN} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+
+https://zashboard.${SSL_DOMAIN}, https://singbox.${SSL_DOMAIN} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    encode zstd gzip
+    @root_ui path /
+    redir @root_ui /ui/ 302
+    reverse_proxy 127.0.0.1:9090 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}"
+    fi
     cat << CADDY_MAIN > "${CADDY_CONF}.tmp.$$"
 {
     local_certs
@@ -5434,6 +5702,8 @@ https://${DOM_ZASHBOARD}, https://${DOM_SINGBOX} {
         header_up X-Real-IP {remote_host}
     }
 }
+
+${LE_MAIN_BLOCKS}
 
 import ${CADDY_CONFD}/*.caddy
 CADDY_MAIN
@@ -5509,6 +5779,37 @@ register_caddy_site() {
         fi
     fi
 
+    LE_SITE_BLOCK=""
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        if [ "$SITE_MOD" = "vaultwarden" ]; then
+            LE_SITE_BLOCK="
+https://${SITE_MOD}.${SSL_DOMAIN} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    encode zstd gzip
+
+    request_body {
+        max_size 525MB
+    }
+
+    reverse_proxy 127.0.0.1:${SITE_PORT} {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}"
+        else
+            LE_SITE_BLOCK="
+https://${SITE_MOD}.${SSL_DOMAIN} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    encode zstd gzip
+${AUTH_BLOCK}
+    reverse_proxy 127.0.0.1:${SITE_PORT} {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}"
+        fi
+    fi
+
     if [ "$SITE_MOD" = "vaultwarden" ]; then
         # Чистый эталонный профиль проксирования для Vaultwarden
         cat << VW_SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
@@ -5525,6 +5826,7 @@ https://${SITE_DOM} {
         header_up X-Real-IP {remote_host}
     }
 }
+${LE_SITE_BLOCK}
 VW_SITE_EOF
     else
         cat << SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
@@ -5537,6 +5839,7 @@ ${AUTH_BLOCK}
         header_up X-Real-IP {remote_host}
     }
 }
+${LE_SITE_BLOCK}
 SITE_EOF
     fi
     chmod 644 "${CADDY_CONFD}/${SITE_MOD}.caddy" 2>/dev/null || true
@@ -7223,20 +7526,37 @@ print_quick_access_card() {
     load_gateway_env
     CUR_LIP=$(get_current_lan_ip)
     HN_VAL=$(hostname -s 2>/dev/null || echo "HOMELAB")
-    ui_box_top "🔗 КАРТОЧКА БЫСТРОГО ДОСТУПА К СЕРВЕРУ (${CUR_LIP} | *.lan)"
-    ui_box_row "▸ Панель Sing-Box (Zashboard): ${C_GRN}https://${DOM_ZASHBOARD}${C_RES}  ${C_DIM}(или http://${CUR_LIP}:9090/ui)${C_RES}"
-    ui_box_row "▸ Панель AdGuard Home (DNS):   ${C_GRN}https://${DOM_ADGUARD}${C_RES}    ${C_DIM}(или http://${CUR_LIP}:3000)${C_RES}"
-    ui_box_row "▸ Установка сертификата PKI:   ${C_CYN}http://${DOM_CA}${C_RES}          ${C_DIM}(Windows / Linux / Android в 1 клик)${C_RES}"
-    ui_box_row "▸ Единый логин сервисов:       ${C_BLD}${AGH_USER:-admin}${C_RES} ${C_DIM}(пароль синхронизирован во всех модулях)${C_RES}"
-    ui_box_sep "АКТИВНЫЕ МОДУЛИ HOMELAB И СЕТЕВЫЕ ШАРЫ"
-    is_module_enabled "samba"       && ui_box_row "▸ Сетевой диск Samba (SMB3):   ${C_CYN}\\\\${HN_VAL}\\storage${C_RES} │ ${C_CYN}\\\\${CUR_LIP}\\storage${C_RES} (логин: ${C_BLD}${SMB_USER:-admin}${C_RES})"
-    is_module_enabled "vaultwarden" && ui_box_row "▸ Пароли (Vaultwarden):        ${C_GRN}https://${DOM_VAULTWARDEN}${C_RES} ${C_DIM}(админ-панель: /admin)${C_RES}"
-    is_module_enabled "jellyfin"    && ui_box_row "▸ Кинотеатр (Jellyfin):        ${C_GRN}https://${DOM_JELLYFIN}${C_RES}    ${C_DIM}(Фильмы / Сериалы / Музыка)${C_RES}"
-    is_module_enabled "navidrome"   && ui_box_row "▸ Музыка (Navidrome Subsonic): ${C_GRN}https://${DOM_NAVIDROME}${C_RES}   ${C_DIM}(каталог: ${STORAGE_MUSIC})${C_RES}"
-    is_module_enabled "ytdlp"       && ui_box_row "▸ Загрузчик видео/аудио:       ${C_GRN}https://${DOM_YTDLP}${C_RES}   ${C_DIM}(авто-обложки и теги)${C_RES}"
-    is_module_enabled "torrent"     && ui_box_row "▸ Торренты (qBittorrent):      ${C_GRN}https://${DOM_TORRENT}${C_RES}    ${C_DIM}(Hardlink-импорт в медиатеку)${C_RES}"
-    is_module_enabled "forgejo"     && ui_box_row "▸ Git-сервер (Forgejo):        ${C_GRN}https://${DOM_FORGEJO}${C_RES}"
-    is_module_enabled "code"        && ui_box_row "▸ VS Code в браузере:          ${C_GRN}https://${DOM_CODE}${C_RES}"
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        ui_box_top "🔗 КАРТОЧКА БЫСТРОГО ДОСТУПА К СЕРВЕРУ (${CUR_LIP} | *.${SSL_DOMAIN})"
+        ui_box_row "▸ Режим сертификата:      ${C_GRN}● Валидный Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
+        ui_box_row "▸ Панель Sing-Box:        ${C_GRN}https://zashboard.${SSL_DOMAIN}${C_RES}  ${C_DIM}(или http://${CUR_LIP}:9090/ui)${C_RES}"
+        ui_box_row "▸ Панель AdGuard Home:    ${C_GRN}https://adguard.${SSL_DOMAIN}${C_RES}    ${C_DIM}(или http://${CUR_LIP}:3000)${C_RES}"
+        ui_box_row "▸ Единый логин сервисов:  ${C_BLD}${AGH_USER:-admin}${C_RES} ${C_DIM}(пароль синхронизирован во всех модулях)${C_RES}"
+        ui_box_sep "АКТИВНЫЕ МОДУЛИ HOMELAB И СЕТЕВЫЕ ШАРЫ"
+        is_module_enabled "samba"       && ui_box_row "▸ Сетевой диск Samba (SMB3):   ${C_CYN}\\\\${HN_VAL}\\storage${C_RES} │ ${C_CYN}\\\\${CUR_LIP}\\storage${C_RES}"
+        is_module_enabled "vaultwarden" && ui_box_row "▸ Пароли (Vaultwarden):        ${C_GRN}https://vaultwarden.${SSL_DOMAIN}${C_RES} ${C_DIM}(админ: /admin)${C_RES}"
+        is_module_enabled "jellyfin"    && ui_box_row "▸ Кинотеатр (Jellyfin):        ${C_GRN}https://jellyfin.${SSL_DOMAIN}${C_RES}"
+        is_module_enabled "navidrome"   && ui_box_row "▸ Музыка (Navidrome):          ${C_GRN}https://music.${SSL_DOMAIN}${C_RES}"
+        is_module_enabled "ytdlp"       && ui_box_row "▸ Загрузчик видео/аудио:       ${C_GRN}https://downloads.${SSL_DOMAIN}${C_RES}"
+        is_module_enabled "torrent"     && ui_box_row "▸ Торренты (qBittorrent):      ${C_GRN}https://torrents.${SSL_DOMAIN}${C_RES}"
+        is_module_enabled "forgejo"     && ui_box_row "▸ Git-сервер (Forgejo):        ${C_GRN}https://forgejo.${SSL_DOMAIN}${C_RES}"
+        is_module_enabled "code"        && ui_box_row "▸ VS Code в браузере:          ${C_GRN}https://code.${SSL_DOMAIN}${C_RES}"
+    else
+        ui_box_top "🔗 КАРТОЧКА БЫСТРОГО ДОСТУПА К СЕРВЕРУ (${CUR_LIP} | *.lan)"
+        ui_box_row "▸ Панель Sing-Box (Zashboard): ${C_GRN}https://${DOM_ZASHBOARD}${C_RES}  ${C_DIM}(или http://${CUR_LIP}:9090/ui)${C_RES}"
+        ui_box_row "▸ Панель AdGuard Home (DNS):   ${C_GRN}https://${DOM_ADGUARD}${C_RES}    ${C_DIM}(или http://${CUR_LIP}:3000)${C_RES}"
+        ui_box_row "▸ Установка сертификата PKI:   ${C_CYN}http://${DOM_CA}${C_RES}          ${C_DIM}(Windows / Linux / Android в 1 клик)${C_RES}"
+        ui_box_row "▸ Единый логин сервисов:       ${C_BLD}${AGH_USER:-admin}${C_RES} ${C_DIM}(пароль синхронизирован во всех модулях)${C_RES}"
+        ui_box_sep "АКТИВНЫЕ МОДУЛИ HOMELAB И СЕТЕВЫЕ ШАРЫ"
+        is_module_enabled "samba"       && ui_box_row "▸ Сетевой диск Samba (SMB3):   ${C_CYN}\\\\${HN_VAL}\\storage${C_RES} │ ${C_CYN}\\\\${CUR_LIP}\\storage${C_RES} (логин: ${C_BLD}${SMB_USER:-admin}${C_RES})"
+        is_module_enabled "vaultwarden" && ui_box_row "▸ Пароли (Vaultwarden):        ${C_GRN}https://${DOM_VAULTWARDEN}${C_RES} ${C_DIM}(админ-панель: /admin)${C_RES}"
+        is_module_enabled "jellyfin"    && ui_box_row "▸ Кинотеатр (Jellyfin):        ${C_GRN}https://${DOM_JELLYFIN}${C_RES}    ${C_DIM}(Фильмы / Сериалы / Музыка)${C_RES}"
+        is_module_enabled "navidrome"   && ui_box_row "▸ Музыка (Navidrome Subsonic): ${C_GRN}https://${DOM_NAVIDROME}${C_RES}   ${C_DIM}(каталог: ${STORAGE_MUSIC})${C_RES}"
+        is_module_enabled "ytdlp"       && ui_box_row "▸ Загрузчик видео/аудио:       ${C_GRN}https://${DOM_YTDLP}${C_RES}   ${C_DIM}(авто-обложки и теги)${C_RES}"
+        is_module_enabled "torrent"     && ui_box_row "▸ Торренты (qBittorrent):      ${C_GRN}https://${DOM_TORRENT}${C_RES}    ${C_DIM}(Hardlink-импорт в медиатеку)${C_RES}"
+        is_module_enabled "forgejo"     && ui_box_row "▸ Git-сервер (Forgejo):        ${C_GRN}https://${DOM_FORGEJO}${C_RES}"
+        is_module_enabled "code"        && ui_box_row "▸ VS Code в браузере:          ${C_GRN}https://${DOM_CODE}${C_RES}"
+    fi
     ui_box_bottom
     return 0
 }
@@ -7353,6 +7673,8 @@ create_unified_backup() {
     [ -f "$AGH_CONF" ] && BACKUP_PATHS="$BACKUP_PATHS $AGH_CONF"
     [ -f "$ALPINE_NFT_CONF" ] && BACKUP_PATHS="$BACKUP_PATHS $ALPINE_NFT_CONF"
     [ -d /etc/caddy ] && BACKUP_PATHS="$BACKUP_PATHS /etc/caddy"
+    [ -d /etc/ssl/caddy ] && BACKUP_PATHS="$BACKUP_PATHS /etc/ssl/caddy"
+    [ -d /root/.acme.sh ] && BACKUP_PATHS="$BACKUP_PATHS /root/.acme.sh"
     [ -d /var/lib/caddy ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/caddy"
     [ -d /etc/samba ] && BACKUP_PATHS="$BACKUP_PATHS /etc/samba"
     [ -d /var/lib/samba/private ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/samba/private"
@@ -8128,6 +8450,13 @@ run_gateway_quick_check() {
         fi
     fi
 
+    # 2.5. Статус SSL/TLS
+    if is_letsencrypt_ssl_active 2>/dev/null; then
+        ui_box_row "${C_GRN}[✔]${C_RES} SSL/TLS Сертификат:   ${C_GRN}Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
+    else
+        ui_box_row "${C_CYN}[✔]${C_RES} SSL/TLS Сертификат:   Локальный PKI (*.lan)"
+    fi
+
     # 3. AdGuard Home DNS (:53)
     if nc -z -u -w 1 127.0.0.1 53 >/dev/null 2>&1 || pgrep AdGuardHome >/dev/null 2>&1; then
         ui_box_row "${C_GRN}[✔]${C_RES} AdGuard Home DNS:     ${C_GRN}АКТИВЕН${C_RES} (127.0.0.1:53 слушает запросы)"
@@ -8343,7 +8672,7 @@ show_homelab_menu() {
         ui_box_row "${C_CYN}6)${C_RES}  📜 Просмотр живых логов сервисов Homelab"
         ui_box_row "${C_CYN}7)${C_RES}  ${C_GRN}💽 Внешние накопители (USB/SATA/NVMe), LUKS2, ФС (ext4/btrfs/f2fs) и перенос данных${C_RES}"
         ui_box_row "${C_CYN}8)${C_RES}  📁 Настройка сетевого диска Samba и обнаружения (Windows 11 24H2+ / Linux)"
-        ui_box_row "${C_CYN}9)${C_RES}  🔒 Локальные домены (*.lan) и установка сертификата HTTPS (http://ca.lan)"
+        ui_box_row "${C_CYN}9)${C_RES}  🔒 Управление SSL/TLS: Валидный Let's Encrypt (DuckDNS) vs Локальный PKI (*.lan)"
         ui_box_row "${C_CYN}10)${C_RES} 📦 Резервное копирование и восстановление (Шлюз + БД SQLite + Telegram)"
         ui_box_row "${C_CYN}11)${C_RES} 🎬🎵 Архитектура медиатеки: режим работы Jellyfin и Navidrome"
         ui_box_row "${C_CYN}12)${C_RES} ${C_YEL}🔓 Быстро разблокировать внешний диск LUKS2 (gateway unlock)${C_RES}"
@@ -8467,11 +8796,7 @@ show_homelab_menu() {
                 read -r _ < /dev/tty || true
                 ;;
             9)
-                sync_agh_homelab_rewrites "$(get_current_lan_ip)"
-                reload_caddy_safe || true
-                show_https_ca_instructions
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                prompt_ssl_management_menu
                 ;;
             10)
                 echo ""
@@ -9283,6 +9608,33 @@ gateway_cli_dispatch() {
             *)
                 ui_warn_box "Укажите действие для домена: direct или proxy." \
                             "Пример: gateway domain direct https://kinopoisk.ru  ИЛИ  gateway domain proxy https://openai.com"
+                ;;
+        esac
+        ;;
+    ssl|cert|certs|tls)
+        case "${2:-}" in
+            status)
+                show_ssl_status
+                ;;
+            renew)
+                renew_duckdns_cert_force
+                ;;
+            local|lan)
+                switch_to_local_pki
+                ;;
+            duckdns|setup)
+                if [ -n "${3:-}" ] && [ -n "${4:-}" ]; then
+                    if issue_duckdns_cert "$3" "$4"; then
+                        sync_caddy_main_config
+                        reload_caddy_safe
+                        sync_agh_homelab_rewrites
+                    fi
+                else
+                    prompt_ssl_management_menu
+                fi
+                ;;
+            *)
+                prompt_ssl_management_menu
                 ;;
         esac
         ;;

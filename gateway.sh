@@ -69,6 +69,7 @@ fi
 . "${GATEWAY_DIR}/modules/storage/disks.sh"
 
 # Загрузка веб-сервера Caddy и файлового сервера Samba
+. "${GATEWAY_DIR}/modules/caddy/ssl.sh"
 . "${GATEWAY_DIR}/modules/caddy/caddy.sh"
 . "${GATEWAY_DIR}/modules/samba/samba.sh"
 
