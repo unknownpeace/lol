@@ -182,7 +182,7 @@ gateway_cli_dispatch() {
                 lxc_control "attach" "${3:-}"
                 ;;
             snap|snapshot|snapshots)
-                lxc_manage_snapshots "${3:-list}" "${4:-}" "${5:-}"
+                lxc_manage_snapshots "${3:-}" "${4:-}" "${5:-}"
                 ;;
             autostart)
                 lxc_control "autostart" "${3:-}" "${4:-}"

@@ -356,9 +356,24 @@ lxc_control() {
 
 # Управление снимками (снапшотами) контейнера
 lxc_manage_snapshots() {
-    SUBACTION="${1:-}"
-    NAME="${2:-}"
-    SNAPNAME="${3:-}"
+    ARG1="${1:-}"
+    ARG2="${2:-}"
+    ARG3="${3:-}"
+
+    # Поддержка любого порядка аргументов: gw lxc snap <имя> <действие> ИЛИ gw lxc snap <действие> <имя>
+    case "$ARG1" in
+        create|snap|list|ls|restore|revert|delete|del|rm)
+            SUBACTION="$ARG1"
+            NAME="$ARG2"
+            SNAPNAME="$ARG3"
+            ;;
+        *)
+            NAME="$ARG1"
+            SUBACTION="$ARG2"
+            SNAPNAME="$ARG3"
+            ;;
+    esac
+    [ -z "$SUBACTION" ] && SUBACTION="list"
 
     if [ -z "$NAME" ]; then
         echo "Введите имя контейнера:"
@@ -378,11 +393,16 @@ lxc_manage_snapshots() {
             ui_ok_msg "Снимок контейнера ${NAME} успешно создан."
             lxc-snapshot -n "$NAME" -L 2>/dev/null || true
             ;;
-        list)
+        list|ls)
             ui_box_top "📸 СНИМКИ (СНАПШОТЫ) ДЛЯ КОНТЕЙНЕРА ${NAME}"
-            lxc-snapshot -n "$NAME" -L 2>/dev/null | while read -r line; do
-                ui_box_row "  • ${line}"
-            done
+            SN_LINES=$(lxc-snapshot -n "$NAME" -L 2>/dev/null || true)
+            if [ -n "$SN_LINES" ]; then
+                printf "%s\n" "$SN_LINES" | while read -r line; do
+                    ui_box_row "  • ${line}"
+                done
+            else
+                ui_box_row "  У контейнера ${NAME} пока нет сохраненных снимков."
+            fi
             ui_box_bottom
             ;;
         restore)
