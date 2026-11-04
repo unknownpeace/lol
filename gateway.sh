@@ -6,34 +6,48 @@ set -e
 # Точка входа и загрузчик модулей ядра, сети, Sing-Box и Homelab
 # ==============================================================================
 
-# Определение реального каталога расположения шлюза (с поддержкой symlink и source)
+# Определение реального каталога расположения шлюза (с поддержкой symlink, readlink -f и PATH)
 if [ -z "${GATEWAY_DIR:-}" ]; then
     TARGET="${BASH_SOURCE:-$0}"
-    T_BASE="$(basename "$TARGET" 2>/dev/null || true)"
-    if [ ! -f "$TARGET" ] || [ "$T_BASE" = "sh" ] || [ "$T_BASE" = "ash" ] || [ "$T_BASE" = "-sh" ] || [ "$T_BASE" = "-ash" ]; then
-        for cand in "/opt/gateway/gateway.sh" "/etc/gateway/gateway.sh" "./gateway.sh"; do
-            if [ -f "$cand" ]; then
-                TARGET="$cand"
-                break
-            fi
+    case "$TARGET" in
+        */*) ;;
+        *)
+            CMD_LOC=$(command -v "$TARGET" 2>/dev/null || true)
+            [ -n "$CMD_LOC" ] && TARGET="$CMD_LOC"
+            ;;
+    esac
+    REAL_TARGET=$(readlink -f "$TARGET" 2>/dev/null || true)
+    if [ -n "$REAL_TARGET" ] && [ -f "$REAL_TARGET" ]; then
+        GATEWAY_DIR="$(cd -P "$(dirname "$REAL_TARGET")" && pwd)"
+    else
+        while [ -h "$TARGET" ]; do
+            DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
+            TARGET="$(readlink "$TARGET")"
+            case "$TARGET" in
+                /*) ;;
+                *) TARGET="$DIR/$TARGET" ;;
+            esac
         done
+        if [ ! -f "$TARGET" ]; then
+            for cand in "/opt/gateway/gateway.sh" "/etc/gateway/gateway.sh" "./gateway.sh"; do
+                if [ -f "$cand" ]; then
+                    TARGET="$cand"
+                    break
+                fi
+            done
+        fi
+        GATEWAY_DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
     fi
-    while [ -h "$TARGET" ]; do
-        DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
-        TARGET="$(readlink "$TARGET")"
-        case "$TARGET" in
-            /*) ;;
-            *) TARGET="$DIR/$TARGET" ;;
-        esac
-    done
-    GATEWAY_DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
 fi
 export GATEWAY_DIR
 
-# Автоматическая привязка глобальной команды /usr/bin/gateway (при наличии прав)
+# Автоматическая привязка глобальных команд /usr/bin/gateway и /usr/bin/gw (при наличии прав)
 if [ -d "/usr/bin" ] && [ -w "/usr/bin" ]; then
-    if [ ! -L "/usr/bin/gateway" ] || [ "$(readlink /usr/bin/gateway 2>/dev/null)" != "${GATEWAY_DIR}/gateway.sh" ]; then
+    if [ ! -L "/usr/bin/gateway" ] || [ "$(readlink -f /usr/bin/gateway 2>/dev/null)" != "${GATEWAY_DIR}/gateway.sh" ]; then
         ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gateway 2>/dev/null || true
+    fi
+    if [ ! -L "/usr/bin/gw" ] || [ "$(readlink -f /usr/bin/gw 2>/dev/null)" != "${GATEWAY_DIR}/gateway.sh" ]; then
+        ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gw 2>/dev/null || true
     fi
 fi
 

@@ -106,11 +106,30 @@ list_available_external_disks() {
     return 0
 }
 
-# Выбор устройства из таблицы по номеру [1..N] или прямому пути /dev/...
+# Автоматический поиск первого внешнего накопителя для тихой установки (STORAGE_DISK="auto")
+get_first_available_external_disk() {
+    ensure_disk_tools
+    ROOT_D=$(get_root_base_disk)
+    lsblk -rnpo NAME,TYPE,MOUNTPOINT 2>/dev/null | awk \
+        -v root_d="$ROOT_D" '
+        $2 == "disk" || $2 == "part" {
+            dev = $1
+            mp = $3
+            if (dev == root_d || index(dev, root_d "p") == 1 || index(dev, root_d "1") == 1 || index(dev, root_d "2") == 1 || index(dev, root_d "3") == 1 || index(dev, root_d "4") == 1) next
+            if (mp == "/" || mp == "/boot" || mp == "/var" || mp == "[SWAP]") next
+            print dev
+            exit
+        }'
+}
+
+# Выбор устройства из таблицы по номеру [1..N], ключевому слову 'auto' или прямому пути /dev/...
 resolve_disk_selection() {
     RAW_SEL=$(printf "%s" "${1:-}" | tr -d ' \t\r\n')
     [ -z "$RAW_SEL" ] && return 1
     case "$RAW_SEL" in
+        auto|AUTO)
+            PICKED_DEV=$(get_first_available_external_disk)
+            ;;
         /dev/*)
             PICKED_DEV="$RAW_SEL"
             ;;
@@ -121,7 +140,7 @@ resolve_disk_selection() {
             PICKED_DEV=$(awk -v t="$RAW_SEL" 'NR == t {print $1; exit}' "$EXT_DISK_SCAN_CACHE" 2>/dev/null || true)
             ;;
     esac
-    [ -b "${PICKED_DEV:-}" ] || return 1
+    [ -n "${PICKED_DEV:-}" ] && [ -b "$PICKED_DEV" ] || return 1
     if is_system_protected_device "$PICKED_DEV"; then
         ui_warn_box "ЗАЩИТА ДАННЫХ: Выбран системный диск ОС (${PICKED_DEV})!" \
                     "Выберите только внешний накопитель USB / SATA / NVMe из списка." >&2
@@ -173,6 +192,7 @@ get_optimal_mount_opts() {
 mount_external_drive_to_storage() {
     TARGET_DEV="$1"
     AUTO_UNLOCK_ANS="${2:-ask}"
+    LUKS_PASS_OVERRIDE="${3:-}"
     ensure_disk_tools
     load_gateway_env
 
@@ -213,9 +233,14 @@ mount_external_drive_to_storage() {
             if [ -s "$LUKS_KEYFILE" ] && cryptsetup open "$TARGET_DEV" "$LUKS_MAPPER_NAME" --key-file "$LUKS_KEYFILE" 2>/dev/null; then
                 ui_ok_msg "Контейнер LUKS2 автоматически открыт с помощью сохраненного ключа ${LUKS_KEYFILE}!"
             else
-                printf "Введите пароль (passphrase) для разблокировки LUKS2 диска %s: " "$TARGET_DEV"
-                read -r LUKS_PASS < /dev/tty || true
-                LUKS_PASS=$(printf "%s" "$LUKS_PASS" | tr -d '\r\n')
+                LUKS_PASS=""
+                if [ -n "$LUKS_PASS_OVERRIDE" ]; then
+                    LUKS_PASS="$LUKS_PASS_OVERRIDE"
+                else
+                    printf "Введите пароль (passphrase) для разблокировки LUKS2 диска %s: " "$TARGET_DEV"
+                    read -r LUKS_PASS < /dev/tty || true
+                    LUKS_PASS=$(printf "%s" "$LUKS_PASS" | tr -d '\r\n')
+                fi
                 if ! printf "%s" "$LUKS_PASS" | cryptsetup open "$TARGET_DEV" "$LUKS_MAPPER_NAME" -; then
                     ui_warn_box "Неверный пароль или ошибка открытия контейнера LUKS2 (${TARGET_DEV})." \
                                 "Повторите попытку через команду: gateway unlock"
@@ -342,8 +367,10 @@ DMCRYPT_EOF
 # Форматирование выбранного накопителя (ext4 / btrfs / f2fs) с опциональным шифрованием LUKS2
 format_and_mount_external_drive() {
     RAW_DEV="$1"
-    FS_CHOICE="$2"   # ext4 | btrfs | f2fs
-    USE_LUKS="$3"    # yes | no
+    FS_CHOICE="${2:-ext4}"   # ext4 | btrfs | f2fs
+    USE_LUKS="${3:-no}"     # yes | no
+    CONFIRM_OVERRIDE="${4:-}"
+    PASS_OVERRIDE="${5:-}"
 
     ensure_disk_tools
     TARGET_DEV=$(resolve_disk_selection "$RAW_DEV" || true)
@@ -358,8 +385,14 @@ format_and_mount_external_drive() {
     echo "${C_RED}║${C_RES}   • Файловая система:   ${C_CYN}${FS_CHOICE}${C_RES}"
     echo "${C_RED}║${C_RES}   • Шифрование LUKS2:   $([ "$USE_LUKS" = "yes" ] && echo "${C_GRN}ДА (AES-XTS-PLAIN64 512-bit + Argon2id)${C_RES}" || echo "НЕТ")"
     echo "${C_RED}╚════════════════════════════════════════════════════════════════════════════${C_RES}"
-    printf "Для подтверждения форматирования введите заглавными буквами YES: "
-    read -r CONFIRM_FMT < /dev/tty || true
+
+    if [ "$CONFIRM_OVERRIDE" = "YES" ]; then
+        CONFIRM_FMT="YES"
+        ui_info_msg "Форматирование подтверждено автоматически через параметр / файл ответов."
+    else
+        printf "Для подтверждения форматирования введите заглавными буквами YES: "
+        read -r CONFIRM_FMT < /dev/tty || true
+    fi
     if [ "$CONFIRM_FMT" != "YES" ]; then
         ui_info_msg "Форматирование отменено."
         return 0
@@ -389,11 +422,15 @@ format_and_mount_external_drive() {
 
     FMT_TARGET="$TARGET_DEV"
     if [ "$USE_LUKS" = "yes" ]; then
-        printf "Задайте пароль (passphrase) для шифрования LUKS2 диска %s [Enter = использовать единый пароль шлюза]: " "$TARGET_DEV"
-        read -r NEW_LUKS_PASS < /dev/tty || true
-        NEW_LUKS_PASS=$(printf "%s" "$NEW_LUKS_PASS" | tr -d '\r\n')
-        load_gateway_env
-        [ -z "$NEW_LUKS_PASS" ] && NEW_LUKS_PASS="${ADMIN_PASS:-admin}"
+        if [ -n "$PASS_OVERRIDE" ]; then
+            NEW_LUKS_PASS="$PASS_OVERRIDE"
+        else
+            printf "Задайте пароль (passphrase) для шифрования LUKS2 диска %s [Enter = использовать единый пароль шлюза]: " "$TARGET_DEV"
+            read -r NEW_LUKS_PASS < /dev/tty || true
+            NEW_LUKS_PASS=$(printf "%s" "$NEW_LUKS_PASS" | tr -d '\r\n')
+            load_gateway_env
+            [ -z "$NEW_LUKS_PASS" ] && NEW_LUKS_PASS="${ADMIN_PASS:-admin}"
+        fi
 
         ui_step_progress 2 3 "Форматирование контейнера LUKS2 (cipher: aes-xts-plain64, key: 512 bit, pbkdf: argon2id)..."
         if ! printf "%s" "$NEW_LUKS_PASS" | cryptsetup luksFormat --type luks2 --cipher aes-xts-plain64 --key-size 512 --hash sha256 --pbkdf argon2id --batch-mode "$TARGET_DEV" -; then
@@ -430,7 +467,7 @@ format_and_mount_external_drive() {
     esac
     sync
 
-    mount_external_drive_to_storage "$TARGET_DEV" "yes"
+    mount_external_drive_to_storage "$TARGET_DEV" "yes" "${NEW_LUKS_PASS:-}"
     return 0
 }
 

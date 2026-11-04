@@ -185,17 +185,6 @@ show_homelab_menu() {
     return 0
 }
 
-# Безопасная самоустановка скрипта в качестве системной команды gateway (с очисткой CRLF и BOM)
-INSTALL_PATH="/usr/bin/gateway"
-SCRIPT_BASE="$(basename "$0" 2>/dev/null || true)"
-if [ -f "$0" ] && [ "$0" != "$INSTALL_PATH" ] && [ "$SCRIPT_BASE" != "sh" ] && [ "$SCRIPT_BASE" != "ash" ] && [ "$SCRIPT_BASE" != "-sh" ] && [ "$SCRIPT_BASE" != "-ash" ]; then
-    sed -i 's/\r$//; 1s/^\xEF\xBB\xBF//' "$0" 2>/dev/null || true
-    cp -f "$0" "$INSTALL_PATH"
-    chmod +x "$INSTALL_PATH"
-    detect_os
-    ui_ok_msg "Глобальная команда 'gateway' (Alpine Linux Homelab Edition) установлена в систему (${OS_NAME})."
-fi
-
 # ==============================================================================
 # Главное интерактивное меню управления (Шлюз + Пункт 13 Homelab + Доктор/LUKS2)
 # ==============================================================================

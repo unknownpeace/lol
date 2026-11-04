@@ -116,11 +116,37 @@ gateway_cli_dispatch() {
     links|urls|info)
         print_quick_access_card
         ;;
+    motd)
+        print_gateway_motd
+        ;;
+    passwd|password)
+        if [ -n "${2:-}" ]; then
+            change_unified_password "$2" "yes"
+        else
+            printf "Введите новый единый мастер-пароль: "
+            read -r IN_P < /dev/tty || true
+            IN_P=$(printf "%s" "$IN_P" | tr -d '\r\n')
+            change_unified_password "$IN_P"
+        fi
+        ;;
+    answers)
+        case "${2:-}" in
+            template|generate|example)
+                generate_answers_template "${3:-}"
+                ;;
+            verify|check|test)
+                verify_answers_file "${3:-}"
+                ;;
+            *)
+                echo "Использование: gw answers template [файл]  ИЛИ  gw answers verify [файл]"
+                ;;
+        esac
+        ;;
     disk|disks|storage)
         manage_external_disks_menu
         ;;
-    install)
-        run_installer
+    install|--answers*|-a|-f|--unattended)
+        run_installer "$@"
         ;;
     homelab)
         case "${2:-}" in

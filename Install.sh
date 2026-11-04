@@ -4798,11 +4798,30 @@ list_available_external_disks() {
     return 0
 }
 
-# Выбор устройства из таблицы по номеру [1..N] или прямому пути /dev/...
+# Автоматический поиск первого внешнего накопителя для тихой установки (STORAGE_DISK="auto")
+get_first_available_external_disk() {
+    ensure_disk_tools
+    ROOT_D=$(get_root_base_disk)
+    lsblk -rnpo NAME,TYPE,MOUNTPOINT 2>/dev/null | awk \
+        -v root_d="$ROOT_D" '
+        $2 == "disk" || $2 == "part" {
+            dev = $1
+            mp = $3
+            if (dev == root_d || index(dev, root_d "p") == 1 || index(dev, root_d "1") == 1 || index(dev, root_d "2") == 1 || index(dev, root_d "3") == 1 || index(dev, root_d "4") == 1) next
+            if (mp == "/" || mp == "/boot" || mp == "/var" || mp == "[SWAP]") next
+            print dev
+            exit
+        }'
+}
+
+# Выбор устройства из таблицы по номеру [1..N], ключевому слову 'auto' или прямому пути /dev/...
 resolve_disk_selection() {
     RAW_SEL=$(printf "%s" "${1:-}" | tr -d ' \t\r\n')
     [ -z "$RAW_SEL" ] && return 1
     case "$RAW_SEL" in
+        auto|AUTO)
+            PICKED_DEV=$(get_first_available_external_disk)
+            ;;
         /dev/*)
             PICKED_DEV="$RAW_SEL"
             ;;
@@ -4813,7 +4832,7 @@ resolve_disk_selection() {
             PICKED_DEV=$(awk -v t="$RAW_SEL" 'NR == t {print $1; exit}' "$EXT_DISK_SCAN_CACHE" 2>/dev/null || true)
             ;;
     esac
-    [ -b "${PICKED_DEV:-}" ] || return 1
+    [ -n "${PICKED_DEV:-}" ] && [ -b "$PICKED_DEV" ] || return 1
     if is_system_protected_device "$PICKED_DEV"; then
         ui_warn_box "ЗАЩИТА ДАННЫХ: Выбран системный диск ОС (${PICKED_DEV})!" \
                     "Выберите только внешний накопитель USB / SATA / NVMe из списка." >&2
@@ -4865,6 +4884,7 @@ get_optimal_mount_opts() {
 mount_external_drive_to_storage() {
     TARGET_DEV="$1"
     AUTO_UNLOCK_ANS="${2:-ask}"
+    LUKS_PASS_OVERRIDE="${3:-}"
     ensure_disk_tools
     load_gateway_env
 
@@ -4905,9 +4925,14 @@ mount_external_drive_to_storage() {
             if [ -s "$LUKS_KEYFILE" ] && cryptsetup open "$TARGET_DEV" "$LUKS_MAPPER_NAME" --key-file "$LUKS_KEYFILE" 2>/dev/null; then
                 ui_ok_msg "Контейнер LUKS2 автоматически открыт с помощью сохраненного ключа ${LUKS_KEYFILE}!"
             else
-                printf "Введите пароль (passphrase) для разблокировки LUKS2 диска %s: " "$TARGET_DEV"
-                read -r LUKS_PASS < /dev/tty || true
-                LUKS_PASS=$(printf "%s" "$LUKS_PASS" | tr -d '\r\n')
+                LUKS_PASS=""
+                if [ -n "$LUKS_PASS_OVERRIDE" ]; then
+                    LUKS_PASS="$LUKS_PASS_OVERRIDE"
+                else
+                    printf "Введите пароль (passphrase) для разблокировки LUKS2 диска %s: " "$TARGET_DEV"
+                    read -r LUKS_PASS < /dev/tty || true
+                    LUKS_PASS=$(printf "%s" "$LUKS_PASS" | tr -d '\r\n')
+                fi
                 if ! printf "%s" "$LUKS_PASS" | cryptsetup open "$TARGET_DEV" "$LUKS_MAPPER_NAME" -; then
                     ui_warn_box "Неверный пароль или ошибка открытия контейнера LUKS2 (${TARGET_DEV})." \
                                 "Повторите попытку через команду: gateway unlock"
@@ -5034,8 +5059,10 @@ DMCRYPT_EOF
 # Форматирование выбранного накопителя (ext4 / btrfs / f2fs) с опциональным шифрованием LUKS2
 format_and_mount_external_drive() {
     RAW_DEV="$1"
-    FS_CHOICE="$2"   # ext4 | btrfs | f2fs
-    USE_LUKS="$3"    # yes | no
+    FS_CHOICE="${2:-ext4}"   # ext4 | btrfs | f2fs
+    USE_LUKS="${3:-no}"     # yes | no
+    CONFIRM_OVERRIDE="${4:-}"
+    PASS_OVERRIDE="${5:-}"
 
     ensure_disk_tools
     TARGET_DEV=$(resolve_disk_selection "$RAW_DEV" || true)
@@ -5050,8 +5077,14 @@ format_and_mount_external_drive() {
     echo "${C_RED}║${C_RES}   • Файловая система:   ${C_CYN}${FS_CHOICE}${C_RES}"
     echo "${C_RED}║${C_RES}   • Шифрование LUKS2:   $([ "$USE_LUKS" = "yes" ] && echo "${C_GRN}ДА (AES-XTS-PLAIN64 512-bit + Argon2id)${C_RES}" || echo "НЕТ")"
     echo "${C_RED}╚════════════════════════════════════════════════════════════════════════════${C_RES}"
-    printf "Для подтверждения форматирования введите заглавными буквами YES: "
-    read -r CONFIRM_FMT < /dev/tty || true
+
+    if [ "$CONFIRM_OVERRIDE" = "YES" ]; then
+        CONFIRM_FMT="YES"
+        ui_info_msg "Форматирование подтверждено автоматически через параметр / файл ответов."
+    else
+        printf "Для подтверждения форматирования введите заглавными буквами YES: "
+        read -r CONFIRM_FMT < /dev/tty || true
+    fi
     if [ "$CONFIRM_FMT" != "YES" ]; then
         ui_info_msg "Форматирование отменено."
         return 0
@@ -5081,11 +5114,15 @@ format_and_mount_external_drive() {
 
     FMT_TARGET="$TARGET_DEV"
     if [ "$USE_LUKS" = "yes" ]; then
-        printf "Задайте пароль (passphrase) для шифрования LUKS2 диска %s [Enter = использовать единый пароль шлюза]: " "$TARGET_DEV"
-        read -r NEW_LUKS_PASS < /dev/tty || true
-        NEW_LUKS_PASS=$(printf "%s" "$NEW_LUKS_PASS" | tr -d '\r\n')
-        load_gateway_env
-        [ -z "$NEW_LUKS_PASS" ] && NEW_LUKS_PASS="${ADMIN_PASS:-admin}"
+        if [ -n "$PASS_OVERRIDE" ]; then
+            NEW_LUKS_PASS="$PASS_OVERRIDE"
+        else
+            printf "Задайте пароль (passphrase) для шифрования LUKS2 диска %s [Enter = использовать единый пароль шлюза]: " "$TARGET_DEV"
+            read -r NEW_LUKS_PASS < /dev/tty || true
+            NEW_LUKS_PASS=$(printf "%s" "$NEW_LUKS_PASS" | tr -d '\r\n')
+            load_gateway_env
+            [ -z "$NEW_LUKS_PASS" ] && NEW_LUKS_PASS="${ADMIN_PASS:-admin}"
+        fi
 
         ui_step_progress 2 3 "Форматирование контейнера LUKS2 (cipher: aes-xts-plain64, key: 512 bit, pbkdf: argon2id)..."
         if ! printf "%s" "$NEW_LUKS_PASS" | cryptsetup luksFormat --type luks2 --cipher aes-xts-plain64 --key-size 512 --hash sha256 --pbkdf argon2id --batch-mode "$TARGET_DEV" -; then
@@ -5122,7 +5159,7 @@ format_and_mount_external_drive() {
     esac
     sync
 
-    mount_external_drive_to_storage "$TARGET_DEV" "yes"
+    mount_external_drive_to_storage "$TARGET_DEV" "yes" "${NEW_LUKS_PASS:-}"
     return 0
 }
 
@@ -8008,6 +8045,8 @@ prompt_homelab_modules_wizard() {
 
 # ==============================================================================
 # Главный мастер установки и настройки (Эксклюзивно Alpine Linux Homelab Edition)
+# Поддерживает как интерактивный режим, так и полностью тихий запуск:
+#   gateway install --answers /path/to/gateway.answers
 # ==============================================================================
 run_installer() {
     umask 022
@@ -8015,164 +8054,271 @@ run_installer() {
     init_user_lists
     init_homelab_registry
 
-    ui_banner "INSTALLER WIZARD // МАСТЕР УСТАНОВКИ ШЛЮЗА И HOMELAB"
-    echo "Система: ${OS_NAME} [${ARCH_RAW} -> ${SB_ARCH}]"
-    echo "Память:  ${TOTAL_RAM_MB} МБ RAM (Лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
-    ui_box_sep
+    # 0. Обработка аргументов командной строки и поиск файла автоматических ответов
+    ANSWERS_FILE=""
+    IS_UNATTENDED="no"
 
-    load_gateway_env
-    SAVED_LAN_IP=$(get_current_lan_ip)
-    SAVED_SUB_URL="$SUB_URL"
-    SAVED_GW_IP="$GW_IP"
-    SAVED_PASS="$ADMIN_PASS"
-    SAVED_AGH_USER=""
-
-    if [ -f "$AGH_CONF" ]; then
-        SAVED_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
-    fi
-
-    # 1. Запрос ссылки на подписку, прямого ключа или бесплатного гибридного WARP
-    USE_INITIAL_WARP="no"
-    if [ -n "$SAVED_SUB_URL" ]; then
-        printf "Введите подписку (http://...), ключ (vless://...) или 'warp' [Enter = оставить %s]: " "$SAVED_SUB_URL"
-    elif has_my_nodes; then
-        printf "Введите подписку (http://...), ключ или 'warp' [Enter = оставить ключи в my_nodes.yaml]: "
-    elif is_warp_enabled; then
-        printf "Введите подписку (http://...), ключ или 'warp' [Enter = оставить текущий Amnezia WARP]: "
-    else
-        printf "Введите подписку (http://...), ключ (vless://...) или 'warp' (бесплатный WARP 2.0 + MASQUE H2): "
-    fi
-    read -r INPUT_SUB_URL < /dev/tty || true
-    INPUT_SUB_URL=$(printf "%s" "$INPUT_SUB_URL" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-    if [ -n "$INPUT_SUB_URL" ]; then
-        apply_subscription_input "$INPUT_SUB_URL"
-    elif [ -z "$SAVED_SUB_URL" ] && ! has_my_nodes && ! is_warp_enabled; then
-        printf "Прокси не указаны. Сгенерировать бесплатный безлимитный Amnezia WARP 2.0 + MASQUE H2? (y/n) [Enter = y]: "
-        read -r WARP_FALLBACK < /dev/tty || true
-        WARP_FALLBACK=$(printf "%s" "$WARP_FALLBACK" | tr -d ' \t\r\n')
-        [ -z "$WARP_FALLBACK" ] && WARP_FALLBACK="y"
-        case "$WARP_FALLBACK" in
-            [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа])
-                USE_INITIAL_WARP="yes"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --answers=*)
+                ANSWERS_FILE="${1#*=}"
+                IS_UNATTENDED="yes"
+                shift
+                ;;
+            --answers|-a|-f|--file)
+                ANSWERS_FILE="${2:-}"
+                IS_UNATTENDED="yes"
+                shift 2 2>/dev/null || shift
+                ;;
+            --unattended|-y)
+                IS_UNATTENDED="yes"
+                shift
                 ;;
             *)
-                echo "Бро я не буду этого делать без подписки или ключа ,_."
-                exit 1
+                shift
                 ;;
         esac
+    done
+
+    if [ -z "$ANSWERS_FILE" ]; then
+        for cand in "${GATEWAY_DIR}/gateway.answers" "./gateway.answers" "/opt/gateway/gateway.answers" "/etc/gateway/gateway.answers" "/root/gateway.answers"; do
+            if [ -f "$cand" ]; then
+                ANSWERS_FILE="$cand"
+                IS_UNATTENDED="yes"
+                break
+            fi
+        done
     fi
 
-    if [ "$USE_INITIAL_WARP" = "yes" ]; then
-        printf "Если есть ключ лицензии WARP+ (Argo), вставьте его [Enter = обычный бесплатный WARP]: "
-        read -r INPUT_WLIC < /dev/tty || true
-        INPUT_WLIC=$(printf "%s" "$INPUT_WLIC" | tr -d ' \t\r\n')
-        [ -n "$INPUT_WLIC" ] && WARP_LICENSE="$INPUT_WLIC" || true
-    fi
+    ANS_STORAGE_DISK="none"
+    ANS_STORAGE_ACTION="mount"
+    ANS_STORAGE_FS="ext4"
+    ANS_STORAGE_LUKS="no"
+    ANS_STORAGE_LUKS_PASS=""
+    ANS_SSL_TYPE="local"
+    ANS_DUCK_SUB=""
+    ANS_DUCK_TOK=""
 
-    if [ "$USE_INITIAL_WARP" != "yes" ] && [ -n "$INPUT_SUB_URL" ] && is_warp_enabled; then
-        printf "Обнаружен ранее созданный пул Amnezia WARP. Оставить его как резерв? (y/n) [Enter = y]: "
-        read -r KEEP_WARP_ANS < /dev/tty || true
-        KEEP_WARP_ANS=$(printf "%s" "$KEEP_WARP_ANS" | tr -d ' \t\r\n')
-        [ -z "$KEEP_WARP_ANS" ] && KEEP_WARP_ANS="y"
-        case "$KEEP_WARP_ANS" in
-            [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа]) ;;
-            *) echo '{"outbounds": []}' > "$WARP_NODES_FILE" ;;
+    if [ "$IS_UNATTENDED" = "yes" ]; then
+        if [ ! -f "$ANSWERS_FILE" ]; then
+            ui_warn_box "Указанный файл ответов не найден: ${ANSWERS_FILE}"
+            return 1
+        fi
+        ui_banner "UNATTENDED INSTALLER // ТИХАЯ УСТАНОВКА ИЗ ФАЙЛА ОТВЕТОВ"
+        echo "Файл ответов: ${C_CYN}${ANSWERS_FILE}${C_RES}"
+        echo "Режим:        ${C_GRN}Полностью автономный запуск (Zero-Touch)${C_RES}"
+        ui_box_sep
+        # shellcheck source=/dev/null
+        . "$ANSWERS_FILE"
+
+        USE_INITIAL_WARP="no"
+        ANS_SUB="${SUB_URL:-warp}"
+        if [ "$ANS_SUB" = "warp" ] || [ -z "$ANS_SUB" ]; then
+            USE_INITIAL_WARP="yes"
+            apply_subscription_input "warp"
+        else
+            apply_subscription_input "$ANS_SUB"
+        fi
+
+        LAN_IP_DETECTED=$(get_current_lan_ip)
+        if [ -z "${TARGET_LAN_IP:-}" ] || [ "$TARGET_LAN_IP" = "auto" ]; then
+            TARGET_LAN_IP="$LAN_IP_DETECTED"
+        fi
+        if ! is_valid_ipv4 "$TARGET_LAN_IP"; then
+            TARGET_LAN_IP="$LAN_IP_DETECTED"
+        fi
+
+        GW_IP_DETECTED=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -n 1)
+        [ -z "$GW_IP_DETECTED" ] && GW_IP_DETECTED="${TARGET_LAN_IP%.*}.1"
+        if [ -z "${GW_IP:-}" ] || [ "$GW_IP" = "auto" ]; then
+            GW_IP="$GW_IP_DETECTED"
+        fi
+        if ! is_valid_ipv4 "$GW_IP" || [ "$GW_IP" = "$TARGET_LAN_IP" ]; then
+            GW_IP="$GW_IP_DETECTED"
+        fi
+
+        AGH_USER="${ADMIN_USER:-admin}"
+        if [ -z "${ADMIN_PASS:-}" ]; then
+            ADMIN_PASS=$(tr -dc 'A-Za-z0-9!@#%^&*' < /dev/urandom 2>/dev/null | head -c 16)
+            [ -z "$ADMIN_PASS" ] && ADMIN_PASS="GateWay_$(date +%s)"
+            ui_info_msg "Сгенерирован мастер-пароль: ${ADMIN_PASS}"
+        fi
+        SMB_USER="$AGH_USER"
+        SMB_PASS="$ADMIN_PASS"
+
+        case "${ENABLE_AUTOUPDATE:-no}" in
+            [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа]) ENABLE_AU="yes" ;;
+            *) ENABLE_AU="no" ;;
         esac
-    fi
 
-    # 2. Запрос IP-адреса самого сервера и IP основного роутера
-    printf "Введите локальный IP самого сервера (%s) [Enter = оставить %s]: " "$OS_NAME" "$SAVED_LAN_IP"
-    read -r INPUT_LAN_IP < /dev/tty || true
-    INPUT_LAN_IP=$(printf "%s" "$INPUT_LAN_IP" | tr -d ' \t\r\n')
-    TARGET_LAN_IP="${INPUT_LAN_IP:-$SAVED_LAN_IP}"
-    if ! is_valid_ipv4 "$TARGET_LAN_IP"; then
-        echo "${C_RED}[X] Некорректный IP (${TARGET_LAN_IP}), оставлен текущий: ${SAVED_LAN_IP}${C_RES}"
-        TARGET_LAN_IP="$SAVED_LAN_IP"
-    fi
+        PRE_HL_SEL="${HOMELAB_MODULES:-none}"
+        [ -z "$PRE_HL_SEL" ] || [ "$PRE_HL_SEL" = "0" ] || [ "$PRE_HL_SEL" = "none" ] && PRE_HL_SEL="__SKIP__"
+        if [ "$PRE_HL_SEL" = "all" ] || [ "$PRE_HL_SEL" = "ALL" ]; then
+            PRE_HL_SEL="1 2 3 4 5 6 7 8 9"
+        fi
 
-    if [ -n "$SAVED_GW_IP" ] && [ "$SAVED_GW_IP" != "$TARGET_LAN_IP" ]; then
-        printf "Введите IP основного роутера [Enter = %s]: " "$SAVED_GW_IP"
+        ANS_STORAGE_DISK="${STORAGE_DISK:-none}"
+        ANS_STORAGE_ACTION="${STORAGE_ACTION:-mount}"
+        ANS_STORAGE_FS="${STORAGE_FS:-ext4}"
+        ANS_STORAGE_LUKS="${STORAGE_LUKS:-no}"
+        ANS_STORAGE_LUKS_PASS="${STORAGE_LUKS_PASS:-$ADMIN_PASS}"
+        ANS_SSL_TYPE="${SSL_TYPE:-local}"
+        ANS_DUCK_SUB="${DUCKDNS_SUBDOMAIN:-}"
+        ANS_DUCK_TOK="${DUCKDNS_TOKEN:-}"
     else
-        printf "Введите IP-адрес основного роутера (отличный от %s, например %s.1): " "$TARGET_LAN_IP" "${TARGET_LAN_IP%.*}"
+        ui_banner "INSTALLER WIZARD // МАСТЕР УСТАНОВКИ ШЛЮЗА И HOMELAB"
+        echo "Система: ${OS_NAME} [${ARCH_RAW} -> ${SB_ARCH}]"
+        echo "Память:  ${TOTAL_RAM_MB} МБ RAM (Лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
+        ui_box_sep
+
+        load_gateway_env
+        SAVED_LAN_IP=$(get_current_lan_ip)
+        SAVED_SUB_URL="$SUB_URL"
+        SAVED_GW_IP="$GW_IP"
+        SAVED_PASS="$ADMIN_PASS"
+        SAVED_AGH_USER=""
+
+        if [ -f "$AGH_CONF" ]; then
+            SAVED_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
+        fi
+
+        # 1. Запрос ссылки на подписку, прямого ключа или бесплатного гибридного WARP
+        USE_INITIAL_WARP="no"
+        if [ -n "$SAVED_SUB_URL" ]; then
+            printf "Введите подписку (http://...), ключ (vless://...) или 'warp' [Enter = оставить %s]: " "$SAVED_SUB_URL"
+        elif has_my_nodes; then
+            printf "Введите подписку (http://...), ключ или 'warp' [Enter = оставить ключи в my_nodes.yaml]: "
+        elif is_warp_enabled; then
+            printf "Введите подписку (http://...), ключ или 'warp' [Enter = оставить текущий Amnezia WARP]: "
+        else
+            printf "Введите подписку (http://...), ключ (vless://...) или 'warp' (бесплатный WARP 2.0 + MASQUE H2): "
+        fi
+        read -r INPUT_SUB_URL < /dev/tty || true
+        INPUT_SUB_URL=$(printf "%s" "$INPUT_SUB_URL" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+        if [ -n "$INPUT_SUB_URL" ]; then
+            apply_subscription_input "$INPUT_SUB_URL"
+        elif [ -z "$SAVED_SUB_URL" ] && ! has_my_nodes && ! is_warp_enabled; then
+            printf "Прокси не указаны. Сгенерировать бесплатный безлимитный Amnezia WARP 2.0 + MASQUE H2? (y/n) [Enter = y]: "
+            read -r WARP_FALLBACK < /dev/tty || true
+            WARP_FALLBACK=$(printf "%s" "$WARP_FALLBACK" | tr -d ' \t\r\n')
+            [ -z "$WARP_FALLBACK" ] && WARP_FALLBACK="y"
+            case "$WARP_FALLBACK" in
+                [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа])
+                    USE_INITIAL_WARP="yes"
+                    ;;
+                *)
+                    echo "Бро я не буду этого делать без подписки или ключа ,_."
+                    exit 1
+                    ;;
+            esac
+        fi
+
+        if [ "$USE_INITIAL_WARP" = "yes" ]; then
+            printf "Если есть ключ лицензии WARP+ (Argo), вставьте его [Enter = обычный бесплатный WARP]: "
+            read -r INPUT_WLIC < /dev/tty || true
+            INPUT_WLIC=$(printf "%s" "$INPUT_WLIC" | tr -d ' \t\r\n')
+            [ -n "$INPUT_WLIC" ] && WARP_LICENSE="$INPUT_WLIC" || true
+        fi
+
+        if [ "$USE_INITIAL_WARP" != "yes" ] && [ -n "$INPUT_SUB_URL" ] && is_warp_enabled; then
+            printf "Обнаружен ранее созданный пул Amnezia WARP. Оставить его как резерв? (y/n) [Enter = y]: "
+            read -r KEEP_WARP_ANS < /dev/tty || true
+            KEEP_WARP_ANS=$(printf "%s" "$KEEP_WARP_ANS" | tr -d ' \t\r\n')
+            [ -z "$KEEP_WARP_ANS" ] && KEEP_WARP_ANS="y"
+            case "$KEEP_WARP_ANS" in
+                [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа]) ;;
+                *) echo '{"outbounds": []}' > "$WARP_NODES_FILE" ;;
+            esac
+        fi
+
+        # 2. Запрос IP-адреса самого сервера и IP основного роутера
+        printf "Введите локальный IP самого сервера (%s) [Enter = оставить %s]: " "$OS_NAME" "$SAVED_LAN_IP"
+        read -r INPUT_LAN_IP < /dev/tty || true
+        INPUT_LAN_IP=$(printf "%s" "$INPUT_LAN_IP" | tr -d ' \t\r\n')
+        TARGET_LAN_IP="${INPUT_LAN_IP:-$SAVED_LAN_IP}"
+        if ! is_valid_ipv4 "$TARGET_LAN_IP"; then
+            echo "${C_RED}[X] Некорректный IP (${TARGET_LAN_IP}), оставлен текущий: ${SAVED_LAN_IP}${C_RES}"
+            TARGET_LAN_IP="$SAVED_LAN_IP"
+        fi
+
+        if [ -n "$SAVED_GW_IP" ] && [ "$SAVED_GW_IP" != "$TARGET_LAN_IP" ]; then
+            printf "Введите IP основного роутера [Enter = %s]: " "$SAVED_GW_IP"
+        else
+            printf "Введите IP-адрес основного роутера (отличный от %s, например %s.1): " "$TARGET_LAN_IP" "${TARGET_LAN_IP%.*}"
+        fi
+        read -r INPUT_GW_IP < /dev/tty || true
+        INPUT_GW_IP=$(printf "%s" "$INPUT_GW_IP" | tr -d ' \t\r\n')
+
+        if [ -n "$INPUT_GW_IP" ]; then
+            GW_IP="$INPUT_GW_IP"
+        else
+            GW_IP="$SAVED_GW_IP"
+        fi
+
+        if ! is_valid_ipv4 "$GW_IP" || [ "$GW_IP" = "$TARGET_LAN_IP" ]; then
+            echo "${C_RED}[X] Ошибка: IP основного роутера (${GW_IP}) некорректен или совпадает с IP сервера (${TARGET_LAN_IP})!${C_RES}"
+            exit 1
+        fi
+
+        # 3. Запрос логина и единого пароля (AdGuard Home + Sing-Box Zashboard + Homelab)
+        DEF_AGH_USER="${SAVED_AGH_USER:-admin}"
+        printf "Введите логин для панели AdGuard Home [Enter = %s]: " "$DEF_AGH_USER"
+        read -r INPUT_AGH_USER < /dev/tty || true
+        INPUT_AGH_USER=$(printf "%s" "$INPUT_AGH_USER" | tr -d ' \t\r\n')
+        AGH_USER="${INPUT_AGH_USER:-$DEF_AGH_USER}"
+
+        if [ -n "$SAVED_PASS" ]; then
+            printf "Введите единый пароль (Шлюз + AdGuard + Homelab) [Enter = оставить текущий]: "
+        else
+            printf "Введите единый пароль (для AdGuard Home, Sing-Box и сервисов Homelab): "
+        fi
+        read -r INPUT_PASS < /dev/tty || true
+        INPUT_PASS=$(printf "%s" "$INPUT_PASS" | tr -d '\r\n')
+
+        ADMIN_PASS="${INPUT_PASS:-$SAVED_PASS}"
+        if [ -z "$ADMIN_PASS" ]; then
+            echo "${C_RED}[X] Ошибка: Пароль не может быть пустым!${C_RES}"
+            exit 1
+        fi
+        # Единый логин и пароль из начального опроса автоматически применяются для Samba и всех сервисов Homelab
+        SMB_USER="$AGH_USER"
+        SMB_PASS="$ADMIN_PASS"
+
+        # 4. Запрос на автообновление
+        if is_autoupdate_enabled; then
+            DEF_AU_CHAR="y"
+        else
+            DEF_AU_CHAR="n"
+        fi
+        printf "Включить автообновление ядер и панелей в 04:00 (Бро я думаю ты осознаешь последствия ,_,)? (y/n) [Enter = %s]: " "$DEF_AU_CHAR"
+        read -r INPUT_AU_ANS < /dev/tty || true
+        INPUT_AU_ANS=$(printf "%s" "$INPUT_AU_ANS" | tr -d ' \t\r\n')
+        [ -z "$INPUT_AU_ANS" ] && INPUT_AU_ANS="$DEF_AU_CHAR"
+        case "$INPUT_AU_ANS" in
+            [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа]) ENABLE_AU="yes" ;;
+            *) ENABLE_AU="no" ;;
+        esac
+
+        # 5. Запрос выбора модулей Homelab сразу на старте (чтобы установка шла полностью без остановок)
+        echo ""
+        ui_box_top "Выбор модулей домашнего сервера (Homelab & Media Stack)"
+        echo " Вы можете сразу выбрать нужные домашние сервисы (логин/пароль Samba и сервисов = ${AGH_USER}):"
+        echo "  ${C_CYN}[1]${C_RES} caddy       — Центральный HTTPS Reverse Proxy & Локальный CA (*.lan)"
+        echo "  ${C_CYN}[2]${C_RES} samba       — Общая сетевая папка SMB2/3 + автообнаружение Windows 11 / Linux"
+        echo "  ${C_CYN}[3]${C_RES} vaultwarden — Менеджер паролей Bitwarden (https://vaultwarden.lan)"
+        echo "  ${C_CYN}[4]${C_RES} forgejo     — Локальный Git-сервер (https://forgejo.lan)"
+        echo "  ${C_CYN}[5]${C_RES} code        — VS Code в браузере Server-Code (https://code.lan)"
+        echo "  ${C_CYN}[6]${C_RES} navidrome   — Музыкальный стриминг Subsonic/Spotify-style (https://music.lan)"
+        echo "  ${C_CYN}[7]${C_RES} jellyfin    — Домашний кинотеатр Jellyfin (https://jellyfin.lan)"
+        echo "  ${C_CYN}[8]${C_RES} ytdlp       — Веб-панель загрузки видео и музыки yt-dlp (https://downloads.lan)"
+        echo "  ${C_CYN}[9]${C_RES} torrent     — Торрент-клиент qBittorrent-nox + Hardlink-импорт (https://torrents.lan)"
+        ui_box_sep
+        printf "Введите номера через пробел (например: 1 2 3 6 8 9), 'all' для всех или Enter (только шлюз): "
+        read -r PRE_HL_SEL < /dev/tty || true
+        PRE_HL_SEL=$(printf "%s" "$PRE_HL_SEL" | tr ',' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "$PRE_HL_SEL" ] || [ "$PRE_HL_SEL" = "0" ] || [ "$PRE_HL_SEL" = "none" ] && PRE_HL_SEL="__SKIP__"
     fi
-    read -r INPUT_GW_IP < /dev/tty || true
-    INPUT_GW_IP=$(printf "%s" "$INPUT_GW_IP" | tr -d ' \t\r\n')
-
-    if [ -n "$INPUT_GW_IP" ]; then
-        GW_IP="$INPUT_GW_IP"
-    else
-        GW_IP="$SAVED_GW_IP"
-    fi
-
-    if ! is_valid_ipv4 "$GW_IP" || [ "$GW_IP" = "$TARGET_LAN_IP" ]; then
-        echo "${C_RED}[X] Ошибка: IP основного роутера (${GW_IP}) некорректен или совпадает с IP сервера (${TARGET_LAN_IP})!${C_RES}"
-        exit 1
-    fi
-
-    # 3. Запрос логина и единого пароля (AdGuard Home + Sing-Box Zashboard + Homelab)
-    DEF_AGH_USER="${SAVED_AGH_USER:-admin}"
-    printf "Введите логин для панели AdGuard Home [Enter = %s]: " "$DEF_AGH_USER"
-    read -r INPUT_AGH_USER < /dev/tty || true
-    INPUT_AGH_USER=$(printf "%s" "$INPUT_AGH_USER" | tr -d ' \t\r\n')
-    AGH_USER="${INPUT_AGH_USER:-$DEF_AGH_USER}"
-
-    if [ -n "$SAVED_PASS" ]; then
-        printf "Введите единый пароль (Шлюз + AdGuard + Homelab) [Enter = оставить текущий]: "
-    else
-        printf "Введите единый пароль (для AdGuard Home, Sing-Box и сервисов Homelab): "
-    fi
-    read -r INPUT_PASS < /dev/tty || true
-    INPUT_PASS=$(printf "%s" "$INPUT_PASS" | tr -d '\r\n')
-
-    ADMIN_PASS="${INPUT_PASS:-$SAVED_PASS}"
-    if [ -z "$ADMIN_PASS" ]; then
-        echo "${C_RED}[X] Ошибка: Пароль не может быть пустым!${C_RES}"
-        exit 1
-    fi
-    # Единый логин и пароль из начального опроса автоматически применяются для Samba и всех сервисов Homelab
-    SMB_USER="$AGH_USER"
-    SMB_PASS="$ADMIN_PASS"
-
-    save_gateway_env
-    save_homelab_env
-    if command -v smbpasswd >/dev/null 2>&1 && id "$SMB_USER" >/dev/null 2>&1; then
-        apply_and_verify_samba_password "$SMB_USER" "$SMB_PASS" >/dev/null 2>&1 || true
-    fi
-
-    # 4. Запрос на автообновление
-    if is_autoupdate_enabled; then
-        DEF_AU_CHAR="y"
-    else
-        DEF_AU_CHAR="n"
-    fi
-    printf "Включить автообновление ядер и панелей в 04:00 (Бро я думаю ты осознаешь последствия ,_,)? (y/n) [Enter = %s]: " "$DEF_AU_CHAR"
-    read -r INPUT_AU_ANS < /dev/tty || true
-    INPUT_AU_ANS=$(printf "%s" "$INPUT_AU_ANS" | tr -d ' \t\r\n')
-    [ -z "$INPUT_AU_ANS" ] && INPUT_AU_ANS="$DEF_AU_CHAR"
-    case "$INPUT_AU_ANS" in
-        [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа]) ENABLE_AU="yes" ;;
-        *) ENABLE_AU="no" ;;
-    esac
-
-    # 5. Запрос выбора модулей Homelab сразу на старте (чтобы установка шла полностью без остановок)
-    echo ""
-    ui_box_top "Выбор модулей домашнего сервера (Homelab & Media Stack)"
-    echo " Вы можете сразу выбрать нужные домашние сервисы (логин/пароль Samba и сервисов = ${AGH_USER}):"
-    echo "  ${C_CYN}[1]${C_RES} caddy       — Центральный HTTPS Reverse Proxy & Локальный CA (*.lan)"
-    echo "  ${C_CYN}[2]${C_RES} samba       — Общая сетевая папка SMB2/3 + автообнаружение Windows 11 / Linux"
-    echo "  ${C_CYN}[3]${C_RES} vaultwarden — Менеджер паролей Bitwarden (https://vaultwarden.lan)"
-    echo "  ${C_CYN}[4]${C_RES} forgejo     — Локальный Git-сервер (https://forgejo.lan)"
-    echo "  ${C_CYN}[5]${C_RES} code        — VS Code в браузере Server-Code (https://code.lan)"
-    echo "  ${C_CYN}[6]${C_RES} navidrome   — Музыкальный стриминг Subsonic/Spotify-style (https://music.lan)"
-    echo "  ${C_CYN}[7]${C_RES} jellyfin    — Домашний кинотеатр Jellyfin (https://jellyfin.lan)"
-    echo "  ${C_CYN}[8]${C_RES} ytdlp       — Веб-панель загрузки видео и музыки yt-dlp (https://downloads.lan)"
-    echo "  ${C_CYN}[9]${C_RES} torrent     — Торрент-клиент qBittorrent-nox + Hardlink-импорт (https://torrents.lan)"
-    ui_box_sep
-    printf "Введите номера через пробел (например: 1 2 3 6 8 9), 'all' для всех или Enter (только шлюз): "
-    read -r PRE_HL_SEL < /dev/tty || true
-    PRE_HL_SEL=$(printf "%s" "$PRE_HL_SEL" | tr ',' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    [ -z "$PRE_HL_SEL" ] || [ "$PRE_HL_SEL" = "0" ] || [ "$PRE_HL_SEL" = "none" ] && PRE_HL_SEL="__SKIP__"
 
     ui_box_sep
     echo "Итоговая конфигурация развертывания:"
@@ -8378,8 +8524,41 @@ nameserver 77.88.8.8"
         disable_autoupdate
     fi
 
+    # ЭТАП 5.5: Автоматическая настройка внешнего накопителя из файла ответов
+    if [ "$IS_UNATTENDED" = "yes" ] && [ -n "$ANS_STORAGE_DISK" ] && [ "$ANS_STORAGE_DISK" != "none" ]; then
+        ui_step_progress 1 1 "Настройка внешнего хранилища (${ANS_STORAGE_DISK})..."
+        if [ "$ANS_STORAGE_DISK" = "auto" ]; then
+            AUTO_D=$(get_first_available_external_disk)
+            if [ -n "$AUTO_D" ]; then
+                ANS_STORAGE_DISK="$AUTO_D"
+                ui_info_msg "Автоматически обнаружен внешний накопитель: ${ANS_STORAGE_DISK}"
+            else
+                ui_warn_box "STORAGE_DISK='auto', но внешние накопители не обнаружены." \
+                            "Хранилище останется на системном разделе."
+                ANS_STORAGE_DISK=""
+            fi
+        fi
+        if [ -n "$ANS_STORAGE_DISK" ]; then
+            if [ "$ANS_STORAGE_ACTION" = "format" ]; then
+                format_and_mount_external_drive "$ANS_STORAGE_DISK" "$ANS_STORAGE_FS" "$ANS_STORAGE_LUKS" "YES" "$ANS_STORAGE_LUKS_PASS" || true
+            else
+                mount_external_drive_to_storage "$ANS_STORAGE_DISK" "yes" "$ANS_STORAGE_LUKS_PASS" || true
+            fi
+        fi
+    fi
+
     # ЭТАП 6: Автоматическая установка выбранных на старте модулей Homelab
     prompt_homelab_modules_wizard "${PRE_HL_SEL:-__SKIP__}"
+
+    # ЭТАП 6.5: Автоматическая настройка Let's Encrypt Wildcard DuckDNS из файла ответов
+    if [ "$IS_UNATTENDED" = "yes" ] && [ "$ANS_SSL_TYPE" = "duckdns" ] && [ -n "$ANS_DUCK_SUB" ] && [ -n "$ANS_DUCK_TOK" ]; then
+        ui_step_progress 1 1 "Выпуск Let's Encrypt Wildcard сертификата DuckDNS (${ANS_DUCK_SUB})..."
+        if issue_duckdns_cert "$ANS_DUCK_SUB" "$ANS_DUCK_TOK"; then
+            sync_caddy_main_config
+            reload_caddy_safe
+            sync_agh_homelab_rewrites "$CURRENT_IP"
+        fi
+    fi
 
     # ЭТАП 7: Итоговый Self-Test 2.0
     reload_singbox_api
@@ -8392,8 +8571,9 @@ nameserver 77.88.8.8"
     echo " - Панель Sing-Box:    ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} (http://${CURRENT_IP}:9090/ui)"
     echo " - Панель AdGuard:     ${C_CYN}https://${DOM_ADGUARD}${C_RES} (http://${CURRENT_IP}:3000)"
     echo " - Портал сертификата: ${C_CYN}http://${DOM_CA}${C_RES}"
-    echo " - Вызов меню:         ${C_GRN}gateway${C_RES} (Раздел Homelab — пункт 13)"
+    echo " - Быстрый вызов:      ${C_GRN}gw${C_RES} (или ${C_GRN}gateway${C_RES})"
     ui_box_top "=================================================="
+    print_quick_access_card
 
     if [ "$TARGET_LAN_IP" != "$SAVED_LAN_IP" ]; then
         apply_network_ips "$TARGET_LAN_IP" "$GW_IP" || true
@@ -8549,6 +8729,94 @@ run_gateway_quick_check() {
     return 0
 }
 
+# ==============================================================================
+# Динамический баннер приветствия SSH / Консоли (Fast Non-blocking MOTD)
+# Вызывается автоматически при логине в систему через /etc/profile.d/00-gateway-motd.sh
+# или вручную по команде `gw motd` / `gateway motd`
+# ==============================================================================
+print_gateway_motd() {
+    load_gateway_env
+    [ -f "$HOMELAB_ENV" ] && . "$HOMELAB_ENV" 2>/dev/null || true
+
+    HN=$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "alpine")
+    ARCH_INFO=$(uname -m 2>/dev/null || echo "x86_64")
+    UPTIME_RAW=$(uptime 2>/dev/null || echo "")
+    UPTIME_STR=$(printf "%s" "$UPTIME_RAW" | sed -E 's/.*up[[:space:]]+([^,]+),.*/\1/' | sed 's/^[[:space:]]*//' || echo "online")
+    LOAD_STR=$(awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null || echo "0.00")
+
+    LAN_IP_CUR=$(get_current_lan_ip)
+    LAN_DEV_CUR=$(get_lan_ifname)
+    ROUTER_IP="${GW_IP:-$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -n 1)}"
+
+    # ОЗУ
+    RAM_LINE=$(free -m 2>/dev/null | awk '/Mem:/ {if ($2>0) printf "%d МБ / %d МБ (%.0f%%)", $3, $2, ($3/$2)*100; else print "N/A"}')
+    [ -z "$RAM_LINE" ] && RAM_LINE="${TOTAL_RAM_MB:-2048} МБ"
+
+    # Хранилище
+    if is_external_storage_mounted 2>/dev/null; then
+        ST_LINE=$(df -h "$STORAGE_ROOT" 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
+        ST_SRC=$(findmnt -n -o SOURCE "$STORAGE_ROOT" 2>/dev/null || true)
+        ST_FS=$(blkid -s TYPE -o value "$ST_SRC" 2>/dev/null || echo "ext4")
+        if [ -n "${EXT_STORAGE_LUKS_UUID:-}" ] || echo "$ST_SRC" | grep -q "mapper"; then
+            ST_TAG=" [${ST_FS} / LUKS2 🔒]"
+        else
+            ST_TAG=" [${ST_FS}]"
+        fi
+        ST_INFO="${STORAGE_ROOT}: ${ST_LINE}${ST_TAG}"
+    else
+        ST_ROOT_LINE=$(df -h / 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
+        ST_INFO="Локальный системный раздел: ${ST_ROOT_LINE} (диск не подключен)"
+    fi
+
+    # Статус ядер шлюза
+    SB_ST="${C_RED}○${C_RES}"
+    pgrep sing-box >/dev/null 2>&1 && SB_ST="${C_GRN}●${C_RES}"
+    AGH_ST="${C_RED}○${C_RES}"
+    pgrep AdGuardHome >/dev/null 2>&1 && AGH_ST="${C_GRN}●${C_RES}"
+    TUN_ST="${C_RED}○${C_RES}"
+    ip link show singbox-tun >/dev/null 2>&1 && TUN_ST="${C_GRN}●${C_RES}"
+
+    # SSL / Домен
+    if [ "${SSL_MODE:-local}" = "duckdns" ] && [ -n "${DUCKDNS_DOMAIN:-}" ]; then
+        SSL_INFO="Let's Encrypt Wildcard (*.${DUCKDNS_DOMAIN})"
+    else
+        SSL_INFO="Локальный доверенный CA (*.lan)"
+    fi
+
+    # Homelab сервисы
+    HL_SUMMARY=""
+    if [ -f "$HOMELAB_STATE" ]; then
+        while IFS='|' read -r M_ID M_EN M_SVC _REST; do
+            case "$M_ID" in ''|\#*) continue ;; esac
+            if [ "$M_EN" = "yes" ]; then
+                if [ -n "$M_SVC" ] && rc-service "$M_SVC" status >/dev/null 2>&1; then
+                    DOT="${C_GRN}●${C_RES}"
+                else
+                    DOT="${C_RED}○${C_RES}"
+                fi
+                HL_SUMMARY="${HL_SUMMARY} ${M_ID}[${DOT}]"
+            fi
+        done < "$HOMELAB_STATE"
+    fi
+    [ -z "$HL_SUMMARY" ] && HL_SUMMARY="только сетевой шлюз"
+
+    echo ""
+    echo "${C_BLU}╔══════════════════════════════════════════════════════════════════════════════╗${C_RES}"
+    echo "${C_BLU}║${C_RES}  ${C_CYN}🚀 UNIVERSAL SIDECAR GATEWAY & HOMELAB // ALPINE LINUX${C_RES}"
+    echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Хост / ОС:${C_RES}    %-24s │ Uptime: %-10s │ Load: %s\n" "${HN} (${ARCH_INFO})" "$UPTIME_STR" "$LOAD_STR"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Сеть:${C_RES}         LAN: %s (%s) │ Роутер: %s\n" "$LAN_IP_CUR" "$LAN_DEV_CUR" "$ROUTER_IP"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Память (RAM):${C_RES} %s\n" "$RAM_LINE"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Хранилище:${C_RES}    %s\n" "$ST_INFO"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Ядро шлюза:${C_RES}   Sing-Box [%b] │ AdGuard Home (:53) [%b] │ singbox-tun [%b]\n" "$SB_ST" "$AGH_ST" "$TUN_ST"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Homelab:${C_RES}     %s\n" "$HL_SUMMARY"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• SSL / Домен:${C_RES}  %s\n" "$SSL_INFO"
+    echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
+    echo "${C_BLU}║${C_RES}  ⚡ Быстрая команда: ${C_GRN}${C_BLD}gw${C_RES} │ Меню: ${C_CYN}gateway${C_RES} │ Ссылки: ${C_CYN}gw links${C_RES} │ Доктор: ${C_CYN}gw doctor${C_RES}"
+    echo "${C_BLU}╚══════════════════════════════════════════════════════════════════════════════╝${C_RES}"
+    echo ""
+}
+
 # Преобразование ввода пользователя (номер 1..9 или ID модуля) в канонический ID модуля
 resolve_homelab_module_id() {
     RAW_M=$(printf "%s" "${1:-}" | tr 'A-Z' 'a-z' | tr -d ' \t\r\n')
@@ -8684,32 +8952,153 @@ cli_domain_rule_add() {
     return $?
 }
 
+# Генерация подробного шаблона файла автоматических ответов (Answers Template)
+generate_answers_template() {
+    OUT_F="${1:-}"
+    SRC_EXAMPLE="${GATEWAY_DIR}/gateway.answers.example"
+
+    emit_content() {
+        if [ -f "$SRC_EXAMPLE" ]; then
+            cat "$SRC_EXAMPLE"
+        else
+            cat << 'ANS_EOF'
+# ==============================================================================
+# 🚀 Universal Sidecar Gateway & Homelab: Файл автоматических ответов (Answers)
+# ==============================================================================
+# Запуск установки без единого вопроса:
+#   gw install --answers gateway.answers
+# ==============================================================================
+
+# 1. Сеть и подключение к интернету
+SUB_URL="warp"
+WARP_LICENSE=""
+TARGET_LAN_IP="auto"
+GW_IP="auto"
+
+# 2. Учетные данные администратора (Единый мастер-логин)
+ADMIN_USER="admin"
+ADMIN_PASS="ChangeMe123!"
+ENABLE_AUTOUPDATE="no"
+
+# 3. Модули домашнего сервера (Homelab & Media Stack)
+# Доступно: 1/caddy, 2/samba, 3/vaultwarden, 4/forgejo, 5/code, 6/navidrome, 7/jellyfin, 8/ytdlp, 9/torrent, 'all', 'none'
+HOMELAB_MODULES="1 2 3 6 9"
+
+# 4. Внешний накопитель и шифрование (USB / SATA / NVMe) [Опционально]
+STORAGE_DISK="none"
+STORAGE_ACTION="mount"
+STORAGE_FS="ext4"
+STORAGE_LUKS="no"
+STORAGE_LUKS_PASS=""
+
+# 5. SSL / TLS Сертификат: Бесплатный Let's Encrypt Wildcard [Опционально]
+SSL_TYPE="local"
+DUCKDNS_SUBDOMAIN=""
+DUCKDNS_TOKEN=""
+ANS_EOF
+        fi
+    }
+
+    if [ -n "$OUT_F" ]; then
+        mkdir -p "$(dirname "$OUT_F")" 2>/dev/null || true
+        emit_content > "$OUT_F"
+        chmod 600 "$OUT_F" 2>/dev/null || true
+        ui_ok_msg "Шаблон файла ответов сохранен в: ${OUT_F}"
+        echo " Отредактируйте параметры и запустите установку:"
+        echo "   ${C_CYN}gw install --answers ${OUT_F}${C_RES}"
+    else
+        emit_content
+    fi
+    return 0
+}
+
+# Валидация и проверка корректности заполнения файла ответов
+verify_answers_file() {
+    IN_F="${1:-}"
+    if [ -z "$IN_F" ]; then
+        for cand in "${GATEWAY_DIR}/gateway.answers" "./gateway.answers" "/opt/gateway/gateway.answers" "/etc/gateway/gateway.answers"; do
+            [ -f "$cand" ] && { IN_F="$cand"; break; }
+        done
+    fi
+    if [ -z "$IN_F" ] || [ ! -f "$IN_F" ]; then
+        ui_warn_box "Файл ответов не найден: ${IN_F:-<не указан>}" \
+                    "Сгенерируйте шаблон командой: gw answers template gateway.answers"
+        return 1
+    fi
+
+    ui_banner "ANSWERS VERIFICATION // ПРОВЕРКА ФАЙЛА ОТВЕТОВ"
+    echo "Проверяемый файл: ${C_CYN}${IN_F}${C_RES}"
+    ui_box_sep
+
+    # 1. Проверка синтаксиса sh
+    if ! sh -n "$IN_F" 2>/dev/null; then
+        ui_warn_box "Ошибка синтаксиса в файле ответов ${IN_F}!" \
+                    "Исправьте кавычки или незакрытые скобки."
+        return 1
+    fi
+    echo "${C_GRN}[✔] Синтаксис shell: КОРРЕКТЕН${C_RES}"
+
+    # 2. Изолированная загрузка переменных
+    (
+        # shellcheck source=/dev/null
+        . "$IN_F"
+
+        # Сеть
+        printf "• Сеть:             LAN IP: %s │ GW IP: %s │ Подписка: %s\n" "${TARGET_LAN_IP:-auto}" "${GW_IP:-auto}" "${SUB_URL:-warp}"
+        # Пользователь
+        if [ -n "${ADMIN_PASS:-}" ]; then
+            printf "• Администратор:    Логин: %s │ Мастер-пароль: [ЗАДАН (длина: %d)]\n" "${ADMIN_USER:-admin}" "${#ADMIN_PASS}"
+        else
+            printf "• Администратор:    Логин: %s │ ${C_YEL}Мастер-пароль: [ПУСТО -> сгенерируется случайно]${C_RES}\n" "${ADMIN_USER:-admin}"
+        fi
+        # Homelab
+        printf "• Модули Homelab:   %s\n" "${HOMELAB_MODULES:-none}"
+        # Storage
+        printf "• Хранилище:        Диск: %s │ Действие: %s │ ФС: %s │ LUKS2: %s\n" "${STORAGE_DISK:-none}" "${STORAGE_ACTION:-mount}" "${STORAGE_FS:-ext4}" "${STORAGE_LUKS:-no}"
+        # SSL
+        if [ "${SSL_TYPE:-local}" = "duckdns" ]; then
+            printf "• SSL / Домен:      DuckDNS (*.%s.duckdns.org) │ Токен: [ЗАДАН]\n" "${DUCKDNS_SUBDOMAIN:-не указан}"
+        else
+            printf "• SSL / Домен:      Локальный CA (*.lan)\n"
+        fi
+    )
+    ui_box_sep
+    ui_ok_msg "Файл ответов готов к запуску через: gw install --answers ${IN_F}"
+    return 0
+}
+
 # Полная красиво оформленная в ASCII-рамках справка по всем CLI-командам `gateway help`
 print_gateway_cli_help() {
     ui_banner "GATEWAY CLI // СПРАВОЧНИК КОМАНД АДМИНИСТРАТОРА (v2026.11)"
     ui_box_top "🚀 ОСНОВНЫЕ КОМАНДЫ УПРАВЛЕНИЯ ШЛЮЗОМ И ДАШБОРДОМ"
-    ui_box_row "${C_CYN}gateway${C_RES}                          — Главное интерактивное TUI-меню с телеметрией"
-    ui_box_row "${C_CYN}gateway status${C_RES} (или ${C_CYN}test${C_RES})        — Полный рентген и матрица здоровья (Self-Test 2.0 + Ping Matrix)"
-    ui_box_row "${C_CYN}gateway doctor${C_RES} (или ${C_CYN}fix${C_RES})         — Умная авто-починка одной командой (модули, DNS, nftables, БД, диск)"
-    ui_box_row "${C_CYN}gateway restart${C_RES}                  — Быстрая пересборка конфига, сброс conntrack и перезапуск шлюза"
-    ui_box_row "${C_CYN}gateway update${C_RES}                   — Обновление ядер Sing-Box Extended, AdGuard Home, Zashboard и Homelab"
-    ui_box_row "${C_CYN}gateway links${C_RES} (или ${C_CYN}urls${C_RES})         — Карточка всех веб-адресов https://*.lan, сертификата и шары Samba"
-    ui_box_row "${C_CYN}gateway logs [служба]${C_RES}            — Живые логи (sing-box|adguard|caddy|vaultwarden|jellyfin|samba|...)"
+    ui_box_row "${C_CYN}gw${C_RES} (или ${C_CYN}gateway${C_RES})             — Главное интерактивное TUI-меню с телеметрией"
+    ui_box_row "${C_CYN}gw motd${C_RES}                     — Быстрый системный баннер (ОЗУ, диск, сеть, службы)"
+    ui_box_row "${C_CYN}gw status${C_RES} (или ${C_CYN}gw test${C_RES})        — Полный рентген и матрица здоровья (Self-Test 2.0 + Ping Matrix)"
+    ui_box_row "${C_CYN}gw doctor${C_RES} (или ${C_CYN}gw fix${C_RES})         — Умная авто-починка одной командой (модули, DNS, nftables, БД, диск)"
+    ui_box_row "${C_CYN}gw passwd [новый_пароль]${C_RES}   — Ротация единого пароля (Sing-Box, AdGuard, Samba, Vaultwarden)"
+    ui_box_row "${C_CYN}gw restart${C_RES}                  — Быстрая пересборка конфига, сброс conntrack и перезапуск шлюза"
+    ui_box_row "${C_CYN}gw update${C_RES}                   — Обновление ядер Sing-Box Extended, AdGuard Home, Zashboard и Homelab"
+    ui_box_row "${C_CYN}gw links${C_RES} (или ${C_CYN}gw urls${C_RES})         — Карточка всех веб-адресов https://*.lan, сертификата и шары Samba"
+    ui_box_row "${C_CYN}gw logs [служба]${C_RES}            — Живые логи (sing-box|adguard|caddy|vaultwarden|jellyfin|samba|...)"
+    ui_box_sep "🤖 АВТОМАТИЧЕСКАЯ УСТАНОВКА И ФАЙЛЫ ОТВЕТОВ (ZERO-TOUCH)"
+    ui_box_row "${C_CYN}gw install --answers <файл>${C_RES} — Полная тихая установка шлюза и сервисов без единого вопроса"
+    ui_box_row "${C_CYN}gw answers template [файл]${C_RES}  — Сгенерировать подробный шаблон файла ответов (Answers File)"
+    ui_box_row "${C_CYN}gw answers verify [файл]${C_RES}    — Проверить корректность заполнения файла ответов перед установкой"
     ui_box_sep "🔐 ЗАЩИТА ПИТАНИЯ, ДИСКИ LUKS2 И БЕЗОПАСНОЕ ВЫКЛЮЧЕНИЕ"
-    ui_box_row "${C_GRN}gateway unlock${C_RES}                   — Быстрая разблокировка LUKS2-накопителя после ребута + старт Homelab"
-    ui_box_row "${C_YEL}gateway lock${C_RES} (или ${C_YEL}eject${C_RES})         — Безопасная остановка медиа-сервисов, sync, umount и закрытие LUKS2"
-    ui_box_row "${C_CYN}gateway disk${C_RES}                     — Интерактивный менеджер внешних дисков (LUKS2 / ext4 / btrfs / f2fs)"
-    ui_box_row "${C_CYN}gateway safe-reboot${C_RES}              — Корректная перезагрузка с остановкой БД/торрентов, sync и закрытием LUKS"
-    ui_box_row "${C_CYN}gateway safe-poweroff${C_RES}            — Безопасное отключение питания сервера с полной парковкой хранилища"
+    ui_box_row "${C_GRN}gw unlock${C_RES}                   — Быстрая разблокировка LUKS2-накопителя после ребута + старт Homelab"
+    ui_box_row "${C_YEL}gw lock${C_RES} (или ${C_YEL}gw eject${C_RES})         — Безопасная остановка медиа-сервисов, sync, umount и закрытие LUKS2"
+    ui_box_row "${C_CYN}gw disk${C_RES}                     — Интерактивный менеджер внешних дисков (LUKS2 / ext4 / btrfs / f2fs)"
+    ui_box_row "${C_CYN}gw safe-reboot${C_RES}              — Корректная перезагрузка с остановкой БД/торрентов, sync и закрытием LUKS"
+    ui_box_row "${C_CYN}gw safe-poweroff${C_RES}            — Безопасное отключение питания сервера с полной парковкой хранилища"
     ui_box_sep "🌐 БЫСТРОЕ УПРАВЛЕНИЕ ПРОКСИ И ДОМЕНАМИ НА ЛЕТУ"
-    ui_box_row "${C_CYN}gateway proxy add <url|key|warp>${C_RES} — Добавить подписку (Слот 1), ключ URI (Слот 2) или включить WARP"
-    ui_box_row "${C_CYN}gateway domain direct <url|dom>${C_RES}  — Направить сайт/домен всегда НАПРЯМУЮ (в обход туннеля)"
-    ui_box_row "${C_CYN}gateway domain proxy <url|dom>${C_RES}   — Направить сайт/домен принудительно В ПРОКСИ (через туннель)"
+    ui_box_row "${C_CYN}gw proxy add <url|key|warp>${C_RES} — Добавить подписку (Слот 1), ключ URI (Слот 2) или включить WARP"
+    ui_box_row "${C_CYN}gw domain direct <url|dom>${C_RES}  — Направить сайт/домен всегда НАПРЯМУЮ (в обход туннеля)"
+    ui_box_row "${C_CYN}gw domain proxy <url|dom>${C_RES}   — Направить сайт/домен принудительно В ПРОКСИ (через туннель)"
     ui_box_sep "🏠 МОДУЛИ HOMELAB И ЕДИНЫЙ БЭКАП"
-    ui_box_row "${C_CYN}gateway homelab${C_RES}                  — Открыть интерактивное меню управления домашним сервером (Пункт 13)"
-    ui_box_row "${C_CYN}gateway homelab install <1-9>${C_RES}    — Установить модуль (caddy|samba|vaultwarden|forgejo|code|navidrome|jellyfin|ytdlp|torrent)"
-    ui_box_row "${C_CYN}gateway homelab restart <1-9>${C_RES}    — Перезапустить выбранный модуль Homelab"
-    ui_box_row "${C_CYN}gateway backup [create|full|restore|telegram]${C_RES} — Управление резервными копиями и отправка в Telegram"
+    ui_box_row "${C_CYN}gw homelab${C_RES}                  — Открыть интерактивное меню управления домашним сервером (Пункт 13)"
+    ui_box_row "${C_CYN}gw homelab install <1-9>${C_RES}    — Установить модуль (caddy|samba|vaultwarden|forgejo|code|navidrome|jellyfin|ytdlp|torrent)"
+    ui_box_row "${C_CYN}gw homelab restart <1-9>${C_RES}    — Перезапустить выбранный модуль Homelab"
+    ui_box_row "${C_CYN}gw backup [create|full|restore|telegram]${C_RES} — Управление резервными копиями и отправка в Telegram"
     ui_box_bottom
     return 0
 }
@@ -8903,17 +9292,6 @@ show_homelab_menu() {
     done
     return 0
 }
-
-# Безопасная самоустановка скрипта в качестве системной команды gateway (с очисткой CRLF и BOM)
-INSTALL_PATH="/usr/bin/gateway"
-SCRIPT_BASE="$(basename "$0" 2>/dev/null || true)"
-if [ -f "$0" ] && [ "$0" != "$INSTALL_PATH" ] && [ "$SCRIPT_BASE" != "sh" ] && [ "$SCRIPT_BASE" != "ash" ] && [ "$SCRIPT_BASE" != "-sh" ] && [ "$SCRIPT_BASE" != "-ash" ]; then
-    sed -i 's/\r$//; 1s/^\xEF\xBB\xBF//' "$0" 2>/dev/null || true
-    cp -f "$0" "$INSTALL_PATH"
-    chmod +x "$INSTALL_PATH"
-    detect_os
-    ui_ok_msg "Глобальная команда 'gateway' (Alpine Linux Homelab Edition) установлена в систему (${OS_NAME})."
-fi
 
 # ==============================================================================
 # Главное интерактивное меню управления (Шлюз + Пункт 13 Homelab + Доктор/LUKS2)
@@ -9702,11 +10080,37 @@ gateway_cli_dispatch() {
     links|urls|info)
         print_quick_access_card
         ;;
+    motd)
+        print_gateway_motd
+        ;;
+    passwd|password)
+        if [ -n "${2:-}" ]; then
+            change_unified_password "$2" "yes"
+        else
+            printf "Введите новый единый мастер-пароль: "
+            read -r IN_P < /dev/tty || true
+            IN_P=$(printf "%s" "$IN_P" | tr -d '\r\n')
+            change_unified_password "$IN_P"
+        fi
+        ;;
+    answers)
+        case "${2:-}" in
+            template|generate|example)
+                generate_answers_template "${3:-}"
+                ;;
+            verify|check|test)
+                verify_answers_file "${3:-}"
+                ;;
+            *)
+                echo "Использование: gw answers template [файл]  ИЛИ  gw answers verify [файл]"
+                ;;
+        esac
+        ;;
     disk|disks|storage)
         manage_external_disks_menu
         ;;
-    install)
-        run_installer
+    install|--answers*|-a|-f|--unattended)
+        run_installer "$@"
         ;;
     homelab)
         case "${2:-}" in

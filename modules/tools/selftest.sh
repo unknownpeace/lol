@@ -145,4 +145,92 @@ run_gateway_quick_check() {
     return 0
 }
 
+# ==============================================================================
+# Динамический баннер приветствия SSH / Консоли (Fast Non-blocking MOTD)
+# Вызывается автоматически при логине в систему через /etc/profile.d/00-gateway-motd.sh
+# или вручную по команде `gw motd` / `gateway motd`
+# ==============================================================================
+print_gateway_motd() {
+    load_gateway_env
+    [ -f "$HOMELAB_ENV" ] && . "$HOMELAB_ENV" 2>/dev/null || true
+
+    HN=$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "alpine")
+    ARCH_INFO=$(uname -m 2>/dev/null || echo "x86_64")
+    UPTIME_RAW=$(uptime 2>/dev/null || echo "")
+    UPTIME_STR=$(printf "%s" "$UPTIME_RAW" | sed -E 's/.*up[[:space:]]+([^,]+),.*/\1/' | sed 's/^[[:space:]]*//' || echo "online")
+    LOAD_STR=$(awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null || echo "0.00")
+
+    LAN_IP_CUR=$(get_current_lan_ip)
+    LAN_DEV_CUR=$(get_lan_ifname)
+    ROUTER_IP="${GW_IP:-$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -n 1)}"
+
+    # ОЗУ
+    RAM_LINE=$(free -m 2>/dev/null | awk '/Mem:/ {if ($2>0) printf "%d МБ / %d МБ (%.0f%%)", $3, $2, ($3/$2)*100; else print "N/A"}')
+    [ -z "$RAM_LINE" ] && RAM_LINE="${TOTAL_RAM_MB:-2048} МБ"
+
+    # Хранилище
+    if is_external_storage_mounted 2>/dev/null; then
+        ST_LINE=$(df -h "$STORAGE_ROOT" 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
+        ST_SRC=$(findmnt -n -o SOURCE "$STORAGE_ROOT" 2>/dev/null || true)
+        ST_FS=$(blkid -s TYPE -o value "$ST_SRC" 2>/dev/null || echo "ext4")
+        if [ -n "${EXT_STORAGE_LUKS_UUID:-}" ] || echo "$ST_SRC" | grep -q "mapper"; then
+            ST_TAG=" [${ST_FS} / LUKS2 🔒]"
+        else
+            ST_TAG=" [${ST_FS}]"
+        fi
+        ST_INFO="${STORAGE_ROOT}: ${ST_LINE}${ST_TAG}"
+    else
+        ST_ROOT_LINE=$(df -h / 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
+        ST_INFO="Локальный системный раздел: ${ST_ROOT_LINE} (диск не подключен)"
+    fi
+
+    # Статус ядер шлюза
+    SB_ST="${C_RED}○${C_RES}"
+    pgrep sing-box >/dev/null 2>&1 && SB_ST="${C_GRN}●${C_RES}"
+    AGH_ST="${C_RED}○${C_RES}"
+    pgrep AdGuardHome >/dev/null 2>&1 && AGH_ST="${C_GRN}●${C_RES}"
+    TUN_ST="${C_RED}○${C_RES}"
+    ip link show singbox-tun >/dev/null 2>&1 && TUN_ST="${C_GRN}●${C_RES}"
+
+    # SSL / Домен
+    if [ "${SSL_MODE:-local}" = "duckdns" ] && [ -n "${DUCKDNS_DOMAIN:-}" ]; then
+        SSL_INFO="Let's Encrypt Wildcard (*.${DUCKDNS_DOMAIN})"
+    else
+        SSL_INFO="Локальный доверенный CA (*.lan)"
+    fi
+
+    # Homelab сервисы
+    HL_SUMMARY=""
+    if [ -f "$HOMELAB_STATE" ]; then
+        while IFS='|' read -r M_ID M_EN M_SVC _REST; do
+            case "$M_ID" in ''|\#*) continue ;; esac
+            if [ "$M_EN" = "yes" ]; then
+                if [ -n "$M_SVC" ] && rc-service "$M_SVC" status >/dev/null 2>&1; then
+                    DOT="${C_GRN}●${C_RES}"
+                else
+                    DOT="${C_RED}○${C_RES}"
+                fi
+                HL_SUMMARY="${HL_SUMMARY} ${M_ID}[${DOT}]"
+            fi
+        done < "$HOMELAB_STATE"
+    fi
+    [ -z "$HL_SUMMARY" ] && HL_SUMMARY="только сетевой шлюз"
+
+    echo ""
+    echo "${C_BLU}╔══════════════════════════════════════════════════════════════════════════════╗${C_RES}"
+    echo "${C_BLU}║${C_RES}  ${C_CYN}🚀 UNIVERSAL SIDECAR GATEWAY & HOMELAB // ALPINE LINUX${C_RES}"
+    echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Хост / ОС:${C_RES}    %-24s │ Uptime: %-10s │ Load: %s\n" "${HN} (${ARCH_INFO})" "$UPTIME_STR" "$LOAD_STR"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Сеть:${C_RES}         LAN: %s (%s) │ Роутер: %s\n" "$LAN_IP_CUR" "$LAN_DEV_CUR" "$ROUTER_IP"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Память (RAM):${C_RES} %s\n" "$RAM_LINE"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Хранилище:${C_RES}    %s\n" "$ST_INFO"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Ядро шлюза:${C_RES}   Sing-Box [%b] │ AdGuard Home (:53) [%b] │ singbox-tun [%b]\n" "$SB_ST" "$AGH_ST" "$TUN_ST"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Homelab:${C_RES}     %s\n" "$HL_SUMMARY"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• SSL / Домен:${C_RES}  %s\n" "$SSL_INFO"
+    echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
+    echo "${C_BLU}║${C_RES}  ⚡ Быстрая команда: ${C_GRN}${C_BLD}gw${C_RES} │ Меню: ${C_CYN}gateway${C_RES} │ Ссылки: ${C_CYN}gw links${C_RES} │ Доктор: ${C_CYN}gw doctor${C_RES}"
+    echo "${C_BLU}╚══════════════════════════════════════════════════════════════════════════════╝${C_RES}"
+    echo ""
+}
+
 # Преобразование ввода пользователя (номер 1..9 или ID модуля) в канонический ID модуля
