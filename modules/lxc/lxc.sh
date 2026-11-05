@@ -502,7 +502,7 @@ lxc_control() {
             read -r CONFIRM
             if [ "$CONFIRM" = "yes" ]; then
                 lxc-stop -n "$NAME" -k 2>/dev/null || true
-                lxc-destroy -n "$NAME" -f && ui_ok_msg "Контейнер ${NAME} успешно удален." || ui_warn_msg "Ошибка удаления."
+                lxc-destroy -n "$NAME" -s -f && ui_ok_msg "Контейнер ${NAME} успешно удален." || ui_warn_msg "Ошибка удаления."
             else
                 ui_info_msg "Удаление отменено."
             fi
