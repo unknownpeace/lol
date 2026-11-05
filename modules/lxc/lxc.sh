@@ -27,7 +27,8 @@ ensure_lxc_subsystem() {
 
     # 1. Проверка системных пакетов
     MISSING_LXC_PKGS=""
-    command -v lxc-create >/dev/null 2>&1 || MISSING_LXC_PKGS="$MISSING_LXC_PKGS lxc lxc-openrc lxc-bridge lxc-download lxc-templates lxcfs lxcfs-openrc bridge-utils dnsmasq cgroup-tools"
+    command -v lxc-create >/dev/null 2>&1 || MISSING_LXC_PKGS="$MISSING_LXC_PKGS lxc lxc-openrc lxc-bridge lxc-download lxc-templates lxcfs lxcfs-openrc bridge-utils dnsmasq cgroup-tools rsync"
+    command -v rsync >/dev/null 2>&1 || MISSING_LXC_PKGS="$MISSING_LXC_PKGS rsync"
     if [ -n "$MISSING_LXC_PKGS" ]; then
         [ "$SILENT" != "yes" ] && ui_step_progress 1 4 "Установка пакетов LXC и утилит виртуализации..."
         apk add --no-cache $MISSING_LXC_PKGS >/dev/null 2>&1 || true

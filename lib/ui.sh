@@ -110,6 +110,16 @@ ui_info_msg() {
     return 0
 }
 
+ui_warn_msg() {
+    echo "${C_YEL}  [▲]${C_RES} $*"
+    return 0
+}
+
+ui_err_msg() {
+    echo "${C_RED}  [✖]${C_RES} $*"
+    return 0
+}
+
 ui_badge() {
     B_STATE="${1:-off}"
     B_LABEL="${2:-STATUS}"
