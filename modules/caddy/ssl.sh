@@ -87,6 +87,16 @@ issue_duckdns_cert() {
     DUCKDNS_TOKEN="${TARGET_TOKEN}"
     save_homelab_env
 
+    # Привязка A-записи DuckDNS к локальному IP шлюза, чтобы все клиенты локальной сети попадали на шлюз
+    CUR_LAN_IP=$(get_current_lan_ip)
+    if [ -n "$CUR_LAN_IP" ]; then
+        curl -s -m 10 "https://www.duckdns.org/update?domains=${TARGET_SUB}&token=${TARGET_TOKEN}&ip=${CUR_LAN_IP}" >/dev/null 2>&1 || true
+    fi
+
+    sync_caddy_main_config
+    command -v sync_all_caddy_sites >/dev/null 2>&1 && sync_all_caddy_sites || true
+    sync_agh_homelab_rewrites
+
     echo "${C_GRN}[✓] Wildcard-сертификат Let's Encrypt (*.${FULL_DOMAIN}) успешно получен и установлен!${C_RES}"
     return 0
 }
@@ -106,6 +116,7 @@ renew_duckdns_cert_force() {
             --fullchain-file "${SSL_FULLCHAIN_FILE}" >/dev/null 2>&1
         chmod 644 "$SSL_CERTS_DIR"/*.pem 2>/dev/null || true
         reload_caddy_safe
+        command -v sync_all_caddy_sites >/dev/null 2>&1 && sync_all_caddy_sites || true
         echo "${C_GRN}[✓] Сертификат успешно обновлен, Caddy перезагружен.${C_RES}"
         return 0
     else
@@ -121,7 +132,7 @@ switch_to_local_pki() {
     save_homelab_env
     echo "${C_CYN}[*] Переключение HTTPS на локальный PKI (*.lan)...${C_RES}"
     sync_caddy_main_config
-    reload_caddy_safe
+    command -v sync_all_caddy_sites >/dev/null 2>&1 && sync_all_caddy_sites || true
     sync_agh_homelab_rewrites
     echo "${C_GRN}[✓] Шлюз переведен в оффлайн-режим Local PKI (*.lan).${C_RES}"
     return 0
@@ -192,9 +203,6 @@ prompt_ssl_management_menu() {
 
                 if [ -n "$IN_SUB" ] && [ -n "$IN_TOKEN" ]; then
                     if issue_duckdns_cert "$IN_SUB" "$IN_TOKEN"; then
-                        sync_caddy_main_config
-                        reload_caddy_safe
-                        sync_agh_homelab_rewrites
                         ui_ok_msg "Все сервисы переведены на официальный Let's Encrypt Wildcard!"
                         echo "   Панель Sing-Box: https://zashboard.${IN_SUB}.duckdns.org"
                         echo "   Панель AdGuard:  https://adguard.${IN_SUB}.duckdns.org"

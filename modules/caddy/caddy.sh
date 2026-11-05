@@ -266,11 +266,20 @@ register_caddy_site() {
         fi
     fi
 
+    SITE_SUB="${SITE_DOM%%.*}"
+    if [ -n "$SITE_SUB" ] && [ "$SITE_SUB" != "$SITE_MOD" ]; then
+        LE_DOM_HEADER="https://${SITE_SUB}.${SSL_DOMAIN}, https://${SITE_MOD}.${SSL_DOMAIN}"
+        LAN_DOM_HEADER="https://${SITE_DOM}, https://${SITE_MOD}.lan"
+    else
+        LE_DOM_HEADER="https://${SITE_SUB:-$SITE_MOD}.${SSL_DOMAIN}"
+        LAN_DOM_HEADER="https://${SITE_DOM}"
+    fi
+
     LE_SITE_BLOCK=""
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
         if [ "$SITE_MOD" = "vaultwarden" ]; then
             LE_SITE_BLOCK="
-https://${SITE_MOD}.${SSL_DOMAIN} {
+${LE_DOM_HEADER} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
     encode zstd gzip
 
@@ -288,12 +297,12 @@ https://${SITE_MOD}.${SSL_DOMAIN} {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto \"https\"
+        header_up X-Forwarded-Proto https
     }
 }"
         else
             LE_SITE_BLOCK="
-https://${SITE_MOD}.${SSL_DOMAIN} {
+${LE_DOM_HEADER} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
     encode zstd gzip
 ${AUTH_BLOCK}
@@ -308,7 +317,7 @@ ${AUTH_BLOCK}
     if [ "$SITE_MOD" = "vaultwarden" ]; then
         # Чистый эталонный профиль проксирования для Vaultwarden
         cat << VW_SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
-https://${SITE_DOM} {
+${LAN_DOM_HEADER} {
     tls internal
     encode zstd gzip
 
@@ -326,14 +335,14 @@ https://${SITE_DOM} {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto "https"
+        header_up X-Forwarded-Proto https
     }
 }
 ${LE_SITE_BLOCK}
 VW_SITE_EOF
     else
         cat << SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
-https://${SITE_DOM} {
+${LAN_DOM_HEADER} {
     tls internal
     encode zstd gzip
 ${AUTH_BLOCK}
@@ -357,6 +366,21 @@ remove_caddy_site() {
     if is_module_enabled "caddy"; then
         reload_caddy_safe || true
     fi
+    return 0
+}
+
+# Синхронизация HTTPS-конфигураций Caddy для всех установленных модулей Homelab
+sync_all_caddy_sites() {
+    load_gateway_env
+    load_homelab_env 2>/dev/null || true
+    is_module_enabled "vaultwarden" && register_caddy_site "vaultwarden" "${DOM_VAULTWARDEN:-vaultwarden.lan}" "${PORT_VAULTWARDEN:-8222}" "no" || true
+    is_module_enabled "forgejo"     && register_caddy_site "forgejo" "${DOM_FORGEJO:-forgejo.lan}" "${PORT_FORGEJO:-3001}" "no" || true
+    is_module_enabled "code"        && register_caddy_site "code" "${DOM_CODE:-code.lan}" "${PORT_CODE:-8443}" "yes" || true
+    is_module_enabled "navidrome"   && register_caddy_site "navidrome" "${DOM_NAVIDROME:-music.lan}" "${PORT_NAVIDROME:-4533}" "no" || true
+    is_module_enabled "jellyfin"    && register_caddy_site "jellyfin" "${DOM_JELLYFIN:-jellyfin.lan}" "${PORT_JELLYFIN:-8096}" "no" || true
+    is_module_enabled "ytdlp"       && register_caddy_site "ytdlp" "${DOM_YTDLP:-downloads.lan}" "${PORT_YTDLP:-8081}" "yes" || true
+    is_module_enabled "torrent"     && register_caddy_site "torrent" "${DOM_TORRENT:-torrents.lan}" "${PORT_TORRENT_WEB:-8080}" "yes" || true
+    reload_caddy_safe
     return 0
 }
 

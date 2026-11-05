@@ -1434,7 +1434,7 @@ sync_agh_homelab_rewrites() {
 
     DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan music.lan jellyfin.lan downloads.lan torrents.lan code.lan"
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN}"
+        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN} vaultwarden.${SSL_DOMAIN} forgejo.${SSL_DOMAIN} music.${SSL_DOMAIN} jellyfin.${SSL_DOMAIN} downloads.${SSL_DOMAIN} torrents.${SSL_DOMAIN} code.${SSL_DOMAIN} adguard.${SSL_DOMAIN} zashboard.${SSL_DOMAIN} singbox.${SSL_DOMAIN}"
     fi
 
     awk -v lip="$TARGET_LAN_IP" -v dom_list="$DOMS_STR" '
@@ -4696,6 +4696,16 @@ issue_duckdns_cert() {
     DUCKDNS_TOKEN="${TARGET_TOKEN}"
     save_homelab_env
 
+    # Привязка A-записи DuckDNS к локальному IP шлюза, чтобы все клиенты локальной сети попадали на шлюз
+    CUR_LAN_IP=$(get_current_lan_ip)
+    if [ -n "$CUR_LAN_IP" ]; then
+        curl -s -m 10 "https://www.duckdns.org/update?domains=${TARGET_SUB}&token=${TARGET_TOKEN}&ip=${CUR_LAN_IP}" >/dev/null 2>&1 || true
+    fi
+
+    sync_caddy_main_config
+    command -v sync_all_caddy_sites >/dev/null 2>&1 && sync_all_caddy_sites || true
+    sync_agh_homelab_rewrites
+
     echo "${C_GRN}[✓] Wildcard-сертификат Let's Encrypt (*.${FULL_DOMAIN}) успешно получен и установлен!${C_RES}"
     return 0
 }
@@ -4715,6 +4725,7 @@ renew_duckdns_cert_force() {
             --fullchain-file "${SSL_FULLCHAIN_FILE}" >/dev/null 2>&1
         chmod 644 "$SSL_CERTS_DIR"/*.pem 2>/dev/null || true
         reload_caddy_safe
+        command -v sync_all_caddy_sites >/dev/null 2>&1 && sync_all_caddy_sites || true
         echo "${C_GRN}[✓] Сертификат успешно обновлен, Caddy перезагружен.${C_RES}"
         return 0
     else
@@ -4730,7 +4741,7 @@ switch_to_local_pki() {
     save_homelab_env
     echo "${C_CYN}[*] Переключение HTTPS на локальный PKI (*.lan)...${C_RES}"
     sync_caddy_main_config
-    reload_caddy_safe
+    command -v sync_all_caddy_sites >/dev/null 2>&1 && sync_all_caddy_sites || true
     sync_agh_homelab_rewrites
     echo "${C_GRN}[✓] Шлюз переведен в оффлайн-режим Local PKI (*.lan).${C_RES}"
     return 0
@@ -4801,9 +4812,6 @@ prompt_ssl_management_menu() {
 
                 if [ -n "$IN_SUB" ] && [ -n "$IN_TOKEN" ]; then
                     if issue_duckdns_cert "$IN_SUB" "$IN_TOKEN"; then
-                        sync_caddy_main_config
-                        reload_caddy_safe
-                        sync_agh_homelab_rewrites
                         ui_ok_msg "Все сервисы переведены на официальный Let's Encrypt Wildcard!"
                         echo "   Панель Sing-Box: https://zashboard.${IN_SUB}.duckdns.org"
                         echo "   Панель AdGuard:  https://adguard.${IN_SUB}.duckdns.org"
@@ -5101,11 +5109,20 @@ register_caddy_site() {
         fi
     fi
 
+    SITE_SUB="${SITE_DOM%%.*}"
+    if [ -n "$SITE_SUB" ] && [ "$SITE_SUB" != "$SITE_MOD" ]; then
+        LE_DOM_HEADER="https://${SITE_SUB}.${SSL_DOMAIN}, https://${SITE_MOD}.${SSL_DOMAIN}"
+        LAN_DOM_HEADER="https://${SITE_DOM}, https://${SITE_MOD}.lan"
+    else
+        LE_DOM_HEADER="https://${SITE_SUB:-$SITE_MOD}.${SSL_DOMAIN}"
+        LAN_DOM_HEADER="https://${SITE_DOM}"
+    fi
+
     LE_SITE_BLOCK=""
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
         if [ "$SITE_MOD" = "vaultwarden" ]; then
             LE_SITE_BLOCK="
-https://${SITE_MOD}.${SSL_DOMAIN} {
+${LE_DOM_HEADER} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
     encode zstd gzip
 
@@ -5123,12 +5140,12 @@ https://${SITE_MOD}.${SSL_DOMAIN} {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto \"https\"
+        header_up X-Forwarded-Proto https
     }
 }"
         else
             LE_SITE_BLOCK="
-https://${SITE_MOD}.${SSL_DOMAIN} {
+${LE_DOM_HEADER} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
     encode zstd gzip
 ${AUTH_BLOCK}
@@ -5143,7 +5160,7 @@ ${AUTH_BLOCK}
     if [ "$SITE_MOD" = "vaultwarden" ]; then
         # Чистый эталонный профиль проксирования для Vaultwarden
         cat << VW_SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
-https://${SITE_DOM} {
+${LAN_DOM_HEADER} {
     tls internal
     encode zstd gzip
 
@@ -5161,14 +5178,14 @@ https://${SITE_DOM} {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto "https"
+        header_up X-Forwarded-Proto https
     }
 }
 ${LE_SITE_BLOCK}
 VW_SITE_EOF
     else
         cat << SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
-https://${SITE_DOM} {
+${LAN_DOM_HEADER} {
     tls internal
     encode zstd gzip
 ${AUTH_BLOCK}
@@ -5192,6 +5209,21 @@ remove_caddy_site() {
     if is_module_enabled "caddy"; then
         reload_caddy_safe || true
     fi
+    return 0
+}
+
+# Синхронизация HTTPS-конфигураций Caddy для всех установленных модулей Homelab
+sync_all_caddy_sites() {
+    load_gateway_env
+    load_homelab_env 2>/dev/null || true
+    is_module_enabled "vaultwarden" && register_caddy_site "vaultwarden" "${DOM_VAULTWARDEN:-vaultwarden.lan}" "${PORT_VAULTWARDEN:-8222}" "no" || true
+    is_module_enabled "forgejo"     && register_caddy_site "forgejo" "${DOM_FORGEJO:-forgejo.lan}" "${PORT_FORGEJO:-3001}" "no" || true
+    is_module_enabled "code"        && register_caddy_site "code" "${DOM_CODE:-code.lan}" "${PORT_CODE:-8443}" "yes" || true
+    is_module_enabled "navidrome"   && register_caddy_site "navidrome" "${DOM_NAVIDROME:-music.lan}" "${PORT_NAVIDROME:-4533}" "no" || true
+    is_module_enabled "jellyfin"    && register_caddy_site "jellyfin" "${DOM_JELLYFIN:-jellyfin.lan}" "${PORT_JELLYFIN:-8096}" "no" || true
+    is_module_enabled "ytdlp"       && register_caddy_site "ytdlp" "${DOM_YTDLP:-downloads.lan}" "${PORT_YTDLP:-8081}" "yes" || true
+    is_module_enabled "torrent"     && register_caddy_site "torrent" "${DOM_TORRENT:-torrents.lan}" "${PORT_TORRENT_WEB:-8080}" "yes" || true
+    reload_caddy_safe
     return 0
 }
 
