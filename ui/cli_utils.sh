@@ -86,6 +86,7 @@ cli_proxy_add() {
                 *" ${CLEAN_P} "*) ;;
                 *) SUB_URL="${SUB_URL:+${SUB_URL} }${CLEAN_P}" ;;
             esac
+            save_gateway_env
             apply_and_verify_singbox "CLI: Добавление подписки в Слот 1"
             ;;
         warp|WARP|amnezia|masque)
@@ -218,10 +219,9 @@ verify_answers_file() {
     fi
     echo "${C_GRN}[✔] Синтаксис shell: КОРРЕКТЕН${C_RES}"
 
-    # 2. Изолированная загрузка переменных
+    # 2. Изолированная безопасная загрузка переменных
     (
-        # shellcheck source=/dev/null
-        . "$IN_F"
+        parse_env_file_safely "$IN_F"
 
         # Сеть
         printf "• Сеть:             LAN IP: %s │ GW IP: %s │ Подписка: %s\n" "${TARGET_LAN_IP:-auto}" "${GW_IP:-auto}" "${SUB_URL:-warp}"

@@ -185,10 +185,22 @@ run_autoupdate() {
 # Получение последнего тега релиза с GitHub
 fetch_latest_github_tag() {
     REPO="$1"
-    TAG=$(curl -fsSL --curves X25519:P-256 --connect-timeout 2 -m 3 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n 1 | cut -d'"' -f4 || true)
+    TAG=""
+    RAW_JSON=$(curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || \
+               curl -fsSL --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+    if [ -n "$RAW_JSON" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            TAG=$(printf "%s" "$RAW_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
+        fi
+        if [ -z "$TAG" ]; then
+            TAG=$(printf "%s" "$RAW_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 | tr -d ' \t\r\n' || true)
+        fi
+    fi
+    case "$TAG" in *[\/:]*|"") TAG="" ;; esac
     if [ -z "$TAG" ]; then
-        TAG=$(curl -fsSLI --curves X25519:P-256 --connect-timeout 2 -m 3 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d '\r\n' || true)
+        TAG=$(curl -fsSLI --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d '\r\n' || true)
         [ "$TAG" = "latest" ] && TAG="" || true
+        case "$TAG" in *[\/:]*|"") TAG="" ;; esac
     fi
     printf "%s" "$TAG"
     return 0

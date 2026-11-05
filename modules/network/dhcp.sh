@@ -107,7 +107,8 @@ apply_network_ips() {
         configure_smart_dhcp "on" >/dev/null 2>&1 || true
     fi
 
-    cat << SW_ALP > /tmp/switch_lan_ip.sh
+    SW_SCRIPT="/tmp/switch_lan_ip.$$.sh"
+    cat << SW_ALP > "$SW_SCRIPT"
 #!/bin/sh
 sleep 1
 rc-service sing-box stop >/dev/null 2>&1 || true
@@ -126,9 +127,9 @@ rc-service caddy reload >/dev/null 2>&1 || rc-service caddy restart >/dev/null 2
 rc-service samba restart >/dev/null 2>&1 || true
 rc-service wsdd restart >/dev/null 2>&1 || true
 rc-service avahi-daemon restart >/dev/null 2>&1 || true
-rm -f /tmp/switch_lan_ip.sh
+rm -f "$0" 2>/dev/null || true
 SW_ALP
-    chmod +x /tmp/switch_lan_ip.sh
+    chmod 700 "$SW_SCRIPT"
 
     write_resolv_conf "nameserver 127.0.0.1
 nameserver ${GW_IP}
@@ -148,10 +149,10 @@ nameserver 77.88.8.8"
         echo " 1. Переподключитесь по SSH: ssh root@${TARGET_LAN_IP}"
         echo " 2. Обновите адрес шлюза/DNS на устройствах или в роутере на ${TARGET_LAN_IP}!"
         ui_box_bottom
-        nohup /tmp/switch_lan_ip.sh >/dev/null 2>&1 &
+        nohup "$SW_SCRIPT" >/dev/null 2>&1 &
     else
         ui_box_bottom
-        /tmp/switch_lan_ip.sh
+        "$SW_SCRIPT"
     fi
     return 0
 }

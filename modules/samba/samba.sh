@@ -108,11 +108,13 @@ apply_and_verify_samba_password() {
     # Если smbd уже запущен и установлен smbclient — проверяем реальную SMB2/3 авторизацию
     if command -v smbclient >/dev/null 2>&1 && rc-service samba status >/dev/null 2>&1; then
         PASS_TMP="/tmp/.smb_auth_check.$$"
+        trap 'rm -f "$PASS_TMP" 2>/dev/null || true' EXIT INT TERM
         umask 077
         printf "username = %s\npassword = %s\n" "$TARGET_SMB_USER" "$TARGET_SMB_PASS" > "$PASS_TMP"
         umask 022
         SMB_CHECK_OUT=$(smbclient -L //127.0.0.1 -A "$PASS_TMP" -m SMB3 2>&1 || true)
         rm -f "$PASS_TMP" 2>/dev/null || true
+        trap - EXIT INT TERM
         if printf "%s" "$SMB_CHECK_OUT" | grep -Eq "NT_STATUS_LOGON_FAILURE|NT_STATUS_ACCOUNT_DISABLED|NT_STATUS_ACCESS_DENIED"; then
             echo "${C_RED}[X] Ошибка проверки входа Samba (smbclient): неверный пароль или доступ запрещен!${C_RES}" >&2
             return 1

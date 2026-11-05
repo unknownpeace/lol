@@ -20,10 +20,12 @@ check_github_mirror() {
 download_file() {
     DL_URL="$1"
     DL_OUT="$2"
-    for PREFIX in "$GH_PROXY" "" "https://gh-proxy.com/" "https://ghproxy.net/"; do
-        if curl --curves X25519:P-256 --retry 2 --connect-timeout 5 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null || \
-           curl --retry 2 --connect-timeout 5 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null; then
-            return 0
+    for PREFIX in "$GH_PROXY" "" "https://gh-proxy.com/"; do
+        if curl --curves X25519:P-256 --retry 1 --connect-timeout 5 --speed-limit 5000 --speed-time 10 -m 45 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null || \
+           curl --retry 1 --connect-timeout 5 --speed-limit 5000 --speed-time 10 -m 45 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null; then
+            if [ -s "$DL_OUT" ]; then
+                return 0
+            fi
         fi
     done
     return 1
@@ -203,21 +205,28 @@ generate_amnezia_warp() {
     fi
 
     if [ "$REG_OK" = "no" ]; then
-        echo "${C_YEL}[!] Провайдер блокирует прямой доступ к API регистрации WG Cloudflare.${C_RES}"
-        printf "Вставьте готовый WARP PrivateKey [или нажмите Enter для авто-регистрации через MASQUE TCP/H2]: "
-        read -r USER_PRIV < /dev/tty || true
-        USER_PRIV=$(printf "%s" "$USER_PRIV" | tr -d ' \t\r\n')
-        if [ -n "$USER_PRIV" ]; then
-            PRIV_KEY="$USER_PRIV"
-            WARP_IPV4="172.16.0.2"
-            REG_OK="yes"
-        elif [ -n "$PRIV_KEY" ]; then
+        if [ "${IS_UNATTENDED:-no}" = "yes" ] || [ ! -t 0 ]; then
             WARP_IPV4="172.16.0.2"
             REG_OK="yes"
             echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
         else
-            echo "${C_RED}[X] Не удалось получить или сгенерировать ключ WARP.${C_RES}"
-            return 1
+            echo "${C_YEL}[!] Провайдер блокирует прямой доступ к API регистрации WG Cloudflare.${C_RES}"
+            printf "Вставьте готовый WARP PrivateKey [или нажмите Enter для авто-регистрации через MASQUE TCP/H2]: "
+            read -r USER_PRIV < /dev/tty || true
+            USER_PRIV=$(printf "%s" "$USER_PRIV" | tr -d ' \t\r\n')
+            if [ -n "$USER_PRIV" ]; then
+                PRIV_KEY="$USER_PRIV"
+                WARP_IPV4="172.16.0.2"
+                REG_OK="yes"
+            elif [ -n "$PRIV_KEY" ]; then
+                WARP_IPV4="172.16.0.2"
+                REG_OK="yes"
+                echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
+            else
+                WARP_IPV4="172.16.0.2"
+                REG_OK="yes"
+                echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
+            fi
         fi
     fi
 
@@ -238,10 +247,20 @@ generate_amnezia_warp() {
     EP4_IP="${EP4%:*}"; EP4_PORT="${EP4#*:}"
 
     RAND_BYTE=$(od -An -N1 -tu1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "5")
+    [ -z "$RAND_BYTE" ] && RAND_BYTE=5
     AWG_JC1=$(( (RAND_BYTE % 4) + 3 ))
     AWG_JC2=$(( ((RAND_BYTE + 1) % 4) + 4 ))
     AWG_JC3=$(( ((RAND_BYTE + 2) % 4) + 3 ))
     AWG_JC4=$(( ((RAND_BYTE + 3) % 4) + 5 ))
+
+    AWG_JMIN1=$(( (RAND_BYTE % 15) + 30 ))
+    AWG_JMAX1=$(( AWG_JMIN1 + ((RAND_BYTE % 25) + 25) ))
+    AWG_JMIN2=$(( ((RAND_BYTE + 3) % 15) + 35 ))
+    AWG_JMAX2=$(( AWG_JMIN2 + (((RAND_BYTE + 5) % 25) + 30) ))
+    AWG_JMIN3=$(( ((RAND_BYTE + 7) % 15) + 28 ))
+    AWG_JMAX3=$(( AWG_JMIN3 + (((RAND_BYTE + 9) % 25) + 28) ))
+    AWG_JMIN4=$(( ((RAND_BYTE + 11) % 15) + 38 ))
+    AWG_JMAX4=$(( AWG_JMIN4 + (((RAND_BYTE + 13) % 25) + 35) ))
 
     HEX_R1=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "a1b2c3d4")
     HEX_R2=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "e5f60718")
@@ -250,7 +269,7 @@ generate_amnezia_warp() {
 
     AWG_I1_1="<b 0xc70000000108${HEX_R1}00><r 16><t>"
     AWG_I1_2="<b 0xc30000000108${HEX_R2}00><r 24><t>"
-    AWG_I1_3="<r 2><b 0x818000010001000000000361706905647a656e0272750000010001c00c000100010000003c0004${HEX_R3}>"
+    AWG_I1_3="<b 0x818000010001000000000361706905647a656e0272750000010001c00c000100010000003c0004${HEX_R3}><r 18><t>"
     AWG_I1_4="<b 0xcb0000000108${HEX_R4}00><t><r 20>"
 
     cat << WARP_EOF > "${WARP_NODES_FILE}.tmp.$$"
@@ -276,8 +295,8 @@ generate_amnezia_warp() {
       ],
       "amnezia": {
         "jc": ${AWG_JC1},
-        "jmin": 36,
-        "jmax": 68,
+        "jmin": ${AWG_JMIN1},
+        "jmax": ${AWG_JMAX1},
         "s1": 0,
         "s2": 0,
         "h1": 1,
@@ -307,8 +326,8 @@ generate_amnezia_warp() {
       ],
       "amnezia": {
         "jc": ${AWG_JC2},
-        "jmin": 42,
-        "jmax": 76,
+        "jmin": ${AWG_JMIN2},
+        "jmax": ${AWG_JMAX2},
         "s1": 0,
         "s2": 0,
         "h1": 1,
@@ -338,8 +357,8 @@ generate_amnezia_warp() {
       ],
       "amnezia": {
         "jc": ${AWG_JC3},
-        "jmin": 38,
-        "jmax": 72,
+        "jmin": ${AWG_JMIN3},
+        "jmax": ${AWG_JMAX3},
         "s1": 0,
         "s2": 0,
         "h1": 1,
@@ -369,8 +388,8 @@ generate_amnezia_warp() {
       ],
       "amnezia": {
         "jc": ${AWG_JC4},
-        "jmin": 44,
-        "jmax": 82,
+        "jmin": ${AWG_JMIN4},
+        "jmax": ${AWG_JMAX4},
         "s1": 0,
         "s2": 0,
         "h1": 1,
@@ -389,11 +408,11 @@ generate_amnezia_warp() {
     "use_ipv6": false,
     "profile": {
       "detour": "DIRECT",
-      "id": "",
-      "auth_token": "",
+      "id": "${REG_ID:-}",
+      "auth_token": "${REG_TOKEN:-}",
       "license_key": "${WARP_LICENSE:-}"
     },
-    "address": "162.159.198.2",
+    "address": "${CF_IP1:-162.159.198.2}",
     "port": 443,
     "udp_timeout": "5m0s",
     "udp_keepalive_period": "30s",
@@ -401,7 +420,7 @@ generate_amnezia_warp() {
     "handshake_timeout": "10s",
     "congestion_controller": "bbr",
     "tls": {
-      "server_name": "",
+      "server_name": "engage.cloudflareclient.com",
       "insecure": false,
       "fragment": true,
       "fragment_fallback_delay": "500ms",

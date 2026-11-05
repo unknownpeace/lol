@@ -278,9 +278,17 @@ https://${SITE_MOD}.${SSL_DOMAIN} {
         max_size 525MB
     }
 
+    @websockets {
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @websockets 127.0.0.1:${SITE_PORT}
+
     reverse_proxy 127.0.0.1:${SITE_PORT} {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto \"https\"
     }
 }"
         else
@@ -308,9 +316,17 @@ https://${SITE_DOM} {
         max_size 525MB
     }
 
+    @websockets {
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @websockets 127.0.0.1:${SITE_PORT}
+
     reverse_proxy 127.0.0.1:${SITE_PORT} {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto "https"
     }
 }
 ${LE_SITE_BLOCK}

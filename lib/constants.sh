@@ -7,6 +7,53 @@ set -e
 # ==============================================================================
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
+# Автоматическое определение GATEWAY_DIR и самораспаковка автономного Install.sh
+if [ -z "${GATEWAY_DIR:-}" ]; then
+    TARGET_EXEC="${BASH_SOURCE:-$0}"
+    case "$TARGET_EXEC" in
+        */*) ;;
+        *)
+            CMD_LOC=$(command -v "$TARGET_EXEC" 2>/dev/null || true)
+            [ -n "$CMD_LOC" ] && TARGET_EXEC="$CMD_LOC"
+            ;;
+    esac
+    REAL_EXEC=$(readlink -f "$TARGET_EXEC" 2>/dev/null || true)
+    [ -z "$REAL_EXEC" ] && REAL_EXEC="$TARGET_EXEC"
+    if [ -f "$REAL_EXEC" ]; then
+        GATEWAY_DIR="$(cd -P "$(dirname "$REAL_EXEC")" && pwd)"
+    else
+        GATEWAY_DIR="/opt/gateway"
+    fi
+    export GATEWAY_DIR
+fi
+
+if [ -d "/usr/bin" ] && [ -w "/usr/bin" ]; then
+    mkdir -p "/opt/gateway" 2>/dev/null || true
+    CUR_RUNNING="${BASH_SOURCE:-$0}"
+    if [ -f "$CUR_RUNNING" ] && [ "$(readlink -f "$CUR_RUNNING" 2>/dev/null)" != "/opt/gateway/Install.sh" ] && \
+       [ "$(readlink -f "$CUR_RUNNING" 2>/dev/null)" != "/opt/gateway/gateway.sh" ] && \
+       [ "$CUR_RUNNING" != "/usr/bin/gateway" ] && [ "$CUR_RUNNING" != "/usr/bin/gw" ]; then
+        case "$CUR_RUNNING" in
+            *Install.sh)
+                cp -f "$CUR_RUNNING" /opt/gateway/Install.sh 2>/dev/null || true
+                chmod +x /opt/gateway/Install.sh 2>/dev/null || true
+                ;;
+        esac
+    fi
+    if [ -f "/opt/gateway/Install.sh" ] && [ ! -f "/opt/gateway/gateway.sh" ]; then
+        ln -sf /opt/gateway/Install.sh /usr/bin/gateway 2>/dev/null || true
+        ln -sf /opt/gateway/Install.sh /usr/bin/gw 2>/dev/null || true
+    fi
+    if [ -d "/etc/profile.d" ] && [ ! -f "/etc/profile.d/00-gateway-motd.sh" ]; then
+        cat << 'MOTD_EOF' > /etc/profile.d/00-gateway-motd.sh
+if [ -t 1 ] && [ -x /usr/bin/gateway ]; then
+    /usr/bin/gateway motd
+fi
+MOTD_EOF
+        chmod 644 /etc/profile.d/00-gateway-motd.sh 2>/dev/null || true
+    fi
+fi
+
 SB_DIR="/etc/sing-box"
 SB_CONF="${SB_DIR}/config.json"
 SB_ENV="${SB_DIR}/gateway.env"

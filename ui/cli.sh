@@ -76,7 +76,7 @@ gateway_cli_dispatch() {
                 cli_domain_rule_add "proxy" "${3:-}"
                 ;;
             test|check|inspect)
-                inspect_domain_route
+                inspect_domain_route "${3:-}"
                 ;;
             *)
                 ui_warn_box "Укажите действие для домена: direct или proxy." \

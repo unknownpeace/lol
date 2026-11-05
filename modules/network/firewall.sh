@@ -71,6 +71,7 @@ table inet gateway_fw {
         type filter hook input priority filter - 5; policy accept;
         iifname "lo" accept
         ct state established,related accept
+        meta l4proto { tcp, udp } th dport 853 reject
         ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } tcp dport { ${LAN_TCP_PORTS} } accept
         ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } udp dport { ${LAN_UDP_PORTS} } accept
         ip daddr { 224.0.0.251, 239.255.255.250 } udp dport { 3702, 5353 } accept

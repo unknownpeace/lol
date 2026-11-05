@@ -1,6 +1,7 @@
 install_zashboard_ui() {
     TARGET_UI_VER="${1:-}"
     [ -z "$TARGET_UI_VER" ] && TARGET_UI_VER=$(fetch_latest_github_tag "$UI_REPO") || true
+    case "$TARGET_UI_VER" in v*) ;; *) TARGET_UI_VER="v3.30.0" ;; esac
 
     echo "Загрузка и установка веб-панели Zashboard ${TARGET_UI_VER}..."
     rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
@@ -53,7 +54,7 @@ update_cores_only() {
     check_github_mirror
 
     SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
-    [ -z "$SB_TAG" ] && SB_TAG="v1.14.3-extended-2.7.3" || true
+    case "$SB_TAG" in v*) ;; *) SB_TAG="v1.14.3-extended-2.7.3" ;; esac
     LATEST_SB_TAG="$SB_TAG"
     SB_VER_NO_V="${SB_TAG#v}"
 
@@ -93,7 +94,7 @@ update_cores_only() {
     fi
 
     AGH_TAG=$(fetch_latest_github_tag "AdguardTeam/AdGuardHome")
-    [ -z "$AGH_TAG" ] && AGH_TAG="v0.107.79" || true
+    case "$AGH_TAG" in v*) ;; *) AGH_TAG="v0.107.60" ;; esac
     LATEST_AGH_TAG="$AGH_TAG"
     INSTALLED_AGH_VER=""
     if [ -x /usr/bin/AdGuardHome ]; then
@@ -128,6 +129,7 @@ update_cores_only() {
 
     if [ "$CHECK_UI_UPDATE" = "yes" ]; then
         UI_TAG=$(fetch_latest_github_tag "$UI_REPO")
+        case "$UI_TAG" in v*) ;; *) UI_TAG="v3.30.0" ;; esac
         LATEST_UI_TAG="$UI_TAG"
         INSTALLED_UI_VER=""
         [ -f "$UI_VER_FILE" ] && INSTALLED_UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n') || true

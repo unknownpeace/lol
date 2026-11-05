@@ -1,6 +1,9 @@
 inspect_domain_route() {
-    printf "\nВведите домен или ссылку для проверки (например, https://instagram.com или vaultwarden.lan): "
-    read -r TEST_IN < /dev/tty || true
+    TEST_IN="${1:-}"
+    if [ -z "$TEST_IN" ]; then
+        printf "\nВведите домен или ссылку для проверки (например, https://instagram.com или vaultwarden.lan): "
+        read -r TEST_IN < /dev/tty || true
+    fi
     TEST_IN=$(printf "%s" "$TEST_IN" | tr -d ' \t\r\n')
     [ -z "$TEST_IN" ] && return 0
 
@@ -72,6 +75,8 @@ inspect_domain_route() {
 
     echo "   -> Через Sing-Box: HTTP ${PRX_CODE} | TLS: ${C_GRN}${PRX_MS}${C_RES}"
     echo "   -> Напрямую (LAN): HTTP ${DIR_CODE} | TLS: ${C_YEL}${DIR_MS}${C_RES}"
+    [ ! -t 0 ] && return 0
+
     ui_box_sep
     echo "Быстрое действие для ${CLEAN_SUFFIX}:"
     echo " 1) Направить этот домен В ПРОКСИ (добавить в ${USER_PROXY_FILE})"

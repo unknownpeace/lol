@@ -27,13 +27,23 @@ change_unified_password() {
     generate_singbox_config
 
     service_ctl adguardhome stop
-    if [ -f "$AGH_CONF" ] && command -v htpasswd >/dev/null 2>&1; then
+    command -v htpasswd >/dev/null 2>&1 || apk add --no-cache apache2-utils >/dev/null 2>&1 || true
+    if [ -f "$AGH_CONF" ]; then
         CUR_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
         [ -z "$CUR_AGH_USER" ] && CUR_AGH_USER="admin" || true
-        NEW_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$CUR_AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
-        [ -z "$NEW_HASH" ] && NEW_HASH=$(htpasswd -nbBC 10 "$CUR_AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true) || true
+        NEW_HASH=""
+        if command -v htpasswd >/dev/null 2>&1; then
+            NEW_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$CUR_AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
+            [ -z "$NEW_HASH" ] && NEW_HASH=$(htpasswd -nbBC 10 "$CUR_AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true) || true
+        elif [ -x /usr/sbin/caddy ]; then
+            NEW_HASH=$(/usr/sbin/caddy hash-password --plaintext "$ADMIN_PASS" 2>/dev/null | tail -n 1 | tr -d '\r\n' || true)
+        fi
         if [ -n "$NEW_HASH" ]; then
-            awk -v u="$CUR_AGH_USER" -v h="$NEW_HASH" '
+            CUR_AGH_USER="$CUR_AGH_USER" NEW_HASH="$NEW_HASH" awk '
+                BEGIN {
+                    u = ENVIRON["CUR_AGH_USER"];
+                    h = ENVIRON["NEW_HASH"];
+                }
                 /^users:/ {
                     print "users:"
                     print "  - name: " u

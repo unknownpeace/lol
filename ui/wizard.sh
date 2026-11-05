@@ -128,8 +128,7 @@ run_installer() {
         echo "Файл ответов: ${C_CYN}${ANSWERS_FILE}${C_RES}"
         echo "Режим:        ${C_GRN}Полностью автономный запуск (Zero-Touch)${C_RES}"
         ui_box_sep
-        # shellcheck source=/dev/null
-        . "$ANSWERS_FILE"
+        parse_env_file_safely "$ANSWERS_FILE"
 
         USE_INITIAL_WARP="no"
         ANS_SUB="${SUB_URL:-warp}"
@@ -451,9 +450,12 @@ SYS_EOF
     # ЭТАП 4: Настройка AdGuard Home с автоматической поддержкой локальных доменов *.lan
     echo "Генерация bcrypt-хэша пароля..."
     AGH_PASS_HASH=""
+    command -v htpasswd >/dev/null 2>&1 || apk add --no-cache apache2-utils >/dev/null 2>&1 || true
     if command -v htpasswd >/dev/null 2>&1; then
         AGH_PASS_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
         [ -z "$AGH_PASS_HASH" ] && AGH_PASS_HASH=$(htpasswd -nbBC 10 "$AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true) || true
+    elif [ -x /usr/sbin/caddy ]; then
+        AGH_PASS_HASH=$(/usr/sbin/caddy hash-password --plaintext "$ADMIN_PASS" 2>/dev/null | tail -n 1 | tr -d '\r\n' || true)
     fi
     disable_apache_daemon
     [ -z "$AGH_PASS_HASH" ] && { echo "${C_RED}[X] Ошибка генерации bcrypt-хэша!${C_RES}"; exit 1; }
@@ -462,7 +464,12 @@ SYS_EOF
     mkdir -p /etc/AdGuardHome/data
 
     if [ -f "$AGH_CONF" ]; then
-        awk -v u="$AGH_USER" -v h="$AGH_PASS_HASH" -v gw="$GW_IP" '
+        AGH_USER="$AGH_USER" AGH_PASS_HASH="$AGH_PASS_HASH" GW_IP="$GW_IP" awk '
+            BEGIN {
+                u = ENVIRON["AGH_USER"];
+                h = ENVIRON["AGH_PASS_HASH"];
+                gw = ENVIRON["GW_IP"];
+            }
             /^users:/ {
                 print "users:"
                 print "  - name: " u

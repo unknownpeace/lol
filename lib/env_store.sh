@@ -8,12 +8,35 @@ escape_single_quotes() {
     return 0
 }
 
+# Безопасный парсер .env и answers файлов (защита от Command Injection и порчи паролей с $)
+parse_env_file_safely() {
+    _env_target="$1"
+    [ -f "$_env_target" ] || return 0
+    while IFS= read -r _env_line || [ -n "$_env_line" ]; do
+        _env_line=$(printf "%s" "$_env_line" | tr -d '\r')
+        case "$_env_line" in
+            "#"*|"") continue ;;
+            [A-Za-z_][A-Za-z0-9_]*=*)
+                _env_k="${_env_line%%=*}"
+                _env_v="${_env_line#*=}"
+                case "$_env_v" in
+                    "'"*"'"|"\""*"\"")
+                        _env_v="${_env_v#?}"
+                        _env_v="${_env_v%?}"
+                        ;;
+                esac
+                export "${_env_k}=${_env_v}"
+                ;;
+        esac
+    done < "$_env_target"
+    return 0
+}
+
 # Чтение и сохранение параметров сетевого шлюза (gateway.env) и Homelab (homelab.env — единый источник истины)
 load_gateway_env() {
     if [ -f "$SB_ENV" ]; then
         sed -i 's/\r$//' "$SB_ENV" 2>/dev/null || true
-        # shellcheck disable=SC1090
-        . "$SB_ENV" 2>/dev/null || true
+        parse_env_file_safely "$SB_ENV"
     fi
     # Миграция устаревшего дубля /etc/sing-box/homelab/homelab.env в единый канонический /etc/sing-box/homelab.env
     if [ ! -f "$HOMELAB_ENV" ] && [ -f "${HOMELAB_DIR}/homelab.env" ] && [ ! -L "${HOMELAB_DIR}/homelab.env" ]; then
@@ -22,8 +45,7 @@ load_gateway_env() {
     fi
     if [ -f "$HOMELAB_ENV" ]; then
         sed -i 's/\r$//' "$HOMELAB_ENV" 2>/dev/null || true
-        # shellcheck disable=SC1090
-        . "$HOMELAB_ENV" 2>/dev/null || true
+        parse_env_file_safely "$HOMELAB_ENV"
     fi
 
     if [ -z "${GW_IP:-}" ] && [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then

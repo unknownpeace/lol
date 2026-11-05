@@ -7,6 +7,53 @@ set -e
 # ==============================================================================
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
+# Автоматическое определение GATEWAY_DIR и самораспаковка автономного Install.sh
+if [ -z "${GATEWAY_DIR:-}" ]; then
+    TARGET_EXEC="${BASH_SOURCE:-$0}"
+    case "$TARGET_EXEC" in
+        */*) ;;
+        *)
+            CMD_LOC=$(command -v "$TARGET_EXEC" 2>/dev/null || true)
+            [ -n "$CMD_LOC" ] && TARGET_EXEC="$CMD_LOC"
+            ;;
+    esac
+    REAL_EXEC=$(readlink -f "$TARGET_EXEC" 2>/dev/null || true)
+    [ -z "$REAL_EXEC" ] && REAL_EXEC="$TARGET_EXEC"
+    if [ -f "$REAL_EXEC" ]; then
+        GATEWAY_DIR="$(cd -P "$(dirname "$REAL_EXEC")" && pwd)"
+    else
+        GATEWAY_DIR="/opt/gateway"
+    fi
+    export GATEWAY_DIR
+fi
+
+if [ -d "/usr/bin" ] && [ -w "/usr/bin" ]; then
+    mkdir -p "/opt/gateway" 2>/dev/null || true
+    CUR_RUNNING="${BASH_SOURCE:-$0}"
+    if [ -f "$CUR_RUNNING" ] && [ "$(readlink -f "$CUR_RUNNING" 2>/dev/null)" != "/opt/gateway/Install.sh" ] && \
+       [ "$(readlink -f "$CUR_RUNNING" 2>/dev/null)" != "/opt/gateway/gateway.sh" ] && \
+       [ "$CUR_RUNNING" != "/usr/bin/gateway" ] && [ "$CUR_RUNNING" != "/usr/bin/gw" ]; then
+        case "$CUR_RUNNING" in
+            *Install.sh)
+                cp -f "$CUR_RUNNING" /opt/gateway/Install.sh 2>/dev/null || true
+                chmod +x /opt/gateway/Install.sh 2>/dev/null || true
+                ;;
+        esac
+    fi
+    if [ -f "/opt/gateway/Install.sh" ] && [ ! -f "/opt/gateway/gateway.sh" ]; then
+        ln -sf /opt/gateway/Install.sh /usr/bin/gateway 2>/dev/null || true
+        ln -sf /opt/gateway/Install.sh /usr/bin/gw 2>/dev/null || true
+    fi
+    if [ -d "/etc/profile.d" ] && [ ! -f "/etc/profile.d/00-gateway-motd.sh" ]; then
+        cat << 'MOTD_EOF' > /etc/profile.d/00-gateway-motd.sh
+if [ -t 1 ] && [ -x /usr/bin/gateway ]; then
+    /usr/bin/gateway motd
+fi
+MOTD_EOF
+        chmod 644 /etc/profile.d/00-gateway-motd.sh 2>/dev/null || true
+    fi
+fi
+
 SB_DIR="/etc/sing-box"
 SB_CONF="${SB_DIR}/config.json"
 SB_ENV="${SB_DIR}/gateway.env"
@@ -708,312 +755,6 @@ is_dhcp_server_enabled() {
 }
 
 # Формирование списка IP-исключений (bypass_devices.conf) для корректной работы DIRECT при включенном Kill-Switch
-get_nft_bypass_saddr_clause() {
-    if [ ! -s "$USER_BYPASS_IPS" ]; then
-        printf ""
-        return 0
-    fi
-    BYP_CSV=$(awk '{
-        gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", $0);
-        if ($0 != "" && $0 !~ /^#/) {
-            if (c++) printf ", %s", $0;
-            else printf "%s", $0;
-        }
-    }' "$USER_BYPASS_IPS" 2>/dev/null || true)
-    if [ -n "$BYP_CSV" ]; then
-        printf "ip saddr != { %s } " "$BYP_CSV"
-    fi
-    return 0
-}
-
-# Динамическое формирование списков разрешенных LAN-портов (Шлюз + активные сервисы Homelab) для nftables
-get_homelab_nft_tcp_ports() {
-    TCP_LIST="22, 53, 80, 443, 445, 3000, 5357, 7890, 9090, ${PORT_TORRENT_PEER}"
-    printf "%s" "$TCP_LIST"
-    return 0
-}
-
-get_homelab_nft_udp_ports() {
-    UDP_LIST="53, 67, 443, 3702, 5353, 7890, ${PORT_TORRENT_PEER}"
-    printf "%s" "$UDP_LIST"
-    return 0
-}
-
-# Настройка нативного nftables на Alpine Linux (защита input_protect для Шлюза и Homelab + Kill-Switch 2.0)
-sync_dns_firewall() {
-    USE_DNS_REDIRECT="${1:-yes}"
-    KS_STATE="${2:-keep}"
-    LAN_IF=$(get_lan_ifname)
-
-    if [ "$KS_STATE" = "keep" ]; then
-        if is_killswitch_enabled; then
-            KS_STATE="yes"
-        else
-            KS_STATE="no"
-        fi
-    fi
-
-    BYP_SADDR_CLAUSE=$(get_nft_bypass_saddr_clause)
-    LAN_TCP_PORTS=$(get_homelab_nft_tcp_ports)
-    LAN_UDP_PORTS=$(get_homelab_nft_udp_ports)
-
-    KS_COMMENT=""
-    KS_RULE=""
-    if [ "$KS_STATE" = "yes" ]; then
-        KS_COMMENT="#KILLSWITCH_ACTIVE"
-        KS_RULE="iifname \"${LAN_IF}\" oifname != { \"singbox-tun\", \"lo\" } ${BYP_SADDR_CLAUSE}ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject"
-    fi
-
-    DNS_RULE=""
-    if [ "$USE_DNS_REDIRECT" = "yes" ]; then
-        DNS_RULE="iifname \"${LAN_IF}\" meta l4proto { tcp, udp } th dport 53 redirect to :53"
-    fi
-
-    cat << NFT_ALPINE > "${ALPINE_NFT_CONF}.tmp.$$"
-#!/usr/sbin/nft -f
-${KS_COMMENT}
-
-table inet gateway_fw
-delete table inet gateway_fw
-
-table inet gateway_fw {
-    chain input_protect {
-        type filter hook input priority filter - 5; policy accept;
-        iifname "lo" accept
-        ct state established,related accept
-        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } tcp dport { ${LAN_TCP_PORTS} } accept
-        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } udp dport { ${LAN_UDP_PORTS} } accept
-        ip daddr { 224.0.0.251, 239.255.255.250 } udp dport { 3702, 5353 } accept
-        tcp dport { 80, 443, 445, 3000, 3001, 4533, 5357, 7890, 8080, 8081, 8096, 8222, 8443, 9090 } drop
-        udp dport { 443, 3702, 5353, 7890 } drop
-    }
-
-    chain forward_mss {
-        type filter hook forward priority mangle; policy accept;
-        oifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
-        iifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
-    }
-
-    chain forward_filter {
-        type filter hook forward priority filter - 5; policy accept;
-        meta nfproto ipv6 drop
-        iifname "${LAN_IF}" meta l4proto { tcp, udp } th dport 853 reject
-        ${KS_RULE}
-    }
-
-    chain prerouting_dns {
-        type nat hook prerouting priority dstnat - 5; policy accept;
-        ${DNS_RULE}
-    }
-
-    chain postrouting_nat {
-        type nat hook postrouting priority srcnat; policy accept;
-        oifname "${LAN_IF}" masquerade
-    }
-}
-NFT_ALPINE
-    chmod +x "${ALPINE_NFT_CONF}.tmp.$$" 2>/dev/null || true
-    if nft --check -f "${ALPINE_NFT_CONF}.tmp.$$" >/dev/null 2>&1; then
-        mv -f "${ALPINE_NFT_CONF}.tmp.$$" "$ALPINE_NFT_CONF"
-        nft -f "$ALPINE_NFT_CONF" 2>/dev/null || true
-    else
-        rm -f "${ALPINE_NFT_CONF}.tmp.$$"
-        echo "${C_RED}[X] Ошибка проверки синтаксиса nftables! Сохранена предыдущая конфигурация.${C_RES}" >&2
-        return 1
-    fi
-    rc-update add nftables default >/dev/null 2>&1 || true
-    rc-service nftables start >/dev/null 2>&1 || true
-    return 0
-}
-
-# Вычисление актуальных метрик загрузки ОЗУ и заполнения хранилища /srv/storage
-get_ram_usage_pct() {
-    awk '
-        /^MemTotal:/ { t=$2 }
-        /^MemAvailable:/ { a=$2 }
-        /^MemFree:/ { f=$2 }
-        /^Buffers:/ { b=$2 }
-        /^Cached:/ { c=$2 }
-        END {
-            if (t <= 0) { print 0; exit }
-            avail = (a > 0) ? a : (f + b + c)
-            used = t - avail
-            if (used < 0) used = 0
-            printf "%d", (used * 100) / t
-        }
-    ' /proc/meminfo 2>/dev/null || echo "0"
-    return 0
-}
-
-get_ram_used_mb() {
-    awk '
-        /^MemTotal:/ { t=$2 }
-        /^MemAvailable:/ { a=$2 }
-        /^MemFree:/ { f=$2 }
-        /^Buffers:/ { b=$2 }
-        /^Cached:/ { c=$2 }
-        END {
-            avail = (a > 0) ? a : (f + b + c)
-            used = t - avail
-            if (used < 0) used = 0
-            printf "%d", used / 1024
-        }
-    ' /proc/meminfo 2>/dev/null || echo "0"
-    return 0
-}
-
-get_disk_usage_pct() {
-    TARGET_MP="${1:-${STORAGE_ROOT:-/srv/storage}}"
-    [ -d "$TARGET_MP" ] || TARGET_MP="/"
-    df -P "$TARGET_MP" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5+0}' || echo "0"
-    return 0
-}
-
-# Проверка: был ли зафиксирован аварийный сброс питания или пустой/оборванный конфиг
-check_and_recover_power_loss_state() {
-    mkdir -p "$SB_DIR" "$HOMELAB_DIR" 2>/dev/null || true
-
-    # 1. Очистка протухших блокировок, сокетов и PID-файлов после жесткого ребута
-    if [ -f "${GATEWAY_LOCK_DIR}/pid" ]; then
-        LCK_P=$(awk '{print $1}' "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true)
-        if [ -n "$LCK_P" ] && ! kill -0 "$LCK_P" 2>/dev/null; then
-            rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
-        fi
-    fi
-
-    # 2. Восстановление оборванных/нулевых конфигов из персистентного снапшота STATE_BAK_DIR (/etc/sing-box/.last_good_state)
-    RECOVERED_ANY="no"
-    if [ -d "$STATE_BAK_DIR" ]; then
-        for CRIT_F in \
-            "${SB_CONF}:config.json" \
-            "${SB_ENV}:gateway.env" \
-            "${HOMELAB_ENV}:homelab.env" \
-            "${CUSTOM_NODES_FILE}:my_nodes.yaml" \
-            "${WARP_NODES_FILE}:warp_nodes.json" \
-            "${USER_DIRECT_FILE}:user_direct_domains.list" \
-            "${USER_PROXY_FILE}:user_proxy_domains.list"; do
-            DEST_P="${CRIT_F%:*}"
-            BAK_N="${CRIT_F#*:}"
-            if [ ! -s "$DEST_P" ] && [ -s "${STATE_BAK_DIR}/${BAK_N}" ]; then
-                cp -f "${STATE_BAK_DIR}/${BAK_N}" "$DEST_P" 2>/dev/null || true
-                RECOVERED_ANY="yes"
-            fi
-        done
-        if [ -f "$SB_CONF" ] && [ -x /usr/bin/sing-box ] && ! check_singbox_config; then
-            if [ -s "${STATE_BAK_DIR}/config.json" ]; then
-                cp -f "${STATE_BAK_DIR}/config.json" "$SB_CONF" 2>/dev/null || true
-                RECOVERED_ANY="yes"
-            fi
-        fi
-    fi
-
-    if [ "$RECOVERED_ANY" = "yes" ]; then
-        date '+%Y-%m-%d %H:%M:%S' > "$POWER_LOSS_FLAG" 2>/dev/null || true
-        sync
-    fi
-
-    # 3. Автоматическая проверка целостности и WAL-checkpoint баз SQLite после грязного выключения
-    if command -v sqlite3 >/dev/null 2>&1; then
-        for DB_FILE in \
-            /var/lib/vaultwarden/db.sqlite3 \
-            /var/lib/forgejo/data/forgejo.db \
-            /var/lib/navidrome/navidrome.db \
-            /var/lib/jellyfin/data/jellyfin.db; do
-            if [ -f "${DB_FILE}-wal" ] && [ -f "$DB_FILE" ]; then
-                sqlite3 "$DB_FILE" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
-            fi
-        done
-    fi
-    return 0
-}
-
-# Универсальный парсер AdGuardHome.yaml (извлечение логина или атомарное обновление секций)
-get_agh_admin_user() {
-    if [ -f "${AGH_CONF:-/etc/AdGuardHome/AdGuardHome.yaml}" ]; then
-        sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "${AGH_CONF:-/etc/AdGuardHome/AdGuardHome.yaml}" 2>/dev/null | head -n 1 | tr -d ' \t\r\n"' || true
-    fi
-    return 0
-}
-
-# Автоматическая синхронизация DNS Rewrites (*.lan -> LAN_IP с enabled: true) в AdGuardHome.yaml
-sync_agh_homelab_rewrites() {
-    TARGET_LAN_IP="${1:-$(get_current_lan_ip)}"
-    [ -f "$AGH_CONF" ] || return 0
-    AGH_WAS_RUNNING="no"
-    if pgrep AdGuardHome >/dev/null 2>&1; then
-        AGH_WAS_RUNNING="yes"
-        rc-service adguardhome stop >/dev/null 2>&1 || /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
-    fi
-
-    DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan music.lan jellyfin.lan downloads.lan torrents.lan code.lan"
-    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN}"
-    fi
-
-    awk -v lip="$TARGET_LAN_IP" -v dom_list="$DOMS_STR" '
-        BEGIN { in_flt=0; in_rew=0 }
-        /^filtering:/ { in_flt=1; print; next }
-        in_flt && /^[^[:space:]]/ { in_flt=0; in_rew=0; print; next }
-        in_flt && /^[[:space:]]*rewrites:/ {
-            print "  rewrites:"
-            cnt = split(dom_list, doms, " ")
-            for (i = 1; i <= cnt; i++) {
-                print "    - domain: '\''" doms[i] "'\''"
-                print "      answer: " lip
-                print "      enabled: true"
-            }
-            in_rew=1
-            next
-        }
-        in_rew {
-            if (/^[[:space:]]*-/ || /^[[:space:]]+(domain|answer|enabled):/) {
-                next
-            } else {
-                in_rew=0
-            }
-        }
-        { print }
-    ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$"
-    atomic_commit_tmp "${AGH_CONF}.tmp.$$" "$AGH_CONF" 0600 "root:root" || true
-
-    if [ "$AGH_WAS_RUNNING" = "yes" ]; then
-        rc-service adguardhome start >/dev/null 2>&1 || /etc/init.d/adguardhome start >/dev/null 2>&1 || true
-    fi
-    return 0
-}
-
-# Обновление IP основного роутера и LAN IP для *.lan внутри AdGuardHome.yaml
-update_agh_gateway_ip() {
-    NEW_GW="$1"
-    NEW_LAN="${2:-$(get_current_lan_ip)}"
-    [ -f "$AGH_CONF" ] || return 0
-    AGH_WAS_RUNNING="no"
-    if pgrep AdGuardHome >/dev/null 2>&1; then
-        AGH_WAS_RUNNING="yes"
-        rc-service adguardhome stop >/dev/null 2>&1 || /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
-    fi
-    awk -v gw="$NEW_GW" '
-        /^[[:space:]]*bootstrap_dns:/ {
-            print "  bootstrap_dns: [" gw ", 77.88.8.8, 77.88.8.1]"
-            in_list=1; next
-        }
-        /^[[:space:]]*local_ptr_upstreams:/ {
-            print "  local_ptr_upstreams: [" gw ":53]"
-            in_list=1; next
-        }
-        in_list && /^[[:space:]]*-/ { next }
-        in_list { in_list=0 }
-        { print }
-    ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$"
-    atomic_commit_tmp "${AGH_CONF}.tmp.$$" "$AGH_CONF" 0600 "root:root" || true
-    sync_agh_homelab_rewrites "$NEW_LAN"
-    if [ "$AGH_WAS_RUNNING" = "yes" ]; then
-        rc-service adguardhome start >/dev/null 2>&1 || /etc/init.d/adguardhome start >/dev/null 2>&1 || true
-    fi
-    return 0
-}
-
-# Безопасная очистка и экранирование ввода пользователя (от CRLF, кавычек и мусора буфера обмена)
 clean_clipboard_line() {
     printf "%s" "${1:-}" | tr -d '\r\n\000\007\010\013\014\033' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
     return 0
@@ -1024,12 +765,35 @@ escape_single_quotes() {
     return 0
 }
 
+# Безопасный парсер .env и answers файлов (защита от Command Injection и порчи паролей с $)
+parse_env_file_safely() {
+    _env_target="$1"
+    [ -f "$_env_target" ] || return 0
+    while IFS= read -r _env_line || [ -n "$_env_line" ]; do
+        _env_line=$(printf "%s" "$_env_line" | tr -d '\r')
+        case "$_env_line" in
+            "#"*|"") continue ;;
+            [A-Za-z_][A-Za-z0-9_]*=*)
+                _env_k="${_env_line%%=*}"
+                _env_v="${_env_line#*=}"
+                case "$_env_v" in
+                    "'"*"'"|"\""*"\"")
+                        _env_v="${_env_v#?}"
+                        _env_v="${_env_v%?}"
+                        ;;
+                esac
+                export "${_env_k}=${_env_v}"
+                ;;
+        esac
+    done < "$_env_target"
+    return 0
+}
+
 # Чтение и сохранение параметров сетевого шлюза (gateway.env) и Homelab (homelab.env — единый источник истины)
 load_gateway_env() {
     if [ -f "$SB_ENV" ]; then
         sed -i 's/\r$//' "$SB_ENV" 2>/dev/null || true
-        # shellcheck disable=SC1090
-        . "$SB_ENV" 2>/dev/null || true
+        parse_env_file_safely "$SB_ENV"
     fi
     # Миграция устаревшего дубля /etc/sing-box/homelab/homelab.env в единый канонический /etc/sing-box/homelab.env
     if [ ! -f "$HOMELAB_ENV" ] && [ -f "${HOMELAB_DIR}/homelab.env" ] && [ ! -L "${HOMELAB_DIR}/homelab.env" ]; then
@@ -1038,8 +802,7 @@ load_gateway_env() {
     fi
     if [ -f "$HOMELAB_ENV" ]; then
         sed -i 's/\r$//' "$HOMELAB_ENV" 2>/dev/null || true
-        # shellcheck disable=SC1090
-        . "$HOMELAB_ENV" 2>/dev/null || true
+        parse_env_file_safely "$HOMELAB_ENV"
     fi
 
     if [ -z "${GW_IP:-}" ] && [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
@@ -1164,6 +927,580 @@ HL_ENV_EOF
 }
 
 # Умная очистка и нормализация домена (URL, @telegram, *.site.com, IDN кириллица -> punycode, защита от IP)
+get_ram_usage_pct() {
+    awk '
+        /^MemTotal:/ { t=$2 }
+        /^MemAvailable:/ { a=$2 }
+        /^MemFree:/ { f=$2 }
+        /^Buffers:/ { b=$2 }
+        /^Cached:/ { c=$2 }
+        END {
+            if (t <= 0) { print 0; exit }
+            avail = (a > 0) ? a : (f + b + c)
+            used = t - avail
+            if (used < 0) used = 0
+            printf "%d", (used * 100) / t
+        }
+    ' /proc/meminfo 2>/dev/null || echo "0"
+    return 0
+}
+
+get_ram_used_mb() {
+    awk '
+        /^MemTotal:/ { t=$2 }
+        /^MemAvailable:/ { a=$2 }
+        /^MemFree:/ { f=$2 }
+        /^Buffers:/ { b=$2 }
+        /^Cached:/ { c=$2 }
+        END {
+            avail = (a > 0) ? a : (f + b + c)
+            used = t - avail
+            if (used < 0) used = 0
+            printf "%d", used / 1024
+        }
+    ' /proc/meminfo 2>/dev/null || echo "0"
+    return 0
+}
+
+get_disk_usage_pct() {
+    TARGET_MP="${1:-${STORAGE_ROOT:-/srv/storage}}"
+    [ -d "$TARGET_MP" ] || TARGET_MP="/"
+    df -P "$TARGET_MP" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$5); print $5+0}' || echo "0"
+    return 0
+}
+
+# Проверка: был ли зафиксирован аварийный сброс питания или пустой/оборванный конфиг
+check_and_recover_power_loss_state() {
+    mkdir -p "$SB_DIR" "$HOMELAB_DIR" 2>/dev/null || true
+
+    # 1. Очистка протухших блокировок, сокетов и PID-файлов после жесткого ребута
+    if [ -f "${GATEWAY_LOCK_DIR}/pid" ]; then
+        LCK_P=$(awk '{print $1}' "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true)
+        if [ -n "$LCK_P" ] && ! kill -0 "$LCK_P" 2>/dev/null; then
+            rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
+        fi
+    fi
+
+    # 2. Восстановление оборванных/нулевых конфигов из персистентного снапшота STATE_BAK_DIR (/etc/sing-box/.last_good_state)
+    RECOVERED_ANY="no"
+    if [ -d "$STATE_BAK_DIR" ]; then
+        for CRIT_F in \
+            "${SB_CONF}:config.json" \
+            "${SB_ENV}:gateway.env" \
+            "${HOMELAB_ENV}:homelab.env" \
+            "${CUSTOM_NODES_FILE}:my_nodes.yaml" \
+            "${WARP_NODES_FILE}:warp_nodes.json" \
+            "${USER_DIRECT_FILE}:user_direct_domains.list" \
+            "${USER_PROXY_FILE}:user_proxy_domains.list"; do
+            DEST_P="${CRIT_F%:*}"
+            BAK_N="${CRIT_F#*:}"
+            if [ ! -s "$DEST_P" ] && [ -s "${STATE_BAK_DIR}/${BAK_N}" ]; then
+                cp -f "${STATE_BAK_DIR}/${BAK_N}" "$DEST_P" 2>/dev/null || true
+                RECOVERED_ANY="yes"
+            fi
+        done
+        if [ -f "$SB_CONF" ] && [ -x /usr/bin/sing-box ] && ! check_singbox_config; then
+            if [ -s "${STATE_BAK_DIR}/config.json" ]; then
+                cp -f "${STATE_BAK_DIR}/config.json" "$SB_CONF" 2>/dev/null || true
+                RECOVERED_ANY="yes"
+            fi
+        fi
+    fi
+
+    if [ "$RECOVERED_ANY" = "yes" ]; then
+        date '+%Y-%m-%d %H:%M:%S' > "$POWER_LOSS_FLAG" 2>/dev/null || true
+        sync
+    fi
+
+    # 3. Автоматическая проверка целостности и WAL-checkpoint баз SQLite после грязного выключения
+    if command -v sqlite3 >/dev/null 2>&1; then
+        for DB_FILE in \
+            /var/lib/vaultwarden/db.sqlite3 \
+            /var/lib/forgejo/data/forgejo.db \
+            /var/lib/navidrome/navidrome.db \
+            /var/lib/jellyfin/data/jellyfin.db; do
+            if [ -f "${DB_FILE}-wal" ] && [ -f "$DB_FILE" ]; then
+                sqlite3 "$DB_FILE" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+            fi
+        done
+    fi
+    return 0
+}
+
+# Универсальный парсер AdGuardHome.yaml (извлечение логина или атомарное обновление секций)
+get_nft_bypass_saddr_clause() {
+    if [ ! -s "$USER_BYPASS_IPS" ]; then
+        printf ""
+        return 0
+    fi
+    BYP_CSV=$(awk '{
+        gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", $0);
+        if ($0 != "" && $0 !~ /^#/) {
+            if (c++) printf ", %s", $0;
+            else printf "%s", $0;
+        }
+    }' "$USER_BYPASS_IPS" 2>/dev/null || true)
+    if [ -n "$BYP_CSV" ]; then
+        printf "ip saddr != { %s } " "$BYP_CSV"
+    fi
+    return 0
+}
+
+# Динамическое формирование списков разрешенных LAN-портов (Шлюз + активные сервисы Homelab) для nftables
+get_homelab_nft_tcp_ports() {
+    TCP_LIST="22, 53, 80, 443, 445, 3000, 5357, 7890, 9090, ${PORT_TORRENT_PEER}"
+    printf "%s" "$TCP_LIST"
+    return 0
+}
+
+get_homelab_nft_udp_ports() {
+    UDP_LIST="53, 67, 443, 3702, 5353, 7890, ${PORT_TORRENT_PEER}"
+    printf "%s" "$UDP_LIST"
+    return 0
+}
+
+# Настройка нативного nftables на Alpine Linux (защита input_protect для Шлюза и Homelab + Kill-Switch 2.0)
+sync_dns_firewall() {
+    USE_DNS_REDIRECT="${1:-yes}"
+    KS_STATE="${2:-keep}"
+    LAN_IF=$(get_lan_ifname)
+
+    if [ "$KS_STATE" = "keep" ]; then
+        if is_killswitch_enabled; then
+            KS_STATE="yes"
+        else
+            KS_STATE="no"
+        fi
+    fi
+
+    BYP_SADDR_CLAUSE=$(get_nft_bypass_saddr_clause)
+    LAN_TCP_PORTS=$(get_homelab_nft_tcp_ports)
+    LAN_UDP_PORTS=$(get_homelab_nft_udp_ports)
+
+    KS_COMMENT=""
+    KS_RULE=""
+    if [ "$KS_STATE" = "yes" ]; then
+        KS_COMMENT="#KILLSWITCH_ACTIVE"
+        KS_RULE="iifname \"${LAN_IF}\" oifname != { \"singbox-tun\", \"lo\" } ${BYP_SADDR_CLAUSE}ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject"
+    fi
+
+    DNS_RULE=""
+    if [ "$USE_DNS_REDIRECT" = "yes" ]; then
+        DNS_RULE="iifname \"${LAN_IF}\" meta l4proto { tcp, udp } th dport 53 redirect to :53"
+    fi
+
+    cat << NFT_ALPINE > "${ALPINE_NFT_CONF}.tmp.$$"
+#!/usr/sbin/nft -f
+${KS_COMMENT}
+
+table inet gateway_fw
+delete table inet gateway_fw
+
+table inet gateway_fw {
+    chain input_protect {
+        type filter hook input priority filter - 5; policy accept;
+        iifname "lo" accept
+        ct state established,related accept
+        meta l4proto { tcp, udp } th dport 853 reject
+        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } tcp dport { ${LAN_TCP_PORTS} } accept
+        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } udp dport { ${LAN_UDP_PORTS} } accept
+        ip daddr { 224.0.0.251, 239.255.255.250 } udp dport { 3702, 5353 } accept
+        tcp dport { 80, 443, 445, 3000, 3001, 4533, 5357, 7890, 8080, 8081, 8096, 8222, 8443, 9090 } drop
+        udp dport { 443, 3702, 5353, 7890 } drop
+    }
+
+    chain forward_mss {
+        type filter hook forward priority mangle; policy accept;
+        oifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
+        iifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
+    }
+
+    chain forward_filter {
+        type filter hook forward priority filter - 5; policy accept;
+        meta nfproto ipv6 drop
+        iifname "${LAN_IF}" meta l4proto { tcp, udp } th dport 853 reject
+        ${KS_RULE}
+    }
+
+    chain prerouting_dns {
+        type nat hook prerouting priority dstnat - 5; policy accept;
+        ${DNS_RULE}
+    }
+
+    chain postrouting_nat {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "${LAN_IF}" masquerade
+    }
+}
+NFT_ALPINE
+    chmod +x "${ALPINE_NFT_CONF}.tmp.$$" 2>/dev/null || true
+    if nft --check -f "${ALPINE_NFT_CONF}.tmp.$$" >/dev/null 2>&1; then
+        mv -f "${ALPINE_NFT_CONF}.tmp.$$" "$ALPINE_NFT_CONF"
+        nft -f "$ALPINE_NFT_CONF" 2>/dev/null || true
+    else
+        rm -f "${ALPINE_NFT_CONF}.tmp.$$"
+        echo "${C_RED}[X] Ошибка проверки синтаксиса nftables! Сохранена предыдущая конфигурация.${C_RES}" >&2
+        return 1
+    fi
+    rc-update add nftables default >/dev/null 2>&1 || true
+    rc-service nftables start >/dev/null 2>&1 || true
+    return 0
+}
+
+# Вычисление актуальных метрик загрузки ОЗУ и заполнения хранилища /srv/storage
+scan_lan_subnet() {
+    CUR_LAN=$(get_current_lan_ip)
+    LAN_SUB="${CUR_LAN%.*}"
+    echo "Сканирование подсети ${LAN_SUB}.0/24 (опрос живых устройств ~1.5 сек)..."
+    I_HOST=1
+    while [ "$I_HOST" -le 254 ]; do
+        ping -c 1 -W 1 "${LAN_SUB}.${I_HOST}" >/dev/null 2>&1 &
+        if [ $((I_HOST % 64)) -eq 0 ]; then
+            wait 2>/dev/null || true
+        fi
+        I_HOST=$((I_HOST + 1))
+    done
+    wait 2>/dev/null || true
+    return 0
+}
+
+# Авто-сканер живых устройств в локальной сети (ARP + DHCP Leases Alpine Linux) для Пункта 8
+discover_lan_devices() {
+    load_gateway_env
+    CUR_LAN=$(get_current_lan_ip)
+    rm -f "$LAN_SCAN_CACHE"
+    touch "$LAN_SCAN_CACHE"
+
+    LEASE_F=""
+    [ -f /var/lib/misc/dnsmasq.leases ] && LEASE_F="/var/lib/misc/dnsmasq.leases"
+
+    echo " ${C_CYN}--- Обнаруженные устройства в локальной сети (ARP + DHCP) ---${C_RES}"
+    # shellcheck disable=SC2086
+    awk -v gw="$GW_IP" -v self="$CUR_LAN" -v out_cache="$LAN_SCAN_CACHE" \
+        -v byp_f="$USER_BYPASS_IPS" -v vpn_f="$USER_FORCE_PROXY_IPS" \
+        -v c_cyn="$C_CYN" -v c_grn="$C_GRN" -v c_yel="$C_YEL" -v c_dim="$C_DIM" -v c_res="$C_RES" '
+        BEGIN {
+            while ((getline line < byp_f) > 0) {
+                gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", line)
+                if (line != "") byp[line] = 1
+            }
+            close(byp_f)
+            while ((getline line < vpn_f) > 0) {
+                gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", line)
+                if (line != "") vpn[line] = 1
+            }
+            close(vpn_f)
+        }
+        FILENAME ~ /leases$/ {
+            ip = $3; mac = tolower($2); host = $4
+            if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && ip != self) {
+                ips[ip] = 1
+                if (mac != "") macs[ip] = mac
+                if (host != "" && host != "*") names[ip] = host
+            }
+            next
+        }
+        FILENAME == "/proc/net/arp" && FNR > 1 {
+            ip = $1; flags = $3; mac = tolower($4)
+            if (ip != self && flags != "0x0" && mac != "00:00:00:00:00:00") {
+                ips[ip] = 1
+                if (macs[ip] == "") macs[ip] = mac
+            }
+            next
+        }
+        END {
+            idx = 0
+            for (ip in ips) {
+                idx++
+                m = (macs[ip] != "") ? macs[ip] : "неизвестен"
+                n = (names[ip] != "") ? names[ip] : "Устройство LAN"
+                if (ip == gw) n = "Основной роутер (" n ")"
+                st = c_dim "[По правилам]" c_res
+                if (byp[ip]) st = c_yel "[В ОБХОДЕ: DIRECT]" c_res
+                if (vpn[ip]) st = c_grn "[В FULL-VPN]" c_res
+                printf "  %s[%d]%s %-15s | %-17s | %-22s %s\n", c_cyn, idx, c_res, ip, m, n, st
+                print ip > out_cache
+            }
+            if (idx == 0) {
+                printf "  %s(активные соседи в ARP/DHCP пока не обнаружены — нажмите [s] для опроса сети)%s\n", c_dim, c_res
+            }
+        }
+    ' $LEASE_F /proc/net/arp 2>/dev/null || true
+    return 0
+}
+
+# Преобразование ввода пользователя (IP или номер из авто-сканера LAN) в IPv4
+resolve_device_ip_input() {
+    RAW_IN=$(printf "%s" "$1" | tr -d ' \t\r\n')
+    [ -z "$RAW_IN" ] && return 1
+    case "$RAW_IN" in
+        *[!0-9]*)
+            if is_valid_ipv4 "$RAW_IN"; then
+                printf "%s" "$RAW_IN"
+                return 0
+            fi
+            return 1
+            ;;
+        *)
+            if [ -s "$LAN_SCAN_CACHE" ]; then
+                PICKED_IP=$(awk -v target="$RAW_IN" 'NR == target {print $1; exit}' "$LAN_SCAN_CACHE" 2>/dev/null)
+                if [ -n "$PICKED_IP" ] && is_valid_ipv4 "$PICKED_IP"; then
+                    printf "%s" "$PICKED_IP"
+                    return 0
+                fi
+            fi
+            return 1
+            ;;
+    esac
+}
+
+# Интерактивный «Детектор сайта» (Рентген маршрута домена: AdGuard + FakeIP + Homelab .lan + TLS-пинг)
+configure_smart_dhcp() {
+    DHCP_MODE="${1:-off}"
+    CUR_LAN_IP=$(get_current_lan_ip)
+    LAN_IF=$(get_lan_ifname)
+    LAN_SUB="${CUR_LAN_IP%.*}"
+
+    if [ "$DHCP_MODE" = "on" ]; then
+        if ! command -v dnsmasq >/dev/null 2>&1; then
+            echo "Установка пакета dnsmasq для DHCP-сервера..."
+            apk update >/dev/null 2>&1 || true
+            apk add dnsmasq >/dev/null 2>&1 || true
+        fi
+        mkdir -p /etc/dnsmasq.d /var/lib/misc
+        cat << ALP_DHCP > "$ALPINE_DHCP_CONF"
+port=5353
+interface=${LAN_IF}
+bind-interfaces
+dhcp-authoritative
+dhcp-range=${LAN_SUB}.100,${LAN_SUB}.239,255.255.255.0,12h
+dhcp-option=3,${CUR_LAN_IP}
+dhcp-option=6,${CUR_LAN_IP}
+ALP_DHCP
+        service_ctl dnsmasq enable
+        service_ctl dnsmasq restart
+        echo "${C_GRN}[✓] Умный DHCP-сервер на Alpine ВКЛЮЧЕН (Шлюз и DNS: ${CUR_LAN_IP}, пул .100-.239).${C_RES}"
+        echo "    Не забудьте отключить DHCP-сервер на основном роутере провайдера!"
+    else
+        rm -f "$ALPINE_DHCP_CONF" 2>/dev/null || true
+        service_ctl dnsmasq stop
+        service_ctl dnsmasq disable
+        echo "${C_GRN}[✓] DHCP-сервер на Alpine ВЫКЛЮЧЕН (классический режим Sidecar).${C_RES}"
+    fi
+    return 0
+}
+
+# Запись статической конфигурации сети в /etc/network/interfaces для Alpine Linux
+write_alpine_static_interfaces() {
+    A_IF="$1"
+    A_IP="$2"
+    A_GW="$3"
+    cat << NET_ALP > /etc/network/interfaces
+auto lo
+iface lo inet loopback
+
+auto ${A_IF}
+iface ${A_IF} inet static
+    address ${A_IP}
+    netmask 255.255.255.0
+    gateway ${A_GW}
+NET_ALP
+    return 0
+}
+
+# Безопасная смена LAN IP шлюза и/или IP основного роутера на Alpine Linux (с обновлением *.lan в AdGuard Home)
+apply_network_ips() {
+    TARGET_LAN_IP="$1"
+    TARGET_GW_IP="$2"
+
+    CUR_LAN_IP=$(get_current_lan_ip)
+    LAN_IF=$(get_lan_ifname)
+    load_gateway_env
+
+    [ -z "$TARGET_LAN_IP" ] && TARGET_LAN_IP="$CUR_LAN_IP"
+    [ -z "$TARGET_GW_IP" ] && TARGET_GW_IP="$GW_IP"
+
+    if ! is_valid_ipv4 "$TARGET_LAN_IP"; then
+        echo "${C_RED}[X] Ошибка: Некорректный IPv4-адрес шлюза (${TARGET_LAN_IP})!${C_RES}"
+        return 1
+    fi
+
+    if ! is_valid_ipv4 "$TARGET_GW_IP"; then
+        echo "${C_RED}[X] Ошибка: Некорректный IPv4-адрес основного роутера (${TARGET_GW_IP})!${C_RES}"
+        return 1
+    fi
+
+    if [ "$TARGET_LAN_IP" = "$TARGET_GW_IP" ]; then
+        echo "${C_RED}[X] Ошибка: IP шлюза (${TARGET_LAN_IP}) не может совпадать с IP основного роутера (${TARGET_GW_IP})!${C_RES}"
+        return 1
+    fi
+
+    LAN_SUBNET="${TARGET_LAN_IP%.*}"
+    GW_SUBNET="${TARGET_GW_IP%.*}"
+    if [ "$LAN_SUBNET" != "$GW_SUBNET" ]; then
+        echo "${C_YEL}[!] Внимание: Подсеть шлюза (${LAN_SUBNET}.x) отличается от подсети роутера (${GW_SUBNET}.x)!${C_RES}"
+        printf "Введите IP основного роутера в новой подсети [Enter = %s.1 / отмена = n]: " "$LAN_SUBNET"
+        read -r FIX_GW < /dev/tty || true
+        FIX_GW=$(printf "%s" "$FIX_GW" | tr -d ' \t\r\n')
+        if [ "$FIX_GW" = "n" ] || [ "$FIX_GW" = "N" ]; then
+            echo "[i] Смена IP отменена."
+            return 1
+        fi
+        [ -z "$FIX_GW" ] && FIX_GW="${LAN_SUBNET}.1"
+        if ! is_valid_ipv4 "$FIX_GW" || [ "$FIX_GW" = "$TARGET_LAN_IP" ]; then
+            echo "${C_RED}[X] Некорректный или конфликтующий IP основного роутера (${FIX_GW}).${C_RES}"
+            return 1
+        fi
+        TARGET_GW_IP="$FIX_GW"
+    fi
+
+    GW_IP="$TARGET_GW_IP"
+    save_gateway_env
+    update_agh_gateway_ip "$GW_IP" "$TARGET_LAN_IP"
+    [ -f "$SB_CONF" ] && generate_singbox_config || true
+
+    write_alpine_static_interfaces "$LAN_IF" "$TARGET_LAN_IP" "$GW_IP"
+    if [ -f "$ALPINE_DHCP_CONF" ]; then
+        configure_smart_dhcp "on" >/dev/null 2>&1 || true
+    fi
+
+    SW_SCRIPT="/tmp/switch_lan_ip.$$.sh"
+    cat << SW_ALP > "$SW_SCRIPT"
+#!/bin/sh
+sleep 1
+rc-service sing-box stop >/dev/null 2>&1 || true
+killall -9 udhcpc >/dev/null 2>&1 || true
+if [ "${TARGET_LAN_IP}" != "${CUR_LAN_IP}" ]; then
+    ip -4 addr flush dev ${LAN_IF} >/dev/null 2>&1 || true
+fi
+ip -4 addr replace ${TARGET_LAN_IP}/24 dev ${LAN_IF} >/dev/null 2>&1 || true
+ip link set ${LAN_IF} up >/dev/null 2>&1 || true
+ip -4 route replace default via ${GW_IP} dev ${LAN_IF} >/dev/null 2>&1 || true
+sleep 2
+nft -f ${ALPINE_NFT_CONF} >/dev/null 2>&1 || true
+rc-service sing-box start >/dev/null 2>&1 || true
+rc-service adguardhome restart >/dev/null 2>&1 || true
+rc-service caddy reload >/dev/null 2>&1 || rc-service caddy restart >/dev/null 2>&1 || true
+rc-service samba restart >/dev/null 2>&1 || true
+rc-service wsdd restart >/dev/null 2>&1 || true
+rc-service avahi-daemon restart >/dev/null 2>&1 || true
+rm -f "$0" 2>/dev/null || true
+SW_ALP
+    chmod 700 "$SW_SCRIPT"
+
+    write_resolv_conf "nameserver 127.0.0.1
+nameserver ${GW_IP}
+nameserver 77.88.8.8"
+
+    ui_box_bottom
+    echo "${C_GRN}[✓] Сетевые настройки успешно сохранены (${OS_NAME}):${C_RES}"
+    echo " • Новый IP сервера (${LAN_IF}):   ${TARGET_LAN_IP} (маска 255.255.255.0)"
+    echo " • IP основного роутера:     ${GW_IP}"
+    echo " • Панель Sing-Box Extended: http://${TARGET_LAN_IP}:9090/ui (https://${DOM_ZASHBOARD})"
+    echo " • Панель AdGuard Home:      http://${TARGET_LAN_IP}:3000 (https://${DOM_ADGUARD})"
+    echo " • Локальные домены *.lan:   перенаправлены на ${TARGET_LAN_IP}"
+
+    if [ "$TARGET_LAN_IP" != "$CUR_LAN_IP" ]; then
+        ui_box_sep
+        echo "${C_YEL}[!] ВНИМАНИЕ: IP сервера изменился (${CUR_LAN_IP} -> ${TARGET_LAN_IP})!${C_RES}"
+        echo " 1. Переподключитесь по SSH: ssh root@${TARGET_LAN_IP}"
+        echo " 2. Обновите адрес шлюза/DNS на устройствах или в роутере на ${TARGET_LAN_IP}!"
+        ui_box_bottom
+        nohup "$SW_SCRIPT" >/dev/null 2>&1 &
+    else
+        ui_box_bottom
+        "$SW_SCRIPT"
+    fi
+    return 0
+}
+
+# Проверка, включено ли автообновление и Watchdog в cron
+get_agh_admin_user() {
+    if [ -f "${AGH_CONF:-/etc/AdGuardHome/AdGuardHome.yaml}" ]; then
+        sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "${AGH_CONF:-/etc/AdGuardHome/AdGuardHome.yaml}" 2>/dev/null | head -n 1 | tr -d ' \t\r\n"' || true
+    fi
+    return 0
+}
+
+# Автоматическая синхронизация DNS Rewrites (*.lan -> LAN_IP с enabled: true) в AdGuardHome.yaml
+sync_agh_homelab_rewrites() {
+    TARGET_LAN_IP="${1:-$(get_current_lan_ip)}"
+    [ -f "$AGH_CONF" ] || return 0
+    AGH_WAS_RUNNING="no"
+    if pgrep AdGuardHome >/dev/null 2>&1; then
+        AGH_WAS_RUNNING="yes"
+        rc-service adguardhome stop >/dev/null 2>&1 || /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
+    fi
+
+    DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan music.lan jellyfin.lan downloads.lan torrents.lan code.lan"
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN}"
+    fi
+
+    awk -v lip="$TARGET_LAN_IP" -v dom_list="$DOMS_STR" '
+        BEGIN { in_flt=0; in_rew=0 }
+        /^filtering:/ { in_flt=1; print; next }
+        in_flt && /^[^[:space:]]/ { in_flt=0; in_rew=0; print; next }
+        in_flt && /^[[:space:]]*rewrites:/ {
+            print "  rewrites:"
+            cnt = split(dom_list, doms, " ")
+            for (i = 1; i <= cnt; i++) {
+                print "    - domain: '\''" doms[i] "'\''"
+                print "      answer: " lip
+                print "      enabled: true"
+            }
+            in_rew=1
+            next
+        }
+        in_rew {
+            if (/^[[:space:]]*-/ || /^[[:space:]]+(domain|answer|enabled):/) {
+                next
+            } else {
+                in_rew=0
+            }
+        }
+        { print }
+    ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$"
+    atomic_commit_tmp "${AGH_CONF}.tmp.$$" "$AGH_CONF" 0600 "root:root" || true
+
+    if [ "$AGH_WAS_RUNNING" = "yes" ]; then
+        rc-service adguardhome start >/dev/null 2>&1 || /etc/init.d/adguardhome start >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# Обновление IP основного роутера и LAN IP для *.lan внутри AdGuardHome.yaml
+update_agh_gateway_ip() {
+    NEW_GW="$1"
+    NEW_LAN="${2:-$(get_current_lan_ip)}"
+    [ -f "$AGH_CONF" ] || return 0
+    AGH_WAS_RUNNING="no"
+    if pgrep AdGuardHome >/dev/null 2>&1; then
+        AGH_WAS_RUNNING="yes"
+        rc-service adguardhome stop >/dev/null 2>&1 || /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
+    fi
+    awk -v gw="$NEW_GW" '
+        /^[[:space:]]*bootstrap_dns:/ {
+            print "  bootstrap_dns: [" gw ", 77.88.8.8, 77.88.8.1]"
+            in_list=1; next
+        }
+        /^[[:space:]]*local_ptr_upstreams:/ {
+            print "  local_ptr_upstreams: [" gw ":53]"
+            in_list=1; next
+        }
+        in_list && /^[[:space:]]*-/ { next }
+        in_list { in_list=0 }
+        { print }
+    ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$"
+    atomic_commit_tmp "${AGH_CONF}.tmp.$$" "$AGH_CONF" 0600 "root:root" || true
+    sync_agh_homelab_rewrites "$NEW_LAN"
+    if [ "$AGH_WAS_RUNNING" = "yes" ]; then
+        rc-service adguardhome start >/dev/null 2>&1 || /etc/init.d/adguardhome start >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# Безопасная очистка и экранирование ввода пользователя (от CRLF, кавычек и мусора буфера обмена)
 sanitize_domain_entry() {
     RAW_IN_DOM=$(clean_clipboard_line "$1")
     [ -z "$RAW_IN_DOM" ] && return 1
@@ -1454,13 +1791,20 @@ FORCE_GRP
         "tls": {
           "enabled": true,
           "server_name": "common.dot.dns.yandex.net"
-        }
+        },
+        "detour": "DIRECT"
       },
       {
-        "tag": "dns_ru_udp",
-        "type": "udp",
-        "server": "77.88.8.8",
-        "server_port": 53
+        "tag": "dns_ru_backup",
+        "type": "https",
+        "server": "77.88.8.1",
+        "server_port": 443,
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "common.dot.dns.yandex.net"
+        },
+        "detour": "DIRECT"
       },
       {
         "tag": "dns_local",
@@ -1515,9 +1859,12 @@ FORCE_GRP
       {
         "domain_suffix": [
           ".home.arpa",
-          ".local"
+          ".local",
+          "alpinelinux.org",
+          "github.com",
+          "githubusercontent.com"
         ],
-        "server": "dns_local"
+        "server": "dns_ru"
       },
       {
         "domain": [
@@ -1703,7 +2050,10 @@ FORCE_GRP
         "domain_suffix": [
           ".lan",
           ".home.arpa",
-          ".local"
+          ".local",
+          "alpinelinux.org",
+          "github.com",
+          "githubusercontent.com"
         ],
         "outbound": "DIRECT"
       },
@@ -2379,410 +2729,12 @@ apply_and_verify_singbox() {
 }
 
 # Отправка текстового уведомления в Telegram (через туннель Sing-Box или напрямую)
-send_telegram_msg() {
-    MSG_TEXT="$1"
-    load_gateway_env
-    is_telegram_configured || return 0
-
-    TG_API_URL="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
-    for CURL_P in "-x http://127.0.0.1:7890" ""; do
-        # shellcheck disable=SC2086
-        if curl -fsSL --curves X25519:P-256 --connect-timeout 4 -m 8 $CURL_P \
-            -X POST "$TG_API_URL" \
-            --data-urlencode "chat_id=${TG_CHAT_ID}" \
-            --data-urlencode "text=${MSG_TEXT}" >/dev/null 2>&1; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Отправка архива резервной копии шлюза и Homelab файлом в Telegram
-send_telegram_backup() {
-    BAK_FILE="${1:-$BACKUP_ARCHIVE}"
-    load_gateway_env
-    if ! is_telegram_configured; then
-        echo "${C_YEL}[!] Telegram-бот не настроен (укажите Токен и Chat ID в меню).${C_RES}"
-        return 1
-    fi
-    if [ ! -f "$BAK_FILE" ]; then
-        echo "${C_RED}[X] Файл бэкапа ${BAK_FILE} не найден!${C_RES}"
-        return 1
-    fi
-
-    CAPTION_TXT="📦 Бэкап шлюза и Homelab (${OS_NAME})
-🌐 LAN IP: $(get_current_lan_ip)
-🕒 Дата: $(date '+%Y-%m-%d %H:%M:%S')"
-    TG_DOC_URL="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument"
-
-    echo "Отправка архива ${BAK_FILE} в ваш Telegram..."
-    for CURL_P in "-x http://127.0.0.1:7890" ""; do
-        # shellcheck disable=SC2086
-        if curl -fsSL --curves X25519:P-256 --connect-timeout 5 -m 30 $CURL_P \
-            -F "chat_id=${TG_CHAT_ID}" \
-            -F "caption=${CAPTION_TXT}" \
-            -F "document=@${BAK_FILE}" \
-            "$TG_DOC_URL" >/dev/null 2>&1; then
-            echo "${C_GRN}[✓] Архив бэкапа успешно доставлен в ваш Telegram!${C_RES}"
-            return 0
-        fi
-    done
-    echo "${C_RED}[X] Не удалось отправить бэкап в Telegram (проверьте Токен, Chat ID и соединение).${C_RES}"
-    return 1
-}
-
-# Интерактивная настройка Telegram-бота для облачных бэкапов и уведомлений
-configure_telegram_menu() {
-    load_gateway_env
-    echo ""
-    ui_box_top "Настройка Telegram (Облачный бэкап + Уведомления)"
-    if is_telegram_configured; then
-        echo " • Статус: ${C_GRN}ПОДКЛЮЧЕН${C_RES} (Chat ID: ${TG_CHAT_ID})"
-    else
-        echo " • Статус: ${C_DIM}НЕ НАСТРОЕН${C_RES}"
-    fi
-    ui_box_sep
-    echo " 1) Указать / изменить Токен бота (@BotFather) и ваш Chat ID"
-    echo " 2) Отправить тестовое сообщение в Telegram"
-    echo " 3) Отключить Telegram-уведомления и очистить токен"
-    echo " 0) Назад"
-    printf "Выбор [0-3]: "
-    read -r TG_ACT < /dev/tty || true
-    case "$TG_ACT" in
-        1)
-            printf "Введите API Token бота (от @BotFather): "
-            read -r IN_TOK < /dev/tty || true
-            IN_TOK=$(printf "%s" "$IN_TOK" | tr -d ' \t\r\n')
-            printf "Введите ваш Chat ID (узнать можно в @userinfobot): "
-            read -r IN_CID < /dev/tty || true
-            IN_CID=$(printf "%s" "$IN_CID" | tr -d ' \t\r\n')
-            if [ -n "$IN_TOK" ] && [ -n "$IN_CID" ]; then
-                TG_BOT_TOKEN="$IN_TOK"
-                TG_CHAT_ID="$IN_CID"
-                save_gateway_env
-                if send_telegram_msg "✅ Сервер (${OS_NAME} | $(get_current_lan_ip)) успешно подключен к Telegram!"; then
-                    echo "${C_GRN}[✓] Настройки сохранены, тестовое сообщение доставлено!${C_RES}"
-                else
-                    echo "${C_YEL}[!] Настройки сохранены, но тестовое сообщение не прошло (проверьте нажали ли вы /start у бота).${C_RES}"
-                fi
-            else
-                echo "${C_RED}[X] Отмена: Токен и Chat ID не могут быть пустыми.${C_RES}"
-            fi
-            ;;
-        2)
-            if send_telegram_msg "🔔 Проверка связи с сервером (${OS_NAME} | $(get_current_lan_ip)). Все системы работают нормально."; then
-                echo "${C_GRN}[✓] Тестовое уведомление успешно отправлено!${C_RES}"
-            else
-                echo "${C_RED}[X] Ошибка отправки сообщения.${C_RES}"
-            fi
-            ;;
-        3)
-            TG_BOT_TOKEN=""
-            TG_CHAT_ID=""
-            save_gateway_env
-            echo "${C_GRN}[✓] Telegram-уведомления отключены.${C_RES}"
-            ;;
-    esac
-    return 0
-}
-
-# Авто-ротация логов шлюза и сервисов Homelab (защита от переполнения диска)
-rotate_gateway_logs() {
-    for LOG_F in "$SB_LOG_FILE" "$AUTOUPDATE_LOG" /var/log/caddy.log /var/log/vaultwarden.log /var/log/ytdlp-webui.log /var/log/code-server.log /var/log/navidrome.log /var/log/jellyfin.log /var/log/qbittorrent-nox.log; do
-        if [ -f "$LOG_F" ]; then
-            F_SIZE=$(wc -c < "$LOG_F" 2>/dev/null | tr -d ' \t\r\n' || echo "0")
-            if [ "${F_SIZE:-0}" -gt 1048576 ]; then
-                tail -n 500 "$LOG_F" > "${LOG_F}.tmp" 2>/dev/null && mv -f "${LOG_F}.tmp" "$LOG_F" 2>/dev/null || true
-            fi
-        fi
-    done
-    return 0
-}
-
-# ==============================================================================
-# Движок проверки обновлений Git и самообновления всего комплекса Gateway
-# ==============================================================================
-
-# Проверка наличия обновлений в Git-репозитории шлюза (с кэшированием на 2 часа для нулевых задержек)
-check_gateway_repo_updates() {
-    FORCE_CHK="${1:-no}"
-    CACHE_F="/tmp/gateway_update_check.cache"
-    NOW_TS=$(date +%s 2>/dev/null || echo 0)
-
-    if [ "$FORCE_CHK" != "force" ] && [ -f "$CACHE_F" ]; then
-        IFS='|' read -r C_STAT C_BEHIND C_REM C_TIME < "$CACHE_F" 2>/dev/null || true
-        AGE=$(( NOW_TS - ${C_TIME:-0} ))
-        if [ "$AGE" -ge 0 ] && [ "$AGE" -lt 7200 ]; then
-            [ "$C_STAT" = "UPDATE_AVAILABLE" ] && return 0 || return 1
-        fi
-    fi
-
-    if [ ! -d "${GATEWAY_DIR}/.git" ] || ! command -v git >/dev/null 2>&1; then
-        echo "NO_GIT|0||${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
-        return 1
-    fi
-
-    CUR_BRANCH=$(git -C "${GATEWAY_DIR}" branch --show-current 2>/dev/null || echo "main")
-    [ -z "$CUR_BRANCH" ] && CUR_BRANCH="main"
-
-    # Быстрый fetch с таймаутом без блокировки консоли
-    if ! git -C "${GATEWAY_DIR}" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=4 fetch --quiet origin "$CUR_BRANCH" >/dev/null 2>&1; then
-        return 1
-    fi
-
-    LOCAL_H=$(git -C "${GATEWAY_DIR}" rev-parse HEAD 2>/dev/null || true)
-    REMOTE_H=$(git -C "${GATEWAY_DIR}" rev-parse "origin/${CUR_BRANCH}" 2>/dev/null || true)
-
-    if [ -n "$LOCAL_H" ] && [ -n "$REMOTE_H" ] && [ "$LOCAL_H" != "$REMOTE_H" ]; then
-        BEHIND_CNT=$(git -C "${GATEWAY_DIR}" rev-list --count "HEAD..origin/${CUR_BRANCH}" 2>/dev/null || echo 1)
-        echo "UPDATE_AVAILABLE|${BEHIND_CNT}|${REMOTE_H}|${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
-        return 0
-    else
-        echo "UP_TO_DATE|0|${LOCAL_H}|${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
-        return 1
-    fi
-}
-
-# Получение компактного статуса версии для баннера MOTD и шапки меню
-get_gateway_update_badge() {
-    if check_gateway_repo_updates "no"; then
-        B_CNT=$(awk -F'|' '{print $2}' /tmp/gateway_update_check.cache 2>/dev/null || echo 1)
-        printf "%b" "${C_YEL}🔔 Доступно обновление (${B_CNT} комм.) ➔ gw update${C_RES}"
-    else
-        if [ -d "${GATEWAY_DIR}/.git" ] && command -v git >/dev/null 2>&1; then
-            CUR_SHORT=$(git -C "${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo "main")
-            printf "%b" "${C_GRN}v2026.11 (${CUR_SHORT}) [актуальна ●]${C_RES}"
-        else
-            printf "%b" "${C_GRN}v2026.11 (Standalone) [актуальна ●]${C_RES}"
-        fi
-    fi
-}
-
-# Полное атомарное самообновление: Git-репозиторий + ядра + модули Homelab
-self_update_gateway() {
-    SU_MODE="${1:-}"
-
-    if [ "$SU_MODE" = "check" ] || [ "$SU_MODE" = "status" ]; then
-        ui_banner "GATEWAY UPDATE // ПРОВЕРКА ОБНОВЛЕНИЙ ИЗ GIT"
-        ui_step_progress 1 1 "Связь с удаленным Git-репозиторием..."
-        CUR_BRANCH=$(git -C "${GATEWAY_DIR}" branch --show-current 2>/dev/null || echo "main")
-        [ -z "$CUR_BRANCH" ] && CUR_BRANCH="main"
-        if check_gateway_repo_updates "force"; then
-            B_CNT=$(awk -F'|' '{print $2}' /tmp/gateway_update_check.cache 2>/dev/null || echo 1)
-            ui_box_top "🔔 ДОСТУПНА НОВАЯ ВЕРСИЯ ШЛЮЗА (новых коммитов: ${B_CNT})"
-            git -C "${GATEWAY_DIR}" log --oneline -n 5 "HEAD..origin/${CUR_BRANCH}" 2>/dev/null | while read -r line; do
-                ui_box_row "  • ${line}"
-            done
-            ui_box_bottom
-            echo "Для установки обновления выполните: ${C_CYN}gw update${C_RES}"
-        else
-            CUR_H=$(git -C "${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo "HEAD")
-            ui_ok_msg "У вас установлена последняя версия Gateway (${CUR_H}), обновлений нет."
-        fi
-        return 0
-    fi
-
-    ui_banner "GATEWAY UPDATE // ПОЛНОЕ ОБНОВЛЕНИЕ ШЛЮЗА, ЯДЕР И HOMELAB"
-
-    # 1. Обновление кодовой базы из Git
-    UPDATED_REPO="no"
-    if [ -d "${GATEWAY_DIR}/.git" ] && command -v git >/dev/null 2>&1; then
-        ui_step_progress 1 5 "Загрузка обновлений скриптов шлюза из Git-репозитория..."
-        cd "${GATEWAY_DIR}"
-        CUR_BRANCH=$(git branch --show-current 2>/dev/null || echo "main")
-        [ -z "$CUR_BRANCH" ] && CUR_BRANCH="main"
-        if git fetch --quiet origin "$CUR_BRANCH" 2>/dev/null; then
-            LOC_H=$(git rev-parse HEAD 2>/dev/null || true)
-            REM_H=$(git rev-parse "origin/${CUR_BRANCH}" 2>/dev/null || true)
-            if [ -n "$LOC_H" ] && [ -n "$REM_H" ] && [ "$LOC_H" != "$REM_H" ]; then
-                ui_info_msg "Обнаружены новые изменения. Применение (git pull)..."
-                STASHED="no"
-                if ! git diff-index --quiet HEAD -- 2>/dev/null; then
-                    git stash save --include-untracked "gateway_auto_stash_$(date +%s)" >/dev/null 2>&1 && STASHED="yes" || true
-                fi
-                if git pull --ff-only origin "$CUR_BRANCH" 2>/dev/null || git pull origin "$CUR_BRANCH" 2>/dev/null; then
-                    UPDATED_REPO="yes"
-                    ui_ok_msg "Кодовая база шлюза успешно обновлена до $(git rev-parse --short HEAD 2>/dev/null)!"
-                else
-                    ui_warn_box "Не удалось автоматически слить изменения Git (возможен локальный конфликт)." \
-                                "Проверьте git status в каталоге ${GATEWAY_DIR}."
-                fi
-                if [ "$STASHED" = "yes" ]; then
-                    git stash pop >/dev/null 2>&1 || true
-                fi
-            else
-                ui_ok_msg "Скрипты шлюза уже соответствуют последней версии в репозитории."
-            fi
-        else
-            ui_warn_box "Не удалось подключиться к Git-репозиторию." "Продолжаем обновление локальных бинарников и ядер."
-        fi
-        chmod +x "${GATEWAY_DIR}/gateway.sh" "${GATEWAY_DIR}/setup.sh" 2>/dev/null || true
-        [ -d "${GATEWAY_DIR}/scripts" ] && chmod +x "${GATEWAY_DIR}/scripts/"*.sh 2>/dev/null || true
-        ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gateway 2>/dev/null || true
-        ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gw 2>/dev/null || true
-        rm -f /tmp/gateway_update_check.cache 2>/dev/null || true
-    fi
-
-    # 2. Обновление ядер Sing-Box Extended, AdGuard Home и панели Zashboard
-    ui_step_progress 2 5 "Обновление ядер Sing-Box Extended, AdGuard Home и панели Zashboard..."
-    update_cores_only "yes"
-
-    # 3. Обновление активных модулей Homelab
-    ui_step_progress 3 5 "Проверка обновлений для активных модулей Homelab..."
-    if [ -f "$HOMELAB_STATE" ]; then
-        while IFS='|' read -r M_ID M_EN _REST; do
-            case "$M_ID" in ''|\#*) continue ;; esac
-            if [ "$M_EN" = "yes" ]; then
-                homelab_module_dispatch "$M_ID" "update" 2>/dev/null || true
-            fi
-        done < "$HOMELAB_STATE"
-    fi
-
-    # 4. Пересборка конфига, сброс conntrack и перезапуск
-    ui_step_progress 4 5 "Пересборка конфигурации Sing-Box и перезапуск служб..."
-    backup_gateway_state
-    load_gateway_env
-    if apply_and_verify_singbox "Полное обновление шлюза и компонентов"; then
-        conntrack -F >/dev/null 2>&1 || true
-        service_ctl sing-box restart || true
-        service_ctl adguardhome restart || true
-    fi
-
-    # 5. Итоговый отчет о готовности
-    ui_step_progress 5 5 "Верификация состояния обновленной системы..."
-    sleep 2
-    echo ""
-    ui_box_top "🎉 РЕЗУЛЬТАТ ПОЛНОГО ОБНОВЛЕНИЯ СЕРВЕРА"
-    if pgrep sing-box >/dev/null 2>&1 && pgrep AdGuardHome >/dev/null 2>&1; then
-        ui_box_row "${C_GRN}[✔] Все службы шлюза и модули Homelab активны и работают стабильно!${C_RES}"
-    else
-        ui_box_row "${C_YEL}[▲] Некоторые службы перезапускаются или требуют внимания (запустите: gw doctor)${C_RES}"
-    fi
-    ui_box_row "• Версия скриптов: $(git -C "${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'Standalone')"
-    ui_box_row "• Ядро Sing-Box:   $(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || echo 'OK')"
-    ui_box_row "• AdGuard Home:    $(/usr/bin/AdGuardHome --version 2>&1 | sed -n 's/.*version \(v[0-9.a-zA-Z_.-]*\).*/\1/p' | head -n 1 || echo 'OK')"
-    ui_box_bottom
-    echo ""
-
-    if [ "$UPDATED_REPO" = "yes" ]; then
-        ui_info_msg "Процесс шлюза будет перезапущен для применения обновленного кода..."
-        sleep 1
-        exec /usr/bin/gw motd
-    fi
-    return 0
-}
-
-# Активное сканирование всей /24 подсети LAN (прогрев ARP-таблицы за ~1.5 сек)
-scan_lan_subnet() {
-    CUR_LAN=$(get_current_lan_ip)
-    LAN_SUB="${CUR_LAN%.*}"
-    echo "Сканирование подсети ${LAN_SUB}.0/24 (опрос живых устройств ~1.5 сек)..."
-    I_HOST=1
-    while [ "$I_HOST" -le 254 ]; do
-        ping -c 1 -W 1 "${LAN_SUB}.${I_HOST}" >/dev/null 2>&1 &
-        if [ $((I_HOST % 64)) -eq 0 ]; then
-            wait 2>/dev/null || true
-        fi
-        I_HOST=$((I_HOST + 1))
-    done
-    wait 2>/dev/null || true
-    return 0
-}
-
-# Авто-сканер живых устройств в локальной сети (ARP + DHCP Leases Alpine Linux) для Пункта 8
-discover_lan_devices() {
-    load_gateway_env
-    CUR_LAN=$(get_current_lan_ip)
-    rm -f "$LAN_SCAN_CACHE"
-    touch "$LAN_SCAN_CACHE"
-
-    LEASE_F=""
-    [ -f /var/lib/misc/dnsmasq.leases ] && LEASE_F="/var/lib/misc/dnsmasq.leases"
-
-    echo " ${C_CYN}--- Обнаруженные устройства в локальной сети (ARP + DHCP) ---${C_RES}"
-    # shellcheck disable=SC2086
-    awk -v gw="$GW_IP" -v self="$CUR_LAN" -v out_cache="$LAN_SCAN_CACHE" \
-        -v byp_f="$USER_BYPASS_IPS" -v vpn_f="$USER_FORCE_PROXY_IPS" \
-        -v c_cyn="$C_CYN" -v c_grn="$C_GRN" -v c_yel="$C_YEL" -v c_dim="$C_DIM" -v c_res="$C_RES" '
-        BEGIN {
-            while ((getline line < byp_f) > 0) {
-                gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", line)
-                if (line != "") byp[line] = 1
-            }
-            close(byp_f)
-            while ((getline line < vpn_f) > 0) {
-                gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", line)
-                if (line != "") vpn[line] = 1
-            }
-            close(vpn_f)
-        }
-        FILENAME ~ /leases$/ {
-            ip = $3; mac = tolower($2); host = $4
-            if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && ip != self) {
-                ips[ip] = 1
-                if (mac != "") macs[ip] = mac
-                if (host != "" && host != "*") names[ip] = host
-            }
-            next
-        }
-        FILENAME == "/proc/net/arp" && FNR > 1 {
-            ip = $1; flags = $3; mac = tolower($4)
-            if (ip != self && flags != "0x0" && mac != "00:00:00:00:00:00") {
-                ips[ip] = 1
-                if (macs[ip] == "") macs[ip] = mac
-            }
-            next
-        }
-        END {
-            idx = 0
-            for (ip in ips) {
-                idx++
-                m = (macs[ip] != "") ? macs[ip] : "неизвестен"
-                n = (names[ip] != "") ? names[ip] : "Устройство LAN"
-                if (ip == gw) n = "Основной роутер (" n ")"
-                st = c_dim "[По правилам]" c_res
-                if (byp[ip]) st = c_yel "[В ОБХОДЕ: DIRECT]" c_res
-                if (vpn[ip]) st = c_grn "[В FULL-VPN]" c_res
-                printf "  %s[%d]%s %-15s | %-17s | %-22s %s\n", c_cyn, idx, c_res, ip, m, n, st
-                print ip > out_cache
-            }
-            if (idx == 0) {
-                printf "  %s(активные соседи в ARP/DHCP пока не обнаружены — нажмите [s] для опроса сети)%s\n", c_dim, c_res
-            }
-        }
-    ' $LEASE_F /proc/net/arp 2>/dev/null || true
-    return 0
-}
-
-# Преобразование ввода пользователя (IP или номер из авто-сканера LAN) в IPv4
-resolve_device_ip_input() {
-    RAW_IN=$(printf "%s" "$1" | tr -d ' \t\r\n')
-    [ -z "$RAW_IN" ] && return 1
-    case "$RAW_IN" in
-        *[!0-9]*)
-            if is_valid_ipv4 "$RAW_IN"; then
-                printf "%s" "$RAW_IN"
-                return 0
-            fi
-            return 1
-            ;;
-        *)
-            if [ -s "$LAN_SCAN_CACHE" ]; then
-                PICKED_IP=$(awk -v target="$RAW_IN" 'NR == target {print $1; exit}' "$LAN_SCAN_CACHE" 2>/dev/null)
-                if [ -n "$PICKED_IP" ] && is_valid_ipv4 "$PICKED_IP"; then
-                    printf "%s" "$PICKED_IP"
-                    return 0
-                fi
-            fi
-            return 1
-            ;;
-    esac
-}
-
-# Интерактивный «Детектор сайта» (Рентген маршрута домена: AdGuard + FakeIP + Homelab .lan + TLS-пинг)
 inspect_domain_route() {
-    printf "\nВведите домен или ссылку для проверки (например, https://instagram.com или vaultwarden.lan): "
-    read -r TEST_IN < /dev/tty || true
+    TEST_IN="${1:-}"
+    if [ -z "$TEST_IN" ]; then
+        printf "\nВведите домен или ссылку для проверки (например, https://instagram.com или vaultwarden.lan): "
+        read -r TEST_IN < /dev/tty || true
+    fi
     TEST_IN=$(printf "%s" "$TEST_IN" | tr -d ' \t\r\n')
     [ -z "$TEST_IN" ] && return 0
 
@@ -2854,6 +2806,8 @@ inspect_domain_route() {
 
     echo "   -> Через Sing-Box: HTTP ${PRX_CODE} | TLS: ${C_GRN}${PRX_MS}${C_RES}"
     echo "   -> Напрямую (LAN): HTTP ${DIR_CODE} | TLS: ${C_YEL}${DIR_MS}${C_RES}"
+    [ ! -t 0 ] && return 0
+
     ui_box_sep
     echo "Быстрое действие для ${CLEAN_SUFFIX}:"
     echo " 1) Направить этот домен В ПРОКСИ (добавить в ${USER_PROXY_FILE})"
@@ -3048,290 +3002,741 @@ manage_nodes_cli_menu() {
 }
 
 # Быстрая смена единого пароля (Sing-Box Zashboard + AdGuard Home + Samba + Vaultwarden + Caddy BasicAuth)
-change_unified_password() {
-    NEW_PASS=$(printf "%s" "$1" | tr -d '\r\n')
-    SYNC_SMB_ANS="${2:-ask}"
-    if [ -z "$NEW_PASS" ]; then
-        echo "${C_RED}[X] Ошибка: Пароль не может быть пустым!${C_RES}"
-        return 1
+check_github_mirror() {
+    TEST_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/private.srs"
+    if curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null || \
+       curl -fsSL --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null; then
+        GH_PROXY=""
+        return 0
     fi
-    load_gateway_env
-    OLD_ADMIN_PASS="${ADMIN_PASS:-}"
-    OLD_SMB_PASS="${SMB_PASS:-}"
+    for MIRROR in "https://gh-proxy.com/" "https://ghproxy.net/"; do
+        if curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null "${MIRROR}${TEST_URL}" 2>/dev/null; then
+            echo "${C_YEL}[!] Прямой доступ к GitHub ограничен, включено зеркало: ${MIRROR}${C_RES}"
+            GH_PROXY="$MIRROR"
+            return 0
+        fi
+    done
+    GH_PROXY=""
+    return 0
+}
 
-    ADMIN_PASS="$NEW_PASS"
-    if [ "$SYNC_SMB_ANS" = "yes" ] || [ -z "$OLD_SMB_PASS" ] || [ "$OLD_SMB_PASS" = "$OLD_ADMIN_PASS" ]; then
-        SMB_PASS="$NEW_PASS"
-    elif [ "$SYNC_SMB_ANS" = "ask" ] && [ -t 0 ]; then
-        printf "Обновить также пароль сетевой папки Samba для пользователя '%s'? (y/n) [Enter = y]: " "${SMB_USER:-homelab}"
-        read -r IN_SYNC_SMB < /dev/tty || true
-        IN_SYNC_SMB=$(printf "%s" "$IN_SYNC_SMB" | tr -d ' \t\r\n')
-        [ -z "$IN_SYNC_SMB" ] && IN_SYNC_SMB="y"
-        case "$IN_SYNC_SMB" in
-            [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа]) SMB_PASS="$NEW_PASS" ;;
+# Универсальная загрузка файла с каскадным фоллбэком на зеркала GitHub
+download_file() {
+    DL_URL="$1"
+    DL_OUT="$2"
+    for PREFIX in "$GH_PROXY" "" "https://gh-proxy.com/"; do
+        if curl --curves X25519:P-256 --retry 1 --connect-timeout 5 --speed-limit 5000 --speed-time 10 -m 45 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null || \
+           curl --retry 1 --connect-timeout 5 --speed-limit 5000 --speed-time 10 -m 45 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null; then
+            if [ -s "$DL_OUT" ]; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+# Инициализация пользовательских списков и файлов провайдеров
+init_user_lists() {
+    mkdir -p "$SB_RULES_DIR" "$SB_PROVIDERS_DIR" "$HOMELAB_DIR" "$HOMELAB_LIB_DIR"
+    chmod 755 "$HOMELAB_LIB_DIR" 2>/dev/null || true
+    [ -f "$USER_DIRECT_FILE" ] || printf "+.localdomain\n+.lan\n" > "$USER_DIRECT_FILE"
+    grep -qxF "+.lan" "$USER_DIRECT_FILE" 2>/dev/null || echo "+.lan" >> "$USER_DIRECT_FILE"
+    [ -f "$USER_PROXY_FILE" ] || echo "+.chatgpt.com" > "$USER_PROXY_FILE"
+    [ -f "$USER_BYPASS_IPS" ] || : > "$USER_BYPASS_IPS"
+    [ -f "$USER_FORCE_PROXY_IPS" ] || : > "$USER_FORCE_PROXY_IPS"
+    [ -s "$CUSTOM_NODES_FILE" ] || echo "proxies: []" > "$CUSTOM_NODES_FILE"
+    [ -s "$WARP_NODES_FILE" ] || echo '{"outbounds": []}' > "$WARP_NODES_FILE"
+    sync_user_domain_rulesets
+    return 0
+}
+
+# Безопасное разделение нескольких URI-ключей (включая протоколы sing-box-extended 2026)
+format_uri_keys() {
+    printf "%s\n" "$1" | tr -d '\r' | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|hysteria|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5|trusttunnel|sudoku|call|naive\+https|naive\+quic|naive|snell|openvpn|ssh):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
+    return 0
+}
+
+# Живой сканер Anycast-узлов Cloudflare WARP с сортировкой по минимальному RTT (в обход singbox-tun)
+scan_best_warp_endpoints() {
+    CANDIDATES="188.114.98.224:854 188.114.97.1:500 162.159.192.1:4500 188.114.99.224:1002 162.159.195.1:2408 188.114.96.1:1701 162.159.193.1:500 188.114.97.3:4500"
+    LAN_DEV_SCAN=$(get_lan_ifname)
+
+    if [ -n "$LAN_DEV_SCAN" ] && ip link show "$LAN_DEV_SCAN" >/dev/null 2>&1; then
+        PING_CMD="ping -I ${LAN_DEV_SCAN} -c 1 -W 1"
+    else
+        PING_CMD="ping -c 1 -W 1"
+    fi
+
+    RTT_TMP="/tmp/warp_rtt_scan.$$"
+    : > "$RTT_TMP"
+
+    for EP in $CANDIDATES; do
+        EP_IP="${EP%:*}"
+        P_OUT=$($PING_CMD "$EP_IP" 2>/dev/null || true)
+        if printf "%s" "$P_OUT" | grep -q "time="; then
+            RTT_VAL=$(printf "%s" "$P_OUT" | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -n 1)
+            RTT_INT="${RTT_VAL%.*}"
+            [ -z "$RTT_INT" ] && RTT_INT="999"
+            printf "%04d %s\n" "$RTT_INT" "$EP" >> "$RTT_TMP"
+        fi
+    done
+
+    ALIVE_LIST=""
+    ALIVE_CNT=0
+    if [ -s "$RTT_TMP" ]; then
+        for EP in $(sort -n "$RTT_TMP" | awk '{print $2}'); do
+            ALIVE_LIST="${ALIVE_LIST} ${EP}"
+            ALIVE_CNT=$((ALIVE_CNT + 1))
+            [ "$ALIVE_CNT" -ge 4 ] && break
+        done
+    fi
+    rm -f "$RTT_TMP"
+
+    for EP in $CANDIDATES; do
+        [ "$ALIVE_CNT" -ge 4 ] && break
+        case " $ALIVE_LIST " in
+            *" $EP "*) ;;
+            *)
+                ALIVE_LIST="${ALIVE_LIST} ${EP}"
+                ALIVE_CNT=$((ALIVE_CNT + 1))
+                ;;
         esac
-    fi
+    done
 
-    save_gateway_env
-    save_homelab_env
-    generate_singbox_config
-
-    service_ctl adguardhome stop
-    if [ -f "$AGH_CONF" ] && command -v htpasswd >/dev/null 2>&1; then
-        CUR_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
-        [ -z "$CUR_AGH_USER" ] && CUR_AGH_USER="admin" || true
-        NEW_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$CUR_AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
-        [ -z "$NEW_HASH" ] && NEW_HASH=$(htpasswd -nbBC 10 "$CUR_AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true) || true
-        if [ -n "$NEW_HASH" ]; then
-            awk -v u="$CUR_AGH_USER" -v h="$NEW_HASH" '
-                /^users:/ {
-                    print "users:"
-                    print "  - name: " u
-                    print "    password: " h
-                    in_users=1; next
-                }
-                in_users && /^[^[:space:]]/ { in_users=0 }
-                in_users { next }
-                { print }
-            ' "$AGH_CONF" > "${AGH_CONF}.tmp" && mv "${AGH_CONF}.tmp" "$AGH_CONF"
-            chmod 600 "$AGH_CONF" 2>/dev/null || true
-        fi
-    fi
-
-    # Синхронизация и верификация пароля Samba
-    if command -v smbpasswd >/dev/null 2>&1; then
-        if ! apply_and_verify_samba_password "${SMB_USER:-homelab}" "${SMB_PASS:-$ADMIN_PASS}"; then
-            echo "${C_YEL}[!] Предупреждение: Не удалось подтвердить обновление записи Samba passdb для ${SMB_USER:-homelab}.${C_RES}"
-        fi
-    fi
-
-    # Синхронизация ADMIN_TOKEN в Vaultwarden (если модуль установлен)
-    if [ -f /etc/conf.d/vaultwarden ] || is_module_enabled "vaultwarden"; then
-        sync_vaultwarden_config >/dev/null 2>&1 || true
-        is_module_enabled "vaultwarden" && service_ctl vaultwarden restart || true
-    fi
-
-    # Синхронизация BasicAuth в Caddy для защищенных модулей
-    if [ -x /usr/sbin/caddy ] && [ -d "$CADDY_CONFD" ]; then
-        is_module_enabled "ytdlp" && register_caddy_site "ytdlp" "$DOM_YTDLP" "$PORT_YTDLP" "yes" >/dev/null 2>&1 || true
-        is_module_enabled "torrent" && register_caddy_site "torrent" "$DOM_TORRENT" "$PORT_TORRENT_WEB" "yes" >/dev/null 2>&1 || true
-        is_module_enabled "code" && register_caddy_site "code" "$DOM_CODE" "$PORT_CODE" "yes" >/dev/null 2>&1 || true
-    fi
-
-    service_ctl sing-box restart || true
-    service_ctl adguardhome start || true
-    echo "${C_GRN}[✓] Единый пароль успешно синхронизирован (Sing-Box, AdGuard Home, Samba, Vaultwarden, Caddy)!${C_RES}"
+    printf "%s" "$ALIVE_LIST" | sed 's/^[[:space:]]*//'
     return 0
 }
 
-# Управление Умным DHCP-сервером на Alpine Linux (dnsmasq на порту 5353)
-configure_smart_dhcp() {
-    DHCP_MODE="${1:-off}"
-    CUR_LAN_IP=$(get_current_lan_ip)
-    LAN_IF=$(get_lan_ifname)
-    LAN_SUB="${CUR_LAN_IP%.*}"
+# Автоматическая бесплатная генерация гибридного Amnezia WARP 2.0 (4 UDP AWG + 1 TCP MASQUE H2 + WARP+)
+generate_amnezia_warp() {
+    OPT_LIC="${1:-}"
+    mkdir -p "$SB_PROVIDERS_DIR"
+    [ -z "${GW_IP:-}" ] && load_gateway_env || true
+    [ -n "$OPT_LIC" ] && WARP_LICENSE="$OPT_LIC" || true
 
-    if [ "$DHCP_MODE" = "on" ]; then
-        if ! command -v dnsmasq >/dev/null 2>&1; then
-            echo "Установка пакета dnsmasq для DHCP-сервера..."
-            apk update >/dev/null 2>&1 || true
-            apk add dnsmasq >/dev/null 2>&1 || true
-        fi
-        mkdir -p /etc/dnsmasq.d /var/lib/misc
-        cat << ALP_DHCP > "$ALPINE_DHCP_CONF"
-port=5353
-interface=${LAN_IF}
-bind-interfaces
-dhcp-authoritative
-dhcp-range=${LAN_SUB}.100,${LAN_SUB}.239,255.255.255.0,12h
-dhcp-option=3,${CUR_LAN_IP}
-dhcp-option=6,${CUR_LAN_IP}
-ALP_DHCP
-        service_ctl dnsmasq enable
-        service_ctl dnsmasq restart
-        echo "${C_GRN}[✓] Умный DHCP-сервер на Alpine ВКЛЮЧЕН (Шлюз и DNS: ${CUR_LAN_IP}, пул .100-.239).${C_RES}"
-        echo "    Не забудьте отключить DHCP-сервер на основном роутере провайдера!"
-    else
-        rm -f "$ALPINE_DHCP_CONF" 2>/dev/null || true
-        service_ctl dnsmasq stop
-        service_ctl dnsmasq disable
-        echo "${C_GRN}[✓] DHCP-сервер на Alpine ВЫКЛЮЧЕН (классический режим Sidecar).${C_RES}"
+    if ! command -v wg >/dev/null 2>&1; then
+        echo "Установка генератора ключей wireguard-tools..."
+        apk update >/dev/null 2>&1 || true
+        apk add wireguard-tools-wg >/dev/null 2>&1 || apk add wireguard-tools >/dev/null 2>&1 || true
     fi
+
+    PRIV_KEY=""
+    PUB_KEY=""
+    if command -v wg >/dev/null 2>&1; then
+        PRIV_KEY=$(wg genkey 2>/dev/null || true)
+        [ -n "$PRIV_KEY" ] && PUB_KEY=$(printf "%s" "$PRIV_KEY" | wg pubkey 2>/dev/null || true) || true
+    fi
+
+    WARP_IPV4=""
+    REG_ID=""
+    REG_TOKEN=""
+    REG_OK="no"
+
+    if [ -n "$PUB_KEY" ]; then
+        TOS_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+        REG_PAYLOAD="{\"key\":\"${PUB_KEY}\",\"install_id\":\"\",\"warp_enabled\":true,\"tos\":\"${TOS_DATE}\",\"type\":\"Android\",\"locale\":\"en_US\"}"
+        echo "Бесплатная регистрация личного аккаунта Cloudflare WARP (API 2026)..."
+
+        for CURL_OPT in \
+            "" \
+            "-x http://127.0.0.1:7890" \
+            "--connect-to api.devices.cloudflare.com:443:104.24.4.6:443" \
+            "--connect-to api.devices.cloudflare.com:443:104.18.0.6:443" \
+            "--connect-to api.devices.cloudflare.com:443:162.159.137.105:443" \
+            "--connect-to api.devices.cloudflare.com:443:162.159.138.105:443" \
+            "--connect-to api.devices.cloudflare.com:443:104.16.80.230:443"
+        do
+            # shellcheck disable=SC2086
+            RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 $CURL_OPT \
+                -H "User-Agent: okhttp/3.12.1" \
+                -H "Content-Type: application/json" \
+                -X POST "https://api.devices.cloudflare.com/v0a4471/reg" \
+                -d "$REG_PAYLOAD" 2>/dev/null || true)
+            if printf "%s" "$RESP" | grep -q '"v4"'; then
+                WARP_IPV4=$(printf "%s" "$RESP" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
+                REG_ID=$(printf "%s" "$RESP" | sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+                REG_TOKEN=$(printf "%s" "$RESP" | sed -n 's/.*"token":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+                USED_CURL_OPT="$CURL_OPT"
+                REG_OK="yes"
+                break
+            fi
+        done
+
+        if [ "$REG_OK" = "no" ]; then
+            RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 \
+                -H "User-Agent: okhttp/3.12.1" \
+                -H "Content-Type: application/json" \
+                -X POST "https://zero-trust-client.cloudflareclient.com/v0a4471/reg" \
+                -d "$REG_PAYLOAD" 2>/dev/null || true)
+            if printf "%s" "$RESP" | grep -q '"v4"'; then
+                WARP_IPV4=$(printf "%s" "$RESP" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
+                REG_ID=$(printf "%s" "$RESP" | sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+                REG_TOKEN=$(printf "%s" "$RESP" | sed -n 's/.*"token":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+                USED_CURL_OPT=""
+                REG_OK="yes"
+            fi
+        fi
+
+        if [ "$REG_OK" = "yes" ] && [ -n "${WARP_LICENSE:-}" ] && [ -n "$REG_ID" ] && [ -n "$REG_TOKEN" ]; then
+            echo "Активация лицензионного ключа Cloudflare WARP+..."
+            # shellcheck disable=SC2086
+            LIC_RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 ${USED_CURL_OPT:-} \
+                -H "User-Agent: okhttp/3.12.1" \
+                -H "Authorization: Bearer ${REG_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -X PUT "https://api.devices.cloudflare.com/v0a4471/reg/${REG_ID}/account" \
+                -d "{\"license\":\"${WARP_LICENSE}\"}" 2>/dev/null || true)
+            if printf "%s" "$LIC_RESP" | grep -q '"warp_plus":[[:space:]]*true'; then
+                echo "${C_GRN}[✓] Статус WARP+ (Argo Priority) успешно активирован!${C_RES}"
+                save_gateway_env
+            else
+                echo "${C_YEL}[!] Лицензия WARP+ не принята API Cloudflare, используется стандартный безлимитный WARP.${C_RES}"
+                WARP_LICENSE=""
+                save_gateway_env
+            fi
+        fi
+    fi
+
+    if [ "$REG_OK" = "no" ] && is_warp_enabled; then
+        OLD_PRIV=$(sed -n 's/.*"private_key":[[:space:]]*"\([^"]*\)".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+        OLD_IP=$(sed -n 's/.*"\([0-9.]*\)\/32".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+        if [ -n "$OLD_PRIV" ]; then
+            PRIV_KEY="$OLD_PRIV"
+            WARP_IPV4="${OLD_IP:-172.16.0.2}"
+            REG_OK="yes"
+            echo "[i] Сохранен ранее зарегистрированный ключ Amnezia WARP."
+        fi
+    fi
+
+    if [ "$REG_OK" = "no" ]; then
+        if [ "${IS_UNATTENDED:-no}" = "yes" ] || [ ! -t 0 ]; then
+            WARP_IPV4="172.16.0.2"
+            REG_OK="yes"
+            echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
+        else
+            echo "${C_YEL}[!] Провайдер блокирует прямой доступ к API регистрации WG Cloudflare.${C_RES}"
+            printf "Вставьте готовый WARP PrivateKey [или нажмите Enter для авто-регистрации через MASQUE TCP/H2]: "
+            read -r USER_PRIV < /dev/tty || true
+            USER_PRIV=$(printf "%s" "$USER_PRIV" | tr -d ' \t\r\n')
+            if [ -n "$USER_PRIV" ]; then
+                PRIV_KEY="$USER_PRIV"
+                WARP_IPV4="172.16.0.2"
+                REG_OK="yes"
+            elif [ -n "$PRIV_KEY" ]; then
+                WARP_IPV4="172.16.0.2"
+                REG_OK="yes"
+                echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
+            else
+                WARP_IPV4="172.16.0.2"
+                REG_OK="yes"
+                echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
+            fi
+        fi
+    fi
+
+    [ -z "$WARP_IPV4" ] && WARP_IPV4="172.16.0.2" || true
+
+    echo "Сканирование и сортировка по пингу Anycast-узлов Cloudflare напрямую через провайдера..."
+    BEST_EPS=$(scan_best_warp_endpoints)
+    # shellcheck disable=SC2086
+    set -- $BEST_EPS
+    EP1="${1:-188.114.98.224:854}"
+    EP2="${2:-188.114.97.1:500}"
+    EP3="${3:-162.159.192.1:4500}"
+    EP4="${4:-188.114.99.224:1002}"
+
+    EP1_IP="${EP1%:*}"; EP1_PORT="${EP1#*:}"
+    EP2_IP="${EP2%:*}"; EP2_PORT="${EP2#*:}"
+    EP3_IP="${EP3%:*}"; EP3_PORT="${EP3#*:}"
+    EP4_IP="${EP4%:*}"; EP4_PORT="${EP4#*:}"
+
+    RAND_BYTE=$(od -An -N1 -tu1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "5")
+    [ -z "$RAND_BYTE" ] && RAND_BYTE=5
+    AWG_JC1=$(( (RAND_BYTE % 4) + 3 ))
+    AWG_JC2=$(( ((RAND_BYTE + 1) % 4) + 4 ))
+    AWG_JC3=$(( ((RAND_BYTE + 2) % 4) + 3 ))
+    AWG_JC4=$(( ((RAND_BYTE + 3) % 4) + 5 ))
+
+    AWG_JMIN1=$(( (RAND_BYTE % 15) + 30 ))
+    AWG_JMAX1=$(( AWG_JMIN1 + ((RAND_BYTE % 25) + 25) ))
+    AWG_JMIN2=$(( ((RAND_BYTE + 3) % 15) + 35 ))
+    AWG_JMAX2=$(( AWG_JMIN2 + (((RAND_BYTE + 5) % 25) + 30) ))
+    AWG_JMIN3=$(( ((RAND_BYTE + 7) % 15) + 28 ))
+    AWG_JMAX3=$(( AWG_JMIN3 + (((RAND_BYTE + 9) % 25) + 28) ))
+    AWG_JMIN4=$(( ((RAND_BYTE + 11) % 15) + 38 ))
+    AWG_JMAX4=$(( AWG_JMIN4 + (((RAND_BYTE + 13) % 25) + 35) ))
+
+    HEX_R1=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "a1b2c3d4")
+    HEX_R2=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "e5f60718")
+    HEX_R3=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "99887766")
+    HEX_R4=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "55443322")
+
+    AWG_I1_1="<b 0xc70000000108${HEX_R1}00><r 16><t>"
+    AWG_I1_2="<b 0xc30000000108${HEX_R2}00><r 24><t>"
+    AWG_I1_3="<b 0x818000010001000000000361706905647a656e0272750000010001c00c000100010000003c0004${HEX_R3}><r 18><t>"
+    AWG_I1_4="<b 0xcb0000000108${HEX_R4}00><t><r 20>"
+
+    cat << WARP_EOF > "${WARP_NODES_FILE}.tmp.$$"
+{
+  "outbounds": [
+    {
+      "type": "wireguard",
+      "tag": "☁️ WARP Fast (${EP1_IP}:${EP1_PORT})",
+      "mtu": 1280,
+      "address": [
+        "${WARP_IPV4}/32"
+      ],
+      "private_key": "${PRIV_KEY}",
+      "peers": [
+        {
+          "address": "${EP1_IP}",
+          "port": ${EP1_PORT},
+          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+          "allowed_ips": [
+            "0.0.0.0/0"
+          ]
+        }
+      ],
+      "amnezia": {
+        "jc": ${AWG_JC1},
+        "jmin": ${AWG_JMIN1},
+        "jmax": ${AWG_JMAX1},
+        "s1": 0,
+        "s2": 0,
+        "h1": 1,
+        "h2": 2,
+        "h3": 3,
+        "h4": 4,
+        "i1": "${AWG_I1_1}"
+      }
+    },
+    {
+      "type": "wireguard",
+      "tag": "☁️ WARP Reserve (${EP2_IP}:${EP2_PORT})",
+      "mtu": 1280,
+      "address": [
+        "${WARP_IPV4}/32"
+      ],
+      "private_key": "${PRIV_KEY}",
+      "peers": [
+        {
+          "address": "${EP2_IP}",
+          "port": ${EP2_PORT},
+          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+          "allowed_ips": [
+            "0.0.0.0/0"
+          ]
+        }
+      ],
+      "amnezia": {
+        "jc": ${AWG_JC2},
+        "jmin": ${AWG_JMIN2},
+        "jmax": ${AWG_JMAX2},
+        "s1": 0,
+        "s2": 0,
+        "h1": 1,
+        "h2": 2,
+        "h3": 3,
+        "h4": 4,
+        "i1": "${AWG_I1_2}"
+      }
+    },
+    {
+      "type": "wireguard",
+      "tag": "☁️ WARP Alt (${EP3_IP}:${EP3_PORT})",
+      "mtu": 1280,
+      "address": [
+        "${WARP_IPV4}/32"
+      ],
+      "private_key": "${PRIV_KEY}",
+      "peers": [
+        {
+          "address": "${EP3_IP}",
+          "port": ${EP3_PORT},
+          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+          "allowed_ips": [
+            "0.0.0.0/0"
+          ]
+        }
+      ],
+      "amnezia": {
+        "jc": ${AWG_JC3},
+        "jmin": ${AWG_JMIN3},
+        "jmax": ${AWG_JMAX3},
+        "s1": 0,
+        "s2": 0,
+        "h1": 1,
+        "h2": 2,
+        "h3": 3,
+        "h4": 4,
+        "i1": "${AWG_I1_3}"
+      }
+    },
+    {
+      "type": "wireguard",
+      "tag": "☁️ WARP Engage (${EP4_IP}:${EP4_PORT})",
+      "mtu": 1280,
+      "address": [
+        "${WARP_IPV4}/32"
+      ],
+      "private_key": "${PRIV_KEY}",
+      "peers": [
+        {
+          "address": "${EP4_IP}",
+          "port": ${EP4_PORT},
+          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+          "allowed_ips": [
+            "0.0.0.0/0"
+          ]
+        }
+      ],
+      "amnezia": {
+        "jc": ${AWG_JC4},
+        "jmin": ${AWG_JMIN4},
+        "jmax": ${AWG_JMAX4},
+        "s1": 0,
+        "s2": 0,
+        "h1": 1,
+        "h2": 2,
+        "h3": 3,
+        "h4": 4,
+        "i1": "${AWG_I1_4}"
+      }
+    }
+  ],
+  "masque": {
+    "type": "masque",
+    "tag": "☁️ WARP MASQUE (TCP/H2)",
+    "use_http2": true,
+    "use_l4_proxy": false,
+    "use_ipv6": false,
+    "profile": {
+      "detour": "DIRECT",
+      "id": "${REG_ID:-}",
+      "auth_token": "${REG_TOKEN:-}",
+      "license_key": "${WARP_LICENSE:-}"
+    },
+    "address": "${CF_IP1:-162.159.198.2}",
+    "port": 443,
+    "udp_timeout": "5m0s",
+    "udp_keepalive_period": "30s",
+    "reconnect_delay": "5s",
+    "handshake_timeout": "10s",
+    "congestion_controller": "bbr",
+    "tls": {
+      "server_name": "engage.cloudflareclient.com",
+      "insecure": false,
+      "fragment": true,
+      "fragment_fallback_delay": "500ms",
+      "record_fragment": true
+    }
+  }
+}
+WARP_EOF
+    chmod 600 "${WARP_NODES_FILE}.tmp.$$" 2>/dev/null || true
+    mv -f "${WARP_NODES_FILE}.tmp.$$" "$WARP_NODES_FILE"
+    chmod 600 "$WARP_NODES_FILE" 2>/dev/null || true
+    echo "${C_GRN}[✓] Гибридный пул WARP 2.0 (4 ноды UDP AWG: ${EP1}, ${EP2}, ${EP3}, ${EP4} + 1 нода TCP MASQUE H2) создан!${C_RES}"
     return 0
 }
 
-# Запись статической конфигурации сети в /etc/network/interfaces для Alpine Linux
-write_alpine_static_interfaces() {
-    A_IF="$1"
-    A_IP="$2"
-    A_GW="$3"
-    cat << NET_ALP > /etc/network/interfaces
-auto lo
-iface lo inet loopback
-
-auto ${A_IF}
-iface ${A_IF} inet static
-    address ${A_IP}
-    netmask 255.255.255.0
-    gateway ${A_GW}
-NET_ALP
-    return 0
-}
-
-# Безопасная смена LAN IP шлюза и/или IP основного роутера на Alpine Linux (с обновлением *.lan в AdGuard Home)
-apply_network_ips() {
-    TARGET_LAN_IP="$1"
-    TARGET_GW_IP="$2"
-
-    CUR_LAN_IP=$(get_current_lan_ip)
-    LAN_IF=$(get_lan_ifname)
+# Горячая перезагрузка всех активных провайдеров и мгновенный выбор лучшей ноды в Авто
+reload_singbox_api() {
+    if ! pgrep sing-box >/dev/null 2>&1; then
+        return 0
+    fi
     load_gateway_env
-
-    [ -z "$TARGET_LAN_IP" ] && TARGET_LAN_IP="$CUR_LAN_IP"
-    [ -z "$TARGET_GW_IP" ] && TARGET_GW_IP="$GW_IP"
-
-    if ! is_valid_ipv4 "$TARGET_LAN_IP"; then
-        echo "${C_RED}[X] Ошибка: Некорректный IPv4-адрес шлюза (${TARGET_LAN_IP})!${C_RES}"
-        return 1
+    P_LIST=""
+    if [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
+        P_LIST=$(jq -r '.providers[]?.tag // empty' "$SB_CONF" 2>/dev/null || true)
     fi
+    [ -z "$P_LIST" ] && P_LIST="custom_sub custom_sub_2 custom_sub_3 my_nodes"
 
-    if ! is_valid_ipv4 "$TARGET_GW_IP"; then
-        echo "${C_RED}[X] Ошибка: Некорректный IPv4-адрес основного роутера (${TARGET_GW_IP})!${C_RES}"
-        return 1
-    fi
+    for P_TAG in $P_LIST; do
+        curl -fsS -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
+            "http://127.0.0.1:9090/providers/proxies/${P_TAG}" >/dev/null 2>&1 || true
+    done
+    curl -g -fsS --connect-timeout 2 -m 7 -H "Authorization: Bearer ${ADMIN_PASS}" \
+        "http://127.0.0.1:9090/group/%E2%9A%A1%20%D0%90%D0%B2%D1%82%D0%BE%20%28%D0%A1%D0%B0%D0%BC%D1%8B%D0%B9%20%D0%B1%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9%29/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=6000" >/dev/null 2>&1 || true
+    return 0
+}
 
-    if [ "$TARGET_LAN_IP" = "$TARGET_GW_IP" ]; then
-        echo "${C_RED}[X] Ошибка: IP шлюза (${TARGET_LAN_IP}) не может совпадать с IP основного роутера (${TARGET_GW_IP})!${C_RES}"
-        return 1
-    fi
-
-    LAN_SUBNET="${TARGET_LAN_IP%.*}"
-    GW_SUBNET="${TARGET_GW_IP%.*}"
-    if [ "$LAN_SUBNET" != "$GW_SUBNET" ]; then
-        echo "${C_YEL}[!] Внимание: Подсеть шлюза (${LAN_SUBNET}.x) отличается от подсети роутера (${GW_SUBNET}.x)!${C_RES}"
-        printf "Введите IP основного роутера в новой подсети [Enter = %s.1 / отмена = n]: " "$LAN_SUBNET"
-        read -r FIX_GW < /dev/tty || true
-        FIX_GW=$(printf "%s" "$FIX_GW" | tr -d ' \t\r\n')
-        if [ "$FIX_GW" = "n" ] || [ "$FIX_GW" = "N" ]; then
-            echo "[i] Смена IP отменена."
-            return 1
+# Очистка ссылки на подписку от несовместимых с Sing-Box параметров fmt=xray/v2ray/best
+sanitize_sub_url_list() {
+    RAW_URLS="$1"
+    CLEAN_LIST=""
+    for U in $(printf "%s\n" "$RAW_URLS" | tr ' |,' '\n\n\n'); do
+        [ -z "$U" ] && continue
+        C_U=$(printf "%s" "$U" | sed -E 's/([?&])fmt=(best|xray|v2ray)(&|$)/\1/; s/[?&]$//')
+        if [ -z "$CLEAN_LIST" ]; then
+            CLEAN_LIST="$C_U"
+        else
+            CLEAN_LIST="${CLEAN_LIST} ${C_U}"
         fi
-        [ -z "$FIX_GW" ] && FIX_GW="${LAN_SUBNET}.1"
-        if ! is_valid_ipv4 "$FIX_GW" || [ "$FIX_GW" = "$TARGET_LAN_IP" ]; then
-            echo "${C_RED}[X] Некорректный или конфликтующий IP основного роутера (${FIX_GW}).${C_RES}"
-            return 1
-        fi
-        TARGET_GW_IP="$FIX_GW"
-    fi
+    done
+    printf "%s" "$CLEAN_LIST"
+    return 0
+}
 
-    GW_IP="$TARGET_GW_IP"
-    save_gateway_env
-    update_agh_gateway_ip "$GW_IP" "$TARGET_LAN_IP"
-    [ -f "$SB_CONF" ] && generate_singbox_config || true
+# Распределение ввода по 3 независимым слотам: Слот 1 (HTTP), Слот 2 (my_nodes.yaml), Слот 3 (WARP + MASQUE)
+apply_subscription_input() {
+    RAW_INPUT="$1"
+    mkdir -p "$SB_PROVIDERS_DIR"
+    case "$RAW_INPUT" in
+        *warp_nodes*|warp|WARP|amnezia|masque|free)
+            SUB_URL=""
+            USE_INITIAL_WARP="yes"
+            ;;
+        none|NONE|direct|DIRECT|off|OFF)
+            SUB_URL=""
+            USE_INITIAL_WARP="no"
+            ;;
+        http://*|https://*)
+            CLEAN_SUB_URL=$(sanitize_sub_url_list "$RAW_INPUT")
+            if [ "$CLEAN_SUB_URL" != "$RAW_INPUT" ]; then
+                echo "[i] Список подписок нормализован для совместимости с Sing-Box."
+            fi
+            SUB_URL="$CLEAN_SUB_URL"
+            USE_INITIAL_WARP="no"
+            ;;
+        vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|hysteria://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|xhttp://*|splithttp://*|socks5://*|trusttunnel://*|sudoku://*|call://*|naive+https://*|naive+quic://*|naive://*|snell://*|openvpn://*|ssh://*)
+            sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
+            format_uri_keys "$RAW_INPUT" >> "$CUSTOM_NODES_FILE"
+            SUB_URL=""
+            USE_INITIAL_WARP="no"
+            ;;
+        *)
+            SUB_URL="$RAW_INPUT"
+            USE_INITIAL_WARP="no"
+            ;;
+    esac
+    return 0
+}
 
-    write_alpine_static_interfaces "$LAN_IF" "$TARGET_LAN_IP" "$GW_IP"
-    if [ -f "$ALPINE_DHCP_CONF" ]; then
-        configure_smart_dhcp "on" >/dev/null 2>&1 || true
-    fi
+# Загрузка и установка веб-панели Zashboard с сохранением версии
+install_zashboard_ui() {
+    TARGET_UI_VER="${1:-}"
+    [ -z "$TARGET_UI_VER" ] && TARGET_UI_VER=$(fetch_latest_github_tag "$UI_REPO") || true
+    case "$TARGET_UI_VER" in v*) ;; *) TARGET_UI_VER="v3.30.0" ;; esac
 
-    cat << SW_ALP > /tmp/switch_lan_ip.sh
-#!/bin/sh
-sleep 1
-rc-service sing-box stop >/dev/null 2>&1 || true
-killall -9 udhcpc >/dev/null 2>&1 || true
-if [ "${TARGET_LAN_IP}" != "${CUR_LAN_IP}" ]; then
-    ip -4 addr flush dev ${LAN_IF} >/dev/null 2>&1 || true
-fi
-ip -4 addr replace ${TARGET_LAN_IP}/24 dev ${LAN_IF} >/dev/null 2>&1 || true
-ip link set ${LAN_IF} up >/dev/null 2>&1 || true
-ip -4 route replace default via ${GW_IP} dev ${LAN_IF} >/dev/null 2>&1 || true
-sleep 2
-nft -f ${ALPINE_NFT_CONF} >/dev/null 2>&1 || true
-rc-service sing-box start >/dev/null 2>&1 || true
-rc-service adguardhome restart >/dev/null 2>&1 || true
-rc-service caddy reload >/dev/null 2>&1 || rc-service caddy restart >/dev/null 2>&1 || true
-rc-service samba restart >/dev/null 2>&1 || true
-rc-service wsdd restart >/dev/null 2>&1 || true
-rc-service avahi-daemon restart >/dev/null 2>&1 || true
-rm -f /tmp/switch_lan_ip.sh
-SW_ALP
-    chmod +x /tmp/switch_lan_ip.sh
+    echo "Загрузка и установка веб-панели Zashboard ${TARGET_UI_VER}..."
+    rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
+    mkdir -p /tmp/sb_ui_extract
 
-    write_resolv_conf "nameserver 127.0.0.1
-nameserver ${GW_IP}
-nameserver 77.88.8.8"
-
-    ui_box_bottom
-    echo "${C_GRN}[✓] Сетевые настройки успешно сохранены (${OS_NAME}):${C_RES}"
-    echo " • Новый IP сервера (${LAN_IF}):   ${TARGET_LAN_IP} (маска 255.255.255.0)"
-    echo " • IP основного роутера:     ${GW_IP}"
-    echo " • Панель Sing-Box Extended: http://${TARGET_LAN_IP}:9090/ui (https://${DOM_ZASHBOARD})"
-    echo " • Панель AdGuard Home:      http://${TARGET_LAN_IP}:3000 (https://${DOM_ADGUARD})"
-    echo " • Локальные домены *.lan:   перенаправлены на ${TARGET_LAN_IP}"
-
-    if [ "$TARGET_LAN_IP" != "$CUR_LAN_IP" ]; then
-        ui_box_sep
-        echo "${C_YEL}[!] ВНИМАНИЕ: IP сервера изменился (${CUR_LAN_IP} -> ${TARGET_LAN_IP})!${C_RES}"
-        echo " 1. Переподключитесь по SSH: ssh root@${TARGET_LAN_IP}"
-        echo " 2. Обновите адрес шлюза/DNS на устройствах или в роутере на ${TARGET_LAN_IP}!"
-        ui_box_bottom
-        nohup /tmp/switch_lan_ip.sh >/dev/null 2>&1 &
+    if download_file "$UI_TAR_URL" "/tmp/sb_ui.tar.gz" && tar -xzf /tmp/sb_ui.tar.gz -C /tmp/sb_ui_extract 2>/dev/null; then
+        rm -rf "${SB_DIR}/ui"
+        mkdir -p "${SB_DIR}/ui"
+        cp -rf /tmp/sb_ui_extract/*/* "${SB_DIR}/ui/" 2>/dev/null || cp -rf /tmp/sb_ui_extract/* "${SB_DIR}/ui/"
+        [ -n "$TARGET_UI_VER" ] && echo "$TARGET_UI_VER" > "$UI_VER_FILE" || true
+        LATEST_UI_TAG="$TARGET_UI_VER"
+        rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
+        echo "${C_GRN}[✓] Веб-панель Zashboard ${TARGET_UI_VER} успешно установлена в ${SB_DIR}/ui.${C_RES}"
+        return 0
     else
-        ui_box_bottom
-        /tmp/switch_lan_ip.sh
+        rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
+        echo "${C_RED}[X] Ошибка загрузки или распаковки веб-панели Zashboard!${C_RES}"
+        return 1
+    fi
+}
+
+# Криптографическая проверка SHA-256 скачанного архива через GitHub Releases API
+verify_github_asset_sha256() {
+    REPO_NAME="$1"
+    ASSET_NAME="$2"
+    LOCAL_FILE="$3"
+    command -v sha256sum >/dev/null 2>&1 || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+
+    REL_JSON=$(curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO_NAME}/releases/latest" 2>/dev/null || true)
+    [ -z "$REL_JSON" ] && return 0
+
+    EXP_DIGEST=$(printf "%s" "$REL_JSON" | jq -r --arg name "$ASSET_NAME" '.assets[]? | select(.name == $name) | .digest // empty' 2>/dev/null | sed 's/^sha256://' | tr -d ' \t\r\n')
+    [ -z "$EXP_DIGEST" ] && return 0
+
+    ACT_DIGEST=$(sha256sum "$LOCAL_FILE" 2>/dev/null | awk '{print $1}' | tr -d ' \t\r\n')
+    if [ -n "$ACT_DIGEST" ] && [ "$ACT_DIGEST" != "$EXP_DIGEST" ]; then
+        echo "${C_RED}[X] КРИТИЧЕСКАЯ ОШИБКА БЕЗОПАСНОСТИ: Несовпадение SHA-256 для ${ASSET_NAME}!${C_RES}" >&2
+        echo "    Ожидался: ${EXP_DIGEST}" >&2
+        echo "    Получен:  ${ACT_DIGEST}" >&2
+        return 1
     fi
     return 0
 }
 
-# Проверка, включено ли автообновление и Watchdog в cron
-is_autoupdate_enabled() {
-    grep -q "/usr/bin/gateway autoupdate" "$CRON_FILE" 2>/dev/null
-}
+# Атомарное обновление бинарников Sing-Box Extended, AdGuard Home и Zashboard (с верификацией SHA-256)
+update_cores_only() {
+    CHECK_UI_UPDATE="${1:-no}"
+    detect_os
+    check_github_mirror
 
-is_watchdog_enabled() {
-    grep -q "/usr/bin/gateway watchdog" "$CRON_FILE" 2>/dev/null
-}
+    SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
+    case "$SB_TAG" in v*) ;; *) SB_TAG="v1.14.3-extended-2.7.3" ;; esac
+    LATEST_SB_TAG="$SB_TAG"
+    SB_VER_NO_V="${SB_TAG#v}"
 
-# Включение автообновления (ежедневно в 04:00 через crond)
-enable_autoupdate() {
-    mkdir -p /etc/crontabs
-    touch "$CRON_FILE"
-    sed -i '\|/usr/bin/gateway autoupdate|d' "$CRON_FILE" 2>/dev/null || true
-    echo "0 4 * * * /usr/bin/gateway autoupdate >${AUTOUPDATE_LOG} 2>&1" >> "$CRON_FILE"
-    service_ctl cron enable
-    service_ctl cron restart
-    return 0
-}
-
-# Отключение автообновления
-disable_autoupdate() {
-    if [ -f "$CRON_FILE" ]; then
-        sed -i '\|/usr/bin/gateway autoupdate|d' "$CRON_FILE" 2>/dev/null || true
+    INSTALLED_SB_VER=""
+    if [ -x /usr/bin/sing-box ]; then
+        RAW_V=$(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || true)
+        [ -n "$RAW_V" ] && INSTALLED_SB_VER="v${RAW_V#v}" || true
     fi
-    service_ctl cron reload
-    return 0
-}
 
-# Управление встроенным Watchdog (самоисцеление служб каждые 5 минут)
-enable_watchdog() {
-    mkdir -p /etc/crontabs
-    touch "$CRON_FILE"
-    sed -i '\|/usr/bin/gateway watchdog|d' "$CRON_FILE" 2>/dev/null || true
-    echo "*/5 * * * * /usr/bin/gateway watchdog >/dev/null 2>&1" >> "$CRON_FILE"
-    service_ctl cron enable
-    service_ctl cron restart
-    return 0
-}
-
-disable_watchdog() {
-    if [ -f "$CRON_FILE" ]; then
-        sed -i '\|/usr/bin/gateway watchdog|d' "$CRON_FILE" 2>/dev/null || true
+    if [ "$INSTALLED_SB_VER" = "$SB_TAG" ]; then
+        echo "${C_GRN}[✓] Ядро Sing-Box Extended ${INSTALLED_SB_VER} (${SB_ARCH}) актуально.${C_RES}"
+    else
+        echo "Загрузка Sing-Box Extended ${SB_TAG} (${SB_ARCH})..."
+        rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+        SB_ASSET="sing-box-${SB_VER_NO_V}-linux-${SB_ARCH}.tar.gz"
+        SB_URL="https://github.com/shtorm-7/sing-box-extended/releases/download/${SB_TAG}/${SB_ASSET}"
+        if download_file "$SB_URL" "/tmp/sing-box.tar.gz" && verify_github_asset_sha256 "shtorm-7/sing-box-extended" "$SB_ASSET" "/tmp/sing-box.tar.gz"; then
+            mkdir -p /tmp/sb_extract
+            if tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb_extract 2>/dev/null; then
+                SB_BIN=$(find /tmp/sb_extract -type f -name "sing-box" | head -n 1)
+                if [ -n "$SB_BIN" ] && [ -f "$SB_BIN" ]; then
+                    chmod +x "$SB_BIN"
+                    if "$SB_BIN" version >/dev/null 2>&1; then
+                        service_ctl sing-box stop
+                        mv -f "$SB_BIN" /usr/bin/sing-box
+                        echo "${C_GRN}[✓] Sing-Box Extended безопасно обновлен до ${SB_TAG}.${C_RES}"
+                    else
+                        echo "${C_RED}[X] Ошибка: скачанный бинарник sing-box поврежден, оставлена текущая версия.${C_RES}"
+                    fi
+                fi
+            fi
+            rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+        else
+            rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+            echo "${C_RED}[X] Не удалось скачать Sing-Box Extended ${SB_TAG}.${C_RES}"
+        fi
     fi
-    service_ctl cron reload
+
+    AGH_TAG=$(fetch_latest_github_tag "AdguardTeam/AdGuardHome")
+    case "$AGH_TAG" in v*) ;; *) AGH_TAG="v0.107.60" ;; esac
+    LATEST_AGH_TAG="$AGH_TAG"
+    INSTALLED_AGH_VER=""
+    if [ -x /usr/bin/AdGuardHome ]; then
+        INSTALLED_AGH_VER=$(/usr/bin/AdGuardHome --version 2>&1 | sed -n 's/.*version \(v[0-9.a-zA-Z_.-]*\).*/\1/p' | head -n 1 || true)
+    fi
+
+    if [ "$INSTALLED_AGH_VER" = "$AGH_TAG" ]; then
+        echo "${C_GRN}[✓] Ядро AdGuard Home ${INSTALLED_AGH_VER} актуально.${C_RES}"
+    else
+        echo "Загрузка AdGuard Home ${AGH_TAG}..."
+        rm -rf /tmp/agh.tar.gz /tmp/agh_extract
+        AGH_ASSET="AdGuardHome_linux_${AGH_ARCH}.tar.gz"
+        AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/${AGH_TAG}/${AGH_ASSET}"
+        if download_file "$AGH_URL" "/tmp/agh.tar.gz" && verify_github_asset_sha256 "AdguardTeam/AdGuardHome" "$AGH_ASSET" "/tmp/agh.tar.gz"; then
+            mkdir -p /tmp/agh_extract
+            if tar -xzf /tmp/agh.tar.gz -C /tmp/agh_extract 2>/dev/null && [ -f /tmp/agh_extract/AdGuardHome/AdGuardHome ]; then
+                chmod +x /tmp/agh_extract/AdGuardHome/AdGuardHome
+                if /tmp/agh_extract/AdGuardHome/AdGuardHome --version >/dev/null 2>&1; then
+                    service_ctl adguardhome stop
+                    mv -f /tmp/agh_extract/AdGuardHome/AdGuardHome /usr/bin/AdGuardHome
+                    echo "${C_GRN}[✓] AdGuard Home безопасно обновлен до ${AGH_TAG}.${C_RES}"
+                else
+                    echo "${C_RED}[X] Ошибка проверки бинарника AdGuard Home, оставлена текущая версия.${C_RES}"
+                fi
+            fi
+            rm -rf /tmp/agh.tar.gz /tmp/agh_extract
+        else
+            rm -rf /tmp/agh.tar.gz /tmp/agh_extract
+            echo "${C_RED}[X] Не удалось скачать AdGuard Home ${AGH_TAG}.${C_RES}"
+        fi
+    fi
+
+    if [ "$CHECK_UI_UPDATE" = "yes" ]; then
+        UI_TAG=$(fetch_latest_github_tag "$UI_REPO")
+        case "$UI_TAG" in v*) ;; *) UI_TAG="v3.30.0" ;; esac
+        LATEST_UI_TAG="$UI_TAG"
+        INSTALLED_UI_VER=""
+        [ -f "$UI_VER_FILE" ] && INSTALLED_UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
+
+        if [ -f "${SB_DIR}/ui/index.html" ] && [ -n "$UI_TAG" ] && [ "$INSTALLED_UI_VER" = "$UI_TAG" ]; then
+            echo "${C_GRN}[✓] Веб-панель Zashboard ${INSTALLED_UI_VER} актуальна.${C_RES}"
+        else
+            install_zashboard_ui "$UI_TAG" || true
+        fi
+    fi
+
+    cat << VC_EOF > "$VER_CACHE_FILE" 2>/dev/null || true
+LATEST_SB_TAG='${LATEST_SB_TAG}'
+LATEST_AGH_TAG='${LATEST_AGH_TAG}'
+LATEST_UI_TAG='${LATEST_UI_TAG}'
+VC_EOF
     return 0
 }
 
-# Проверка: смонтирован ли сейчас внешний диск в /srv/storage
+# Создание системных служб автозапуска Alpine OpenRC (с защитой сетевого шлюза от OOM-killer)
+setup_init_scripts() {
+    calc_hardware_limits
+
+    cat << INIT_SB_ALP > /etc/init.d/sing-box
+#!/sbin/openrc-run
+name="sing-box"
+description="Sing-Box Extended Gateway"
+supervisor="supervise-daemon"
+command="/usr/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json -D /etc/sing-box"
+output_log="${SB_LOG_FILE}"
+error_log="${SB_LOG_FILE}"
+rc_ulimit="-n 65535"
+rc_oom_score_adj="-500"
+respawn_delay=3
+respawn_max=10
+retry="TERM/10/KILL/5"
+export GOGC=50
+export GOMEMLIMIT=${SB_GOMEMLIMIT}
+export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+export ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true
+
+depend() {
+    need net
+    after nftables
+}
+
+start_pre() {
+    mkdir -p /dev/net
+    [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
+    : > "${SB_LOG_FILE}" 2>/dev/null || true
+}
+INIT_SB_ALP
+    chmod +x /etc/init.d/sing-box
+
+    cat << INIT_AGH_ALP > /etc/init.d/adguardhome
+#!/sbin/openrc-run
+name="adguardhome"
+description="AdGuard Home DNS Filter"
+supervisor="supervise-daemon"
+command="/usr/bin/AdGuardHome"
+command_args="-c /etc/AdGuardHome/AdGuardHome.yaml -w /etc/AdGuardHome --no-check-update"
+rc_ulimit="-n 65535"
+rc_oom_score_adj="-500"
+respawn_delay=3
+respawn_max=10
+retry="TERM/10/KILL/5"
+export GOGC=50
+export GOMEMLIMIT=${AGH_GOMEMLIMIT}
+
+depend() {
+    need net
+    after sing-box
+}
+INIT_AGH_ALP
+    chmod +x /etc/init.d/adguardhome
+
+    service_ctl sing-box enable
+    service_ctl sing-box restart
+    sleep 2
+    service_ctl adguardhome enable
+    service_ctl adguardhome restart
+    return 0
+}
+
+# ==============================================================================
+# Ядро подсистемы Homelab: Реестр модулей, Единое хранилище /srv/storage,
+# Центральный HTTPS/PKI прокси Caddy (*.lan) и Файловый сервер Samba (WSDD+Avahi)
+# ==============================================================================
+
+# Активация официального репозитория community в Alpine Linux
 is_external_storage_mounted() {
     awk -v mp="${STORAGE_ROOT:-/srv/storage}" '$2 == mp {found=1} END {exit !found}' /proc/mounts 2>/dev/null
 }
@@ -3515,1366 +3920,6 @@ safe_power_action() {
 }
 
 # Команда `gateway doctor` / `gateway fix`: умная комплексная авто-починка сервера одной командой
-run_gateway_doctor() {
-    set +e
-    detect_os
-    load_gateway_env
-    ui_banner "GATEWAY DOCTOR // АВТОМАТИЧЕСКАЯ ДИАГНОСТИКА И ПОЧИНКА"
-    ui_box_top "🩺 ПРОТОКОЛ САМОИСЦЕЛЕНИЯ СИСТЕМЫ (DOCTOR 2.0)"
-
-    ui_step_progress 1 6 "Проверка целостности конфигов, PID-блокировок и баз SQLite после сбоя питания..."
-    rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
-    check_and_recover_power_loss_state
-    rm -f "$POWER_LOSS_FLAG" 2>/dev/null || true
-
-    ui_step_progress 2 6 "Подгрузка ядерных модулей (tun, tcp_bbr, nftables, dm_crypt) и настройка sysctl..."
-    ensure_alpine_modules
-    [ -f /etc/sysctl.d/99-gateway-forward.conf ] && sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf >/dev/null 2>&1 || true
-
-    ui_step_progress 3 6 "Проверка DNS-резолвера (/etc/resolv.conf) и таблиц файрвола nftables..."
-    write_resolv_conf "nameserver 127.0.0.1
-nameserver ${GW_IP:-192.168.1.1}
-nameserver 77.88.8.8"
-    sync_user_domain_rulesets
-    sync_dns_firewall "yes" "keep" >/dev/null 2>&1 || true
-
-    ui_step_progress 4 6 "Проверка внешнего накопителя (${STORAGE_ROOT}), LUKS2 и прав доступа (${MEDIA_GROUP})..."
-    if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] && ! is_external_storage_mounted; then
-        if try_auto_unlock_and_mount_storage; then
-            ui_ok_msg "Внешний накопитель автоматически разблокирован, проверен fsck и смонтирован!"
-        else
-            ui_warn_box "Внешний накопитель (${STORAGE_ROOT}) ожидает ручного ввода пароля LUKS2 или подключения кабеля." \
-                        "Подключите диск и выполните команду: gateway unlock"
-        fi
-    fi
-    if is_storage_mount_ready; then
-        sync_all_homelab_permissions >/dev/null 2>&1 || true
-    fi
-
-    ui_step_progress 5 6 "Валидация и перезапуск служб Sing-Box Extended, AdGuard Home и Conntrack..."
-    if [ ! -s "$SB_CONF" ] || ! check_singbox_config; then
-        generate_singbox_config
-    fi
-    service_ctl sing-box restart
-    sleep 2
-    service_ctl adguardhome restart
-    conntrack -F >/dev/null 2>&1 || true
-    reload_singbox_api
-
-    ui_step_progress 6 6 "Проверка и запуск активных модулей Homelab..."
-    if is_module_enabled "caddy"; then
-        reload_caddy_safe >/dev/null 2>&1 || true
-    fi
-    if is_storage_mount_ready; then
-        start_storage_dependent_services
-    else
-        stop_storage_dependent_services
-    fi
-    check_and_heal_lxc_doctor
-    backup_gateway_state
-    ui_ok_msg "Авто-починка (gateway doctor) успешно завершена!"
-    ui_box_bottom
-    run_self_test
-    return 0
-}
-
-# Фоновая проверка здоровья служб шлюза и активных модулей Homelab (Watchdog Auto-Healer + Mount Guard)
-run_watchdog() {
-    set +e
-    acquire_gateway_lock "watchdog" || return 0
-    trap 'release_gateway_lock' EXIT INT TERM HUP
-    detect_os
-    rotate_gateway_logs
-    check_and_recover_power_loss_state
-    load_gateway_env
-
-    if [ ! -f "$SB_CONF" ]; then
-        release_gateway_lock
-        trap - EXIT INT TERM HUP
-        return 0
-    fi
-    ensure_alpine_modules
-    RECOVERED_MSG=""
-
-    if ! pgrep sing-box >/dev/null 2>&1 || ! ip link show singbox-tun >/dev/null 2>&1; then
-        logger -t gateway-watchdog "Sing-Box or singbox-tun down, restarting service..." 2>/dev/null || true
-        if ! check_singbox_config && [ -s "${STATE_BAK_DIR}/config.json" ]; then
-            cp -f "${STATE_BAK_DIR}/config.json" "$SB_CONF" 2>/dev/null || true
-        fi
-        service_ctl sing-box restart
-        sleep 2
-        RECOVERED_MSG="⚡ [Авто-Доктор] На сервере ($(get_current_lan_ip)) перезапущен туннель Sing-Box."
-    fi
-
-    if ! pgrep AdGuardHome >/dev/null 2>&1; then
-        logger -t gateway-watchdog "AdGuardHome down, restarting service..." 2>/dev/null || true
-        service_ctl adguardhome restart
-        RECOVERED_MSG="${RECOVERED_MSG}
-⚡ [Авто-Доктор] Перезапущена служба AdGuard Home."
-    fi
-
-    # Caddy и Vaultwarden не зависят от внешнего USB-диска и всегда поддерживаются в работе
-    for CORE_HL in caddy vaultwarden; do
-        if is_module_enabled "$CORE_HL"; then
-            C_SVC=$(get_module_field "$CORE_HL" 3)
-            if [ -n "$C_SVC" ] && [ -x "/etc/init.d/${C_SVC}" ] && ! rc-service "$C_SVC" status >/dev/null 2>&1; then
-                rc-service "$C_SVC" restart >/dev/null 2>&1 || true
-            fi
-        fi
-    done
-
-    # Mount Guard для внешнего накопителя /srv/storage после сбоя питания
-    if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] && ! is_external_storage_mounted; then
-        if try_auto_unlock_and_mount_storage; then
-            RECOVERED_MSG="${RECOVERED_MSG}
-🔒 [Авто-Доктор] Внешний накопитель (${STORAGE_ROOT}) автоматически разблокирован и смонтирован после перезагрузки."
-        else
-            # Удерживаем зависимые от диска сервисы в безопасной паузе, чтобы не забить корневую флешку
-            stop_storage_dependent_services
-            NOW_TS=$(date +%s 2>/dev/null || echo "0")
-            LAST_ALERT_TS=0
-            [ -f "$STORAGE_ALERT_CACHE" ] && LAST_ALERT_TS=$(cat "$STORAGE_ALERT_CACHE" 2>/dev/null | tr -d ' \t\r\n' || echo "0")
-            case "$LAST_ALERT_TS" in ''|*[!0-9]*) LAST_ALERT_TS=0 ;; esac
-            if [ $((NOW_TS - LAST_ALERT_TS)) -ge 3600 ]; then
-                echo "$NOW_TS" > "$STORAGE_ALERT_CACHE" 2>/dev/null || true
-                send_telegram_msg "⚡ Сервер ($(get_current_lan_ip)) перезагрузился после сбоя питания. Сетевой шлюз (Sing-Box + AdGuard) работает, но внешний диск (${STORAGE_ROOT}) ожидает подключения или разблокировки (выполните: gateway unlock)" >/dev/null 2>&1 || true
-            fi
-            if [ -n "$RECOVERED_MSG" ]; then
-                send_telegram_msg "$RECOVERED_MSG" >/dev/null 2>&1 || true
-            fi
-            release_gateway_lock
-            trap - EXIT INT TERM HUP
-            return 0
-        fi
-    fi
-
-    # Проверка активных служб Homelab из реестра modules.state (только когда диск смонтирован и готов)
-    if [ -f "$HOMELAB_STATE" ] && is_storage_mount_ready; then
-        while IFS='|' read -r M_ID M_EN M_SVC _REST; do
-            case "$M_ID" in ''|\#*) continue ;; esac
-            [ "$M_EN" = "yes" ] || continue
-            [ -z "$M_SVC" ] && continue
-            if [ -x "/etc/init.d/${M_SVC}" ] && ! rc-service "$M_SVC" status >/dev/null 2>&1; then
-                logger -t gateway-watchdog "Homelab module ${M_ID} (${M_SVC}) down, restarting..." 2>/dev/null || true
-                rc-service "$M_SVC" restart >/dev/null 2>&1 || true
-                RECOVERED_MSG="${RECOVERED_MSG}
-⚡ [Авто-Доктор Homelab] Перезапущен модуль ${M_ID} (${M_SVC})."
-            fi
-        done < "$HOMELAB_STATE"
-    fi
-
-    if [ -n "$RECOVERED_MSG" ]; then
-        send_telegram_msg "$RECOVERED_MSG" >/dev/null 2>&1 || true
-    fi
-    release_gateway_lock
-    trap - EXIT INT TERM HUP
-    return 0
-}
-
-# Фоновая задача автообновления для cron (с эксклюзивной блокировкой против гонки с Watchdog в 04:00)
-run_autoupdate() {
-    set +e
-    WAIT_LCK=0
-    while ! acquire_gateway_lock "autoupdate"; do
-        sleep 1
-        WAIT_LCK=$((WAIT_LCK + 1))
-        [ "$WAIT_LCK" -ge 15 ] && break
-    done
-    trap 'release_gateway_lock' EXIT INT TERM HUP
-    detect_os
-    echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Запуск автообновления шлюза и Homelab (${OS_NAME}) ==="
-    update_cores_only "yes"
-    if ! pgrep sing-box >/dev/null 2>&1; then
-        service_ctl sing-box start
-    fi
-    if ! pgrep AdGuardHome >/dev/null 2>&1; then
-        service_ctl adguardhome start
-    fi
-    reload_singbox_api
-    rotate_gateway_logs
-    send_telegram_msg "🔄 [Автообновление 04:00] Сервер (${OS_NAME} | $(get_current_lan_ip)) проверил обновления. Текущие версии: Sing-Box ${LATEST_SB_TAG}, AdGuard ${LATEST_AGH_TAG}." >/dev/null 2>&1 || true
-    echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Автообновление завершено ==="
-    release_gateway_lock
-    trap - EXIT INT TERM HUP
-    return 0
-}
-
-# Получение последнего тега релиза с GitHub
-fetch_latest_github_tag() {
-    REPO="$1"
-    TAG=$(curl -fsSL --curves X25519:P-256 --connect-timeout 2 -m 3 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name":' | head -n 1 | cut -d'"' -f4 || true)
-    if [ -z "$TAG" ]; then
-        TAG=$(curl -fsSLI --curves X25519:P-256 --connect-timeout 2 -m 3 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d '\r\n' || true)
-        [ "$TAG" = "latest" ] && TAG="" || true
-    fi
-    printf "%s" "$TAG"
-    return 0
-}
-
-# Мгновенное чтение кэша версий из /tmp (чтобы меню открывалось за 0.01 сек без паузы!)
-refresh_remote_versions() {
-    FORCE_FETCH="${1:-no}"
-    if [ "$FORCE_FETCH" != "yes" ] && [ -f "$VER_CACHE_FILE" ]; then
-        # shellcheck disable=SC1090
-        . "$VER_CACHE_FILE" 2>/dev/null || true
-        return 0
-    fi
-
-    LATEST_SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
-    LATEST_AGH_TAG=$(fetch_latest_github_tag "AdguardTeam/AdGuardHome")
-    if [ -f "${SB_DIR}/ui/index.html" ]; then
-        LATEST_UI_TAG=$(fetch_latest_github_tag "$UI_REPO")
-        if [ ! -f "$UI_VER_FILE" ] && [ -n "$LATEST_UI_TAG" ]; then
-            echo "$LATEST_UI_TAG" > "$UI_VER_FILE"
-        fi
-    fi
-
-    cat << VC_EOF > "$VER_CACHE_FILE" 2>/dev/null || true
-LATEST_SB_TAG='${LATEST_SB_TAG}'
-LATEST_AGH_TAG='${LATEST_AGH_TAG}'
-LATEST_UI_TAG='${LATEST_UI_TAG}'
-VC_EOF
-    return 0
-}
-
-# Отрисовка телеметрии и статуса шлюза / стека Homelab в шапке главного меню (Spacecraft Dashboard)
-print_gateway_header() {
-    load_gateway_env
-    calc_hardware_limits
-    LAN_IP_NOW=$(get_current_lan_ip)
-    LAN_IF_NOW=$(get_lan_ifname)
-
-    if pgrep sing-box >/dev/null 2>&1; then
-        S_BADGE=$(ui_badge "on" "SING-BOX: АКТИВЕН")
-    else
-        S_BADGE=$(ui_badge "err" "SING-BOX: СТОП")
-    fi
-
-    if [ -x /usr/bin/sing-box ]; then
-        S_VER_RAW=$(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || true)
-        [ -n "$S_VER_RAW" ] && S_VER="v${S_VER_RAW#v}" || S_VER="неизвестно"
-    else
-        S_VER="не установлен"
-    fi
-
-    if [ -n "$LATEST_SB_TAG" ] && [ "$S_VER" != "не установлен" ]; then
-        if [ "$S_VER" = "$LATEST_SB_TAG" ]; then
-            S_VER_INFO="${S_VER} ${C_DIM}(актуальна)${C_RES}"
-        else
-            S_VER_INFO="${S_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_SB_TAG}!${C_RES}"
-        fi
-    else
-        S_VER_INFO="${S_VER}"
-    fi
-
-    if pgrep AdGuardHome >/dev/null 2>&1; then
-        A_BADGE=$(ui_badge "on" "ADGUARD: АКТИВЕН")
-    else
-        A_BADGE=$(ui_badge "err" "ADGUARD: СТОП")
-    fi
-
-    if [ -x /usr/bin/AdGuardHome ]; then
-        A_VER=$(/usr/bin/AdGuardHome --version 2>&1 | sed -n 's/.*version \(v[0-9.a-zA-Z_.-]*\).*/\1/p' | head -n 1 || true)
-        [ -z "$A_VER" ] && A_VER="установлен"
-    else
-        A_VER="не установлен"
-    fi
-
-    if [ -n "$LATEST_AGH_TAG" ] && [ "$A_VER" != "не установлен" ]; then
-        if [ "$A_VER" = "$LATEST_AGH_TAG" ]; then
-            A_VER_INFO="${A_VER} ${C_DIM}(актуальна)${C_RES}"
-        else
-            A_VER_INFO="${A_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_AGH_TAG}!${C_RES}"
-        fi
-    else
-        A_VER_INFO="${A_VER}"
-    fi
-
-    SUB_CNT=$(count_sub_urls)
-    MY_CNT=$(count_my_nodes)
-    if [ "$SUB_CNT" -gt 1 ]; then
-        P_BADGE=$(ui_badge "info" "МУЛЬТИ-САБ: ${SUB_CNT}")
-        P_INFO="подписок: ${SUB_CNT} шт. | ключей URI: ${MY_CNT}"
-    elif [ "$SUB_CNT" -eq 1 ]; then
-        P_BADGE=$(ui_badge "info" "ПОДПИСКА HTTP")
-        P_INFO="${SUB_URL}"
-    elif [ "$MY_CNT" -gt 0 ]; then
-        P_BADGE=$(ui_badge "info" "КЛЮЧИ URI: ${MY_CNT}")
-        P_INFO="активно в my_nodes.yaml: ${MY_CNT} шт."
-    elif is_warp_enabled; then
-        P_BADGE=$(ui_badge "on" "ТОЛЬКО WARP 2.0")
-        P_INFO="гибридный Amnezia WARP 2.0 + MASQUE H2"
-    else
-        P_BADGE=$(ui_badge "warn" "РЕЖИМ DIRECT")
-        P_INFO="прокси не заданы (весь трафик напрямую)"
-    fi
-
-    if is_warp_enabled; then
-        W_BADGE=$(ui_badge "on" "WARP 2.0: ON")
-        if [ -n "${WARP_LICENSE:-}" ]; then
-            W_INFO="4 ноды AWG WARP+ + MASQUE TCP/H2"
-        else
-            W_INFO="4 ноды AWG 2.0 + MASQUE TCP/H2"
-        fi
-    else
-        W_BADGE=$(ui_badge "off" "WARP 2.0: OFF")
-        W_INFO="можно включить бесплатно в п. 2"
-    fi
-
-    if [ -f "${SB_DIR}/ui/index.html" ]; then
-        UI_VER=""
-        [ -f "$UI_VER_FILE" ] && UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
-        [ -z "$UI_VER" ] && UI_VER="установлена"
-        UI_BADGE=$(ui_badge "on" "ZASHBOARD")
-        if [ -n "$LATEST_UI_TAG" ] && [ "$UI_VER" != "установлена" ] && [ "$UI_VER" != "$LATEST_UI_TAG" ]; then
-            UI_VER_INFO="${UI_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_UI_TAG}!${C_RES}"
-        else
-            UI_VER_INFO="${UI_VER}"
-        fi
-    else
-        UI_BADGE=$(ui_badge "err" "UI: НЕТ")
-        UI_VER_INFO="не установлена"
-    fi
-
-    if is_killswitch_enabled; then
-        KS_BADGE=$(ui_badge "info" "KILL-SWITCH: ON")
-        KS_INFO="строгая блокировка мимо singbox-tun (${LAN_IF_NOW})"
-    else
-        KS_BADGE=$(ui_badge "on" "FIREWALL: GUARD")
-        KS_INFO="блок IPv6 + DoT/853 + перехват DNS :53 (${LAN_IF_NOW})"
-    fi
-
-    is_watchdog_enabled && WD_TXT="${C_GRN}● ВКЛ${C_RES}" || WD_TXT="${C_DIM}○ ВЫКЛ${C_RES}"
-    is_telegram_configured && TG_TXT="${C_GRN}● ВКЛ${C_RES}" || TG_TXT="${C_DIM}○ ВЫКЛ${C_RES}"
-    is_dhcp_server_enabled && DHCP_TXT="${C_GRN}● ВКЛ${C_RES}" || DHCP_TXT="${C_DIM}○ ВЫКЛ${C_RES}"
-    is_autoupdate_enabled && AU_BADGE=$(ui_badge "on" "AUTO-UPD: 04:00") || AU_BADGE=$(ui_badge "off" "AUTO-UPD: РУЧНОЙ")
-
-    RAM_PCT=$(get_ram_usage_pct)
-    RAM_USED=$(get_ram_used_mb)
-    RAM_BAR=$(ui_progress_bar "$RAM_PCT" 10)
-
-    DISK_PCT=$(get_disk_usage_pct "$STORAGE_ROOT")
-    DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
-    DISK_FREE_TXT=$(df -h "${STORAGE_ROOT:-/}" 2>/dev/null | awk 'NR==2 {print $4 " своб. из " $2}' || echo "н/д")
-    DISK_BADGE=$(get_storage_disk_badge)
-
-    HL_ACT_CNT=$(count_enabled_homelab_modules)
-    if [ "$HL_ACT_CNT" -gt 0 ]; then
-        HL_BADGE=$(ui_badge "on" "HOMELAB: ${HL_ACT_CNT}/9")
-    else
-        HL_BADGE=$(ui_badge "off" "HOMELAB: 0/9")
-    fi
-
-    ui_box_top "⚡ ПРИБОРНАЯ ПАНЕЛЬ ТЕЛЕМЕТРИИ ШЛЮЗА И HOMELAB (${OS_NAME})"
-    ui_box_row "Сеть LAN:     ${C_BLD}${LAN_IF_NOW}: ${LAN_IP_NOW}${C_RES} ▸ Роутер: ${C_CYN}${GW_IP}${C_RES} │ Умный DHCP: ${DHCP_TXT}"
-    ui_box_row "Загрузка ОЗУ: ${RAM_BAR} (${RAM_USED}/${TOTAL_RAM_MB} МБ, лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
-    ui_box_row "Накопитель:   ${DISK_BAR} (${DISK_FREE_TXT}) ▸ ${C_CYN}${DISK_BADGE}${C_RES}"
-    ui_box_sep "СТАТУС ЯДЕР И СЛУЖБ"
-    ui_box_row "Sing-Box Ext: ${S_BADGE} ${S_VER_INFO} │ Веб-панель: ${UI_BADGE} ${UI_VER_INFO}"
-    ui_box_row "AdGuard Home: ${A_BADGE} ${A_VER_INFO} (DNS :53 + *.lan Rewrites)"
-    ui_box_row "Основной пул: ${P_BADGE} ${P_INFO}"
-    ui_box_row "Amnezia WARP: ${W_BADGE} ${W_INFO}"
-    ui_box_row "Защита сети:  ${KS_BADGE} ${KS_INFO}"
-    ui_box_row "Автономность: ${AU_BADGE} │ Watchdog: ${WD_TXT} │ Telegram: ${TG_TXT} │ Стек: ${HL_BADGE}"
-
-    if [ -f "$POWER_LOSS_FLAG" ]; then
-        PL_TIME=$(cat "$POWER_LOSS_FLAG" 2>/dev/null || echo "недавно")
-        ui_box_sep "ПРЕДУПРЕЖДЕНИЕ ПИТАНИЯ"
-        ui_box_row "${C_YEL}▲ Зафиксировано авто-восстановление после сбоя питания (${PL_TIME}). Рекомендуется: gateway doctor${C_RES}"
-    fi
-    if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] && ! is_external_storage_mounted; then
-        ui_box_sep "СТАТУС ВНЕШНЕГО ДИСКА LUKS2"
-        ui_box_row "${C_YEL}▲ Внешний накопитель ожидает разблокировки! Выполните в терминале: ${C_BLD}gateway unlock${C_RES}"
-    fi
-    ui_box_bottom
-    return 0
-}
-
-# Проверка прямого доступа к GitHub (с защитой от фрагментации TLS 1.3 Kyber)
-check_github_mirror() {
-    TEST_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/private.srs"
-    if curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null || \
-       curl -fsSL --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null; then
-        GH_PROXY=""
-        return 0
-    fi
-    for MIRROR in "https://gh-proxy.com/" "https://ghproxy.net/"; do
-        if curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null "${MIRROR}${TEST_URL}" 2>/dev/null; then
-            echo "${C_YEL}[!] Прямой доступ к GitHub ограничен, включено зеркало: ${MIRROR}${C_RES}"
-            GH_PROXY="$MIRROR"
-            return 0
-        fi
-    done
-    GH_PROXY=""
-    return 0
-}
-
-# Универсальная загрузка файла с каскадным фоллбэком на зеркала GitHub
-download_file() {
-    DL_URL="$1"
-    DL_OUT="$2"
-    for PREFIX in "$GH_PROXY" "" "https://gh-proxy.com/" "https://ghproxy.net/"; do
-        if curl --curves X25519:P-256 --retry 2 --connect-timeout 5 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null || \
-           curl --retry 2 --connect-timeout 5 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Инициализация пользовательских списков и файлов провайдеров
-init_user_lists() {
-    mkdir -p "$SB_RULES_DIR" "$SB_PROVIDERS_DIR" "$HOMELAB_DIR" "$HOMELAB_LIB_DIR"
-    chmod 755 "$HOMELAB_LIB_DIR" 2>/dev/null || true
-    [ -f "$USER_DIRECT_FILE" ] || printf "+.localdomain\n+.lan\n" > "$USER_DIRECT_FILE"
-    grep -qxF "+.lan" "$USER_DIRECT_FILE" 2>/dev/null || echo "+.lan" >> "$USER_DIRECT_FILE"
-    [ -f "$USER_PROXY_FILE" ] || echo "+.chatgpt.com" > "$USER_PROXY_FILE"
-    [ -f "$USER_BYPASS_IPS" ] || : > "$USER_BYPASS_IPS"
-    [ -f "$USER_FORCE_PROXY_IPS" ] || : > "$USER_FORCE_PROXY_IPS"
-    [ -s "$CUSTOM_NODES_FILE" ] || echo "proxies: []" > "$CUSTOM_NODES_FILE"
-    [ -s "$WARP_NODES_FILE" ] || echo '{"outbounds": []}' > "$WARP_NODES_FILE"
-    sync_user_domain_rulesets
-    return 0
-}
-
-# Безопасное разделение нескольких URI-ключей (включая протоколы sing-box-extended 2026)
-format_uri_keys() {
-    printf "%s\n" "$1" | tr -d '\r' | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|hysteria|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5|trusttunnel|sudoku|call|naive\+https|naive\+quic|naive|snell|openvpn|ssh):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
-    return 0
-}
-
-# Живой сканер Anycast-узлов Cloudflare WARP с сортировкой по минимальному RTT (в обход singbox-tun)
-scan_best_warp_endpoints() {
-    CANDIDATES="188.114.98.224:854 188.114.97.1:500 162.159.192.1:4500 188.114.99.224:1002 162.159.195.1:2408 188.114.96.1:1701 162.159.193.1:500 188.114.97.3:4500"
-    LAN_DEV_SCAN=$(get_lan_ifname)
-
-    if [ -n "$LAN_DEV_SCAN" ] && ip link show "$LAN_DEV_SCAN" >/dev/null 2>&1; then
-        PING_CMD="ping -I ${LAN_DEV_SCAN} -c 1 -W 1"
-    else
-        PING_CMD="ping -c 1 -W 1"
-    fi
-
-    RTT_TMP="/tmp/warp_rtt_scan.$$"
-    : > "$RTT_TMP"
-
-    for EP in $CANDIDATES; do
-        EP_IP="${EP%:*}"
-        P_OUT=$($PING_CMD "$EP_IP" 2>/dev/null || true)
-        if printf "%s" "$P_OUT" | grep -q "time="; then
-            RTT_VAL=$(printf "%s" "$P_OUT" | sed -n 's/.*time=\([0-9.]*\).*/\1/p' | head -n 1)
-            RTT_INT="${RTT_VAL%.*}"
-            [ -z "$RTT_INT" ] && RTT_INT="999"
-            printf "%04d %s\n" "$RTT_INT" "$EP" >> "$RTT_TMP"
-        fi
-    done
-
-    ALIVE_LIST=""
-    ALIVE_CNT=0
-    if [ -s "$RTT_TMP" ]; then
-        for EP in $(sort -n "$RTT_TMP" | awk '{print $2}'); do
-            ALIVE_LIST="${ALIVE_LIST} ${EP}"
-            ALIVE_CNT=$((ALIVE_CNT + 1))
-            [ "$ALIVE_CNT" -ge 4 ] && break
-        done
-    fi
-    rm -f "$RTT_TMP"
-
-    for EP in $CANDIDATES; do
-        [ "$ALIVE_CNT" -ge 4 ] && break
-        case " $ALIVE_LIST " in
-            *" $EP "*) ;;
-            *)
-                ALIVE_LIST="${ALIVE_LIST} ${EP}"
-                ALIVE_CNT=$((ALIVE_CNT + 1))
-                ;;
-        esac
-    done
-
-    printf "%s" "$ALIVE_LIST" | sed 's/^[[:space:]]*//'
-    return 0
-}
-
-# Автоматическая бесплатная генерация гибридного Amnezia WARP 2.0 (4 UDP AWG + 1 TCP MASQUE H2 + WARP+)
-generate_amnezia_warp() {
-    OPT_LIC="${1:-}"
-    mkdir -p "$SB_PROVIDERS_DIR"
-    [ -z "${GW_IP:-}" ] && load_gateway_env || true
-    [ -n "$OPT_LIC" ] && WARP_LICENSE="$OPT_LIC" || true
-
-    if ! command -v wg >/dev/null 2>&1; then
-        echo "Установка генератора ключей wireguard-tools..."
-        apk update >/dev/null 2>&1 || true
-        apk add wireguard-tools-wg >/dev/null 2>&1 || apk add wireguard-tools >/dev/null 2>&1 || true
-    fi
-
-    PRIV_KEY=""
-    PUB_KEY=""
-    if command -v wg >/dev/null 2>&1; then
-        PRIV_KEY=$(wg genkey 2>/dev/null || true)
-        [ -n "$PRIV_KEY" ] && PUB_KEY=$(printf "%s" "$PRIV_KEY" | wg pubkey 2>/dev/null || true) || true
-    fi
-
-    WARP_IPV4=""
-    REG_ID=""
-    REG_TOKEN=""
-    REG_OK="no"
-
-    if [ -n "$PUB_KEY" ]; then
-        TOS_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-        REG_PAYLOAD="{\"key\":\"${PUB_KEY}\",\"install_id\":\"\",\"warp_enabled\":true,\"tos\":\"${TOS_DATE}\",\"type\":\"Android\",\"locale\":\"en_US\"}"
-        echo "Бесплатная регистрация личного аккаунта Cloudflare WARP (API 2026)..."
-
-        for CURL_OPT in \
-            "" \
-            "-x http://127.0.0.1:7890" \
-            "--connect-to api.devices.cloudflare.com:443:104.24.4.6:443" \
-            "--connect-to api.devices.cloudflare.com:443:104.18.0.6:443" \
-            "--connect-to api.devices.cloudflare.com:443:162.159.137.105:443" \
-            "--connect-to api.devices.cloudflare.com:443:162.159.138.105:443" \
-            "--connect-to api.devices.cloudflare.com:443:104.16.80.230:443"
-        do
-            # shellcheck disable=SC2086
-            RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 $CURL_OPT \
-                -H "User-Agent: okhttp/3.12.1" \
-                -H "Content-Type: application/json" \
-                -X POST "https://api.devices.cloudflare.com/v0a4471/reg" \
-                -d "$REG_PAYLOAD" 2>/dev/null || true)
-            if printf "%s" "$RESP" | grep -q '"v4"'; then
-                WARP_IPV4=$(printf "%s" "$RESP" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
-                REG_ID=$(printf "%s" "$RESP" | sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-                REG_TOKEN=$(printf "%s" "$RESP" | sed -n 's/.*"token":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-                USED_CURL_OPT="$CURL_OPT"
-                REG_OK="yes"
-                break
-            fi
-        done
-
-        if [ "$REG_OK" = "no" ]; then
-            RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 \
-                -H "User-Agent: okhttp/3.12.1" \
-                -H "Content-Type: application/json" \
-                -X POST "https://zero-trust-client.cloudflareclient.com/v0a4471/reg" \
-                -d "$REG_PAYLOAD" 2>/dev/null || true)
-            if printf "%s" "$RESP" | grep -q '"v4"'; then
-                WARP_IPV4=$(printf "%s" "$RESP" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
-                REG_ID=$(printf "%s" "$RESP" | sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-                REG_TOKEN=$(printf "%s" "$RESP" | sed -n 's/.*"token":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-                USED_CURL_OPT=""
-                REG_OK="yes"
-            fi
-        fi
-
-        if [ "$REG_OK" = "yes" ] && [ -n "${WARP_LICENSE:-}" ] && [ -n "$REG_ID" ] && [ -n "$REG_TOKEN" ]; then
-            echo "Активация лицензионного ключа Cloudflare WARP+..."
-            # shellcheck disable=SC2086
-            LIC_RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 ${USED_CURL_OPT:-} \
-                -H "User-Agent: okhttp/3.12.1" \
-                -H "Authorization: Bearer ${REG_TOKEN}" \
-                -H "Content-Type: application/json" \
-                -X PUT "https://api.devices.cloudflare.com/v0a4471/reg/${REG_ID}/account" \
-                -d "{\"license\":\"${WARP_LICENSE}\"}" 2>/dev/null || true)
-            if printf "%s" "$LIC_RESP" | grep -q '"warp_plus":[[:space:]]*true'; then
-                echo "${C_GRN}[✓] Статус WARP+ (Argo Priority) успешно активирован!${C_RES}"
-                save_gateway_env
-            else
-                echo "${C_YEL}[!] Лицензия WARP+ не принята API Cloudflare, используется стандартный безлимитный WARP.${C_RES}"
-                WARP_LICENSE=""
-                save_gateway_env
-            fi
-        fi
-    fi
-
-    if [ "$REG_OK" = "no" ] && is_warp_enabled; then
-        OLD_PRIV=$(sed -n 's/.*"private_key":[[:space:]]*"\([^"]*\)".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
-        OLD_IP=$(sed -n 's/.*"\([0-9.]*\)\/32".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
-        if [ -n "$OLD_PRIV" ]; then
-            PRIV_KEY="$OLD_PRIV"
-            WARP_IPV4="${OLD_IP:-172.16.0.2}"
-            REG_OK="yes"
-            echo "[i] Сохранен ранее зарегистрированный ключ Amnezia WARP."
-        fi
-    fi
-
-    if [ "$REG_OK" = "no" ]; then
-        echo "${C_YEL}[!] Провайдер блокирует прямой доступ к API регистрации WG Cloudflare.${C_RES}"
-        printf "Вставьте готовый WARP PrivateKey [или нажмите Enter для авто-регистрации через MASQUE TCP/H2]: "
-        read -r USER_PRIV < /dev/tty || true
-        USER_PRIV=$(printf "%s" "$USER_PRIV" | tr -d ' \t\r\n')
-        if [ -n "$USER_PRIV" ]; then
-            PRIV_KEY="$USER_PRIV"
-            WARP_IPV4="172.16.0.2"
-            REG_OK="yes"
-        elif [ -n "$PRIV_KEY" ]; then
-            WARP_IPV4="172.16.0.2"
-            REG_OK="yes"
-            echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
-        else
-            echo "${C_RED}[X] Не удалось получить или сгенерировать ключ WARP.${C_RES}"
-            return 1
-        fi
-    fi
-
-    [ -z "$WARP_IPV4" ] && WARP_IPV4="172.16.0.2" || true
-
-    echo "Сканирование и сортировка по пингу Anycast-узлов Cloudflare напрямую через провайдера..."
-    BEST_EPS=$(scan_best_warp_endpoints)
-    # shellcheck disable=SC2086
-    set -- $BEST_EPS
-    EP1="${1:-188.114.98.224:854}"
-    EP2="${2:-188.114.97.1:500}"
-    EP3="${3:-162.159.192.1:4500}"
-    EP4="${4:-188.114.99.224:1002}"
-
-    EP1_IP="${EP1%:*}"; EP1_PORT="${EP1#*:}"
-    EP2_IP="${EP2%:*}"; EP2_PORT="${EP2#*:}"
-    EP3_IP="${EP3%:*}"; EP3_PORT="${EP3#*:}"
-    EP4_IP="${EP4%:*}"; EP4_PORT="${EP4#*:}"
-
-    RAND_BYTE=$(od -An -N1 -tu1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "5")
-    AWG_JC1=$(( (RAND_BYTE % 4) + 3 ))
-    AWG_JC2=$(( ((RAND_BYTE + 1) % 4) + 4 ))
-    AWG_JC3=$(( ((RAND_BYTE + 2) % 4) + 3 ))
-    AWG_JC4=$(( ((RAND_BYTE + 3) % 4) + 5 ))
-
-    HEX_R1=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "a1b2c3d4")
-    HEX_R2=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "e5f60718")
-    HEX_R3=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "99887766")
-    HEX_R4=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \t\r\n' || echo "55443322")
-
-    AWG_I1_1="<b 0xc70000000108${HEX_R1}00><r 16><t>"
-    AWG_I1_2="<b 0xc30000000108${HEX_R2}00><r 24><t>"
-    AWG_I1_3="<r 2><b 0x818000010001000000000361706905647a656e0272750000010001c00c000100010000003c0004${HEX_R3}>"
-    AWG_I1_4="<b 0xcb0000000108${HEX_R4}00><t><r 20>"
-
-    cat << WARP_EOF > "${WARP_NODES_FILE}.tmp.$$"
-{
-  "outbounds": [
-    {
-      "type": "wireguard",
-      "tag": "☁️ WARP Fast (${EP1_IP}:${EP1_PORT})",
-      "mtu": 1280,
-      "address": [
-        "${WARP_IPV4}/32"
-      ],
-      "private_key": "${PRIV_KEY}",
-      "peers": [
-        {
-          "address": "${EP1_IP}",
-          "port": ${EP1_PORT},
-          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-          "allowed_ips": [
-            "0.0.0.0/0"
-          ]
-        }
-      ],
-      "amnezia": {
-        "jc": ${AWG_JC1},
-        "jmin": 36,
-        "jmax": 68,
-        "s1": 0,
-        "s2": 0,
-        "h1": 1,
-        "h2": 2,
-        "h3": 3,
-        "h4": 4,
-        "i1": "${AWG_I1_1}"
-      }
-    },
-    {
-      "type": "wireguard",
-      "tag": "☁️ WARP Reserve (${EP2_IP}:${EP2_PORT})",
-      "mtu": 1280,
-      "address": [
-        "${WARP_IPV4}/32"
-      ],
-      "private_key": "${PRIV_KEY}",
-      "peers": [
-        {
-          "address": "${EP2_IP}",
-          "port": ${EP2_PORT},
-          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-          "allowed_ips": [
-            "0.0.0.0/0"
-          ]
-        }
-      ],
-      "amnezia": {
-        "jc": ${AWG_JC2},
-        "jmin": 42,
-        "jmax": 76,
-        "s1": 0,
-        "s2": 0,
-        "h1": 1,
-        "h2": 2,
-        "h3": 3,
-        "h4": 4,
-        "i1": "${AWG_I1_2}"
-      }
-    },
-    {
-      "type": "wireguard",
-      "tag": "☁️ WARP Alt (${EP3_IP}:${EP3_PORT})",
-      "mtu": 1280,
-      "address": [
-        "${WARP_IPV4}/32"
-      ],
-      "private_key": "${PRIV_KEY}",
-      "peers": [
-        {
-          "address": "${EP3_IP}",
-          "port": ${EP3_PORT},
-          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-          "allowed_ips": [
-            "0.0.0.0/0"
-          ]
-        }
-      ],
-      "amnezia": {
-        "jc": ${AWG_JC3},
-        "jmin": 38,
-        "jmax": 72,
-        "s1": 0,
-        "s2": 0,
-        "h1": 1,
-        "h2": 2,
-        "h3": 3,
-        "h4": 4,
-        "i1": "${AWG_I1_3}"
-      }
-    },
-    {
-      "type": "wireguard",
-      "tag": "☁️ WARP Engage (${EP4_IP}:${EP4_PORT})",
-      "mtu": 1280,
-      "address": [
-        "${WARP_IPV4}/32"
-      ],
-      "private_key": "${PRIV_KEY}",
-      "peers": [
-        {
-          "address": "${EP4_IP}",
-          "port": ${EP4_PORT},
-          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-          "allowed_ips": [
-            "0.0.0.0/0"
-          ]
-        }
-      ],
-      "amnezia": {
-        "jc": ${AWG_JC4},
-        "jmin": 44,
-        "jmax": 82,
-        "s1": 0,
-        "s2": 0,
-        "h1": 1,
-        "h2": 2,
-        "h3": 3,
-        "h4": 4,
-        "i1": "${AWG_I1_4}"
-      }
-    }
-  ],
-  "masque": {
-    "type": "masque",
-    "tag": "☁️ WARP MASQUE (TCP/H2)",
-    "use_http2": true,
-    "use_l4_proxy": false,
-    "use_ipv6": false,
-    "profile": {
-      "detour": "DIRECT",
-      "id": "",
-      "auth_token": "",
-      "license_key": "${WARP_LICENSE:-}"
-    },
-    "address": "162.159.198.2",
-    "port": 443,
-    "udp_timeout": "5m0s",
-    "udp_keepalive_period": "30s",
-    "reconnect_delay": "5s",
-    "handshake_timeout": "10s",
-    "congestion_controller": "bbr",
-    "tls": {
-      "server_name": "",
-      "insecure": false,
-      "fragment": true,
-      "fragment_fallback_delay": "500ms",
-      "record_fragment": true
-    }
-  }
-}
-WARP_EOF
-    chmod 600 "${WARP_NODES_FILE}.tmp.$$" 2>/dev/null || true
-    mv -f "${WARP_NODES_FILE}.tmp.$$" "$WARP_NODES_FILE"
-    chmod 600 "$WARP_NODES_FILE" 2>/dev/null || true
-    echo "${C_GRN}[✓] Гибридный пул WARP 2.0 (4 ноды UDP AWG: ${EP1}, ${EP2}, ${EP3}, ${EP4} + 1 нода TCP MASQUE H2) создан!${C_RES}"
-    return 0
-}
-
-# Горячая перезагрузка всех активных провайдеров и мгновенный выбор лучшей ноды в Авто
-reload_singbox_api() {
-    if ! pgrep sing-box >/dev/null 2>&1; then
-        return 0
-    fi
-    load_gateway_env
-    P_LIST=""
-    if [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
-        P_LIST=$(jq -r '.providers[]?.tag // empty' "$SB_CONF" 2>/dev/null || true)
-    fi
-    [ -z "$P_LIST" ] && P_LIST="custom_sub custom_sub_2 custom_sub_3 my_nodes"
-
-    for P_TAG in $P_LIST; do
-        curl -fsS -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
-            "http://127.0.0.1:9090/providers/proxies/${P_TAG}" >/dev/null 2>&1 || true
-    done
-    curl -g -fsS --connect-timeout 2 -m 7 -H "Authorization: Bearer ${ADMIN_PASS}" \
-        "http://127.0.0.1:9090/group/%E2%9A%A1%20%D0%90%D0%B2%D1%82%D0%BE%20%28%D0%A1%D0%B0%D0%BC%D1%8B%D0%B9%20%D0%B1%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9%29/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=6000" >/dev/null 2>&1 || true
-    return 0
-}
-
-# Очистка ссылки на подписку от несовместимых с Sing-Box параметров fmt=xray/v2ray/best
-sanitize_sub_url_list() {
-    RAW_URLS="$1"
-    CLEAN_LIST=""
-    for U in $(printf "%s\n" "$RAW_URLS" | tr ' |,' '\n\n\n'); do
-        [ -z "$U" ] && continue
-        C_U=$(printf "%s" "$U" | sed -E 's/([?&])fmt=(best|xray|v2ray)(&|$)/\1/; s/[?&]$//')
-        if [ -z "$CLEAN_LIST" ]; then
-            CLEAN_LIST="$C_U"
-        else
-            CLEAN_LIST="${CLEAN_LIST} ${C_U}"
-        fi
-    done
-    printf "%s" "$CLEAN_LIST"
-    return 0
-}
-
-# Распределение ввода по 3 независимым слотам: Слот 1 (HTTP), Слот 2 (my_nodes.yaml), Слот 3 (WARP + MASQUE)
-apply_subscription_input() {
-    RAW_INPUT="$1"
-    mkdir -p "$SB_PROVIDERS_DIR"
-    case "$RAW_INPUT" in
-        *warp_nodes*|warp|WARP|amnezia|masque|free)
-            SUB_URL=""
-            USE_INITIAL_WARP="yes"
-            ;;
-        none|NONE|direct|DIRECT|off|OFF)
-            SUB_URL=""
-            USE_INITIAL_WARP="no"
-            ;;
-        http://*|https://*)
-            CLEAN_SUB_URL=$(sanitize_sub_url_list "$RAW_INPUT")
-            if [ "$CLEAN_SUB_URL" != "$RAW_INPUT" ]; then
-                echo "[i] Список подписок нормализован для совместимости с Sing-Box."
-            fi
-            SUB_URL="$CLEAN_SUB_URL"
-            USE_INITIAL_WARP="no"
-            ;;
-        vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|hysteria://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|xhttp://*|splithttp://*|socks5://*|trusttunnel://*|sudoku://*|call://*|naive+https://*|naive+quic://*|naive://*|snell://*|openvpn://*|ssh://*)
-            sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
-            format_uri_keys "$RAW_INPUT" >> "$CUSTOM_NODES_FILE"
-            SUB_URL=""
-            USE_INITIAL_WARP="no"
-            ;;
-        *)
-            SUB_URL="$RAW_INPUT"
-            USE_INITIAL_WARP="no"
-            ;;
-    esac
-    return 0
-}
-
-# Загрузка и установка веб-панели Zashboard с сохранением версии
-install_zashboard_ui() {
-    TARGET_UI_VER="${1:-}"
-    [ -z "$TARGET_UI_VER" ] && TARGET_UI_VER=$(fetch_latest_github_tag "$UI_REPO") || true
-
-    echo "Загрузка и установка веб-панели Zashboard ${TARGET_UI_VER}..."
-    rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
-    mkdir -p /tmp/sb_ui_extract
-
-    if download_file "$UI_TAR_URL" "/tmp/sb_ui.tar.gz" && tar -xzf /tmp/sb_ui.tar.gz -C /tmp/sb_ui_extract 2>/dev/null; then
-        rm -rf "${SB_DIR}/ui"
-        mkdir -p "${SB_DIR}/ui"
-        cp -rf /tmp/sb_ui_extract/*/* "${SB_DIR}/ui/" 2>/dev/null || cp -rf /tmp/sb_ui_extract/* "${SB_DIR}/ui/"
-        [ -n "$TARGET_UI_VER" ] && echo "$TARGET_UI_VER" > "$UI_VER_FILE" || true
-        LATEST_UI_TAG="$TARGET_UI_VER"
-        rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
-        echo "${C_GRN}[✓] Веб-панель Zashboard ${TARGET_UI_VER} успешно установлена в ${SB_DIR}/ui.${C_RES}"
-        return 0
-    else
-        rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
-        echo "${C_RED}[X] Ошибка загрузки или распаковки веб-панели Zashboard!${C_RES}"
-        return 1
-    fi
-}
-
-# Криптографическая проверка SHA-256 скачанного архива через GitHub Releases API
-verify_github_asset_sha256() {
-    REPO_NAME="$1"
-    ASSET_NAME="$2"
-    LOCAL_FILE="$3"
-    command -v sha256sum >/dev/null 2>&1 || return 0
-    command -v jq >/dev/null 2>&1 || return 0
-
-    REL_JSON=$(curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO_NAME}/releases/latest" 2>/dev/null || true)
-    [ -z "$REL_JSON" ] && return 0
-
-    EXP_DIGEST=$(printf "%s" "$REL_JSON" | jq -r --arg name "$ASSET_NAME" '.assets[]? | select(.name == $name) | .digest // empty' 2>/dev/null | sed 's/^sha256://' | tr -d ' \t\r\n')
-    [ -z "$EXP_DIGEST" ] && return 0
-
-    ACT_DIGEST=$(sha256sum "$LOCAL_FILE" 2>/dev/null | awk '{print $1}' | tr -d ' \t\r\n')
-    if [ -n "$ACT_DIGEST" ] && [ "$ACT_DIGEST" != "$EXP_DIGEST" ]; then
-        echo "${C_RED}[X] КРИТИЧЕСКАЯ ОШИБКА БЕЗОПАСНОСТИ: Несовпадение SHA-256 для ${ASSET_NAME}!${C_RES}" >&2
-        echo "    Ожидался: ${EXP_DIGEST}" >&2
-        echo "    Получен:  ${ACT_DIGEST}" >&2
-        return 1
-    fi
-    return 0
-}
-
-# Атомарное обновление бинарников Sing-Box Extended, AdGuard Home и Zashboard (с верификацией SHA-256)
-update_cores_only() {
-    CHECK_UI_UPDATE="${1:-no}"
-    detect_os
-    check_github_mirror
-
-    SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
-    [ -z "$SB_TAG" ] && SB_TAG="v1.14.3-extended-2.7.3" || true
-    LATEST_SB_TAG="$SB_TAG"
-    SB_VER_NO_V="${SB_TAG#v}"
-
-    INSTALLED_SB_VER=""
-    if [ -x /usr/bin/sing-box ]; then
-        RAW_V=$(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || true)
-        [ -n "$RAW_V" ] && INSTALLED_SB_VER="v${RAW_V#v}" || true
-    fi
-
-    if [ "$INSTALLED_SB_VER" = "$SB_TAG" ]; then
-        echo "${C_GRN}[✓] Ядро Sing-Box Extended ${INSTALLED_SB_VER} (${SB_ARCH}) актуально.${C_RES}"
-    else
-        echo "Загрузка Sing-Box Extended ${SB_TAG} (${SB_ARCH})..."
-        rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
-        SB_ASSET="sing-box-${SB_VER_NO_V}-linux-${SB_ARCH}.tar.gz"
-        SB_URL="https://github.com/shtorm-7/sing-box-extended/releases/download/${SB_TAG}/${SB_ASSET}"
-        if download_file "$SB_URL" "/tmp/sing-box.tar.gz" && verify_github_asset_sha256 "shtorm-7/sing-box-extended" "$SB_ASSET" "/tmp/sing-box.tar.gz"; then
-            mkdir -p /tmp/sb_extract
-            if tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb_extract 2>/dev/null; then
-                SB_BIN=$(find /tmp/sb_extract -type f -name "sing-box" | head -n 1)
-                if [ -n "$SB_BIN" ] && [ -f "$SB_BIN" ]; then
-                    chmod +x "$SB_BIN"
-                    if "$SB_BIN" version >/dev/null 2>&1; then
-                        service_ctl sing-box stop
-                        mv -f "$SB_BIN" /usr/bin/sing-box
-                        echo "${C_GRN}[✓] Sing-Box Extended безопасно обновлен до ${SB_TAG}.${C_RES}"
-                    else
-                        echo "${C_RED}[X] Ошибка: скачанный бинарник sing-box поврежден, оставлена текущая версия.${C_RES}"
-                    fi
-                fi
-            fi
-            rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
-        else
-            rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
-            echo "${C_RED}[X] Не удалось скачать Sing-Box Extended ${SB_TAG}.${C_RES}"
-        fi
-    fi
-
-    AGH_TAG=$(fetch_latest_github_tag "AdguardTeam/AdGuardHome")
-    [ -z "$AGH_TAG" ] && AGH_TAG="v0.107.79" || true
-    LATEST_AGH_TAG="$AGH_TAG"
-    INSTALLED_AGH_VER=""
-    if [ -x /usr/bin/AdGuardHome ]; then
-        INSTALLED_AGH_VER=$(/usr/bin/AdGuardHome --version 2>&1 | sed -n 's/.*version \(v[0-9.a-zA-Z_.-]*\).*/\1/p' | head -n 1 || true)
-    fi
-
-    if [ "$INSTALLED_AGH_VER" = "$AGH_TAG" ]; then
-        echo "${C_GRN}[✓] Ядро AdGuard Home ${INSTALLED_AGH_VER} актуально.${C_RES}"
-    else
-        echo "Загрузка AdGuard Home ${AGH_TAG}..."
-        rm -rf /tmp/agh.tar.gz /tmp/agh_extract
-        AGH_ASSET="AdGuardHome_linux_${AGH_ARCH}.tar.gz"
-        AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/${AGH_TAG}/${AGH_ASSET}"
-        if download_file "$AGH_URL" "/tmp/agh.tar.gz" && verify_github_asset_sha256 "AdguardTeam/AdGuardHome" "$AGH_ASSET" "/tmp/agh.tar.gz"; then
-            mkdir -p /tmp/agh_extract
-            if tar -xzf /tmp/agh.tar.gz -C /tmp/agh_extract 2>/dev/null && [ -f /tmp/agh_extract/AdGuardHome/AdGuardHome ]; then
-                chmod +x /tmp/agh_extract/AdGuardHome/AdGuardHome
-                if /tmp/agh_extract/AdGuardHome/AdGuardHome --version >/dev/null 2>&1; then
-                    service_ctl adguardhome stop
-                    mv -f /tmp/agh_extract/AdGuardHome/AdGuardHome /usr/bin/AdGuardHome
-                    echo "${C_GRN}[✓] AdGuard Home безопасно обновлен до ${AGH_TAG}.${C_RES}"
-                else
-                    echo "${C_RED}[X] Ошибка проверки бинарника AdGuard Home, оставлена текущая версия.${C_RES}"
-                fi
-            fi
-            rm -rf /tmp/agh.tar.gz /tmp/agh_extract
-        else
-            rm -rf /tmp/agh.tar.gz /tmp/agh_extract
-            echo "${C_RED}[X] Не удалось скачать AdGuard Home ${AGH_TAG}.${C_RES}"
-        fi
-    fi
-
-    if [ "$CHECK_UI_UPDATE" = "yes" ]; then
-        UI_TAG=$(fetch_latest_github_tag "$UI_REPO")
-        LATEST_UI_TAG="$UI_TAG"
-        INSTALLED_UI_VER=""
-        [ -f "$UI_VER_FILE" ] && INSTALLED_UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
-
-        if [ -f "${SB_DIR}/ui/index.html" ] && [ -n "$UI_TAG" ] && [ "$INSTALLED_UI_VER" = "$UI_TAG" ]; then
-            echo "${C_GRN}[✓] Веб-панель Zashboard ${INSTALLED_UI_VER} актуальна.${C_RES}"
-        else
-            install_zashboard_ui "$UI_TAG" || true
-        fi
-    fi
-
-    cat << VC_EOF > "$VER_CACHE_FILE" 2>/dev/null || true
-LATEST_SB_TAG='${LATEST_SB_TAG}'
-LATEST_AGH_TAG='${LATEST_AGH_TAG}'
-LATEST_UI_TAG='${LATEST_UI_TAG}'
-VC_EOF
-    return 0
-}
-
-# Создание системных служб автозапуска Alpine OpenRC (с защитой сетевого шлюза от OOM-killer)
-setup_init_scripts() {
-    calc_hardware_limits
-
-    cat << INIT_SB_ALP > /etc/init.d/sing-box
-#!/sbin/openrc-run
-name="sing-box"
-description="Sing-Box Extended Gateway"
-supervisor="supervise-daemon"
-command="/usr/bin/sing-box"
-command_args="run -c /etc/sing-box/config.json -D /etc/sing-box"
-output_log="${SB_LOG_FILE}"
-error_log="${SB_LOG_FILE}"
-rc_ulimit="-n 65535"
-rc_oom_score_adj="-500"
-respawn_delay=3
-respawn_max=10
-retry="TERM/10/KILL/5"
-export GOGC=50
-export GOMEMLIMIT=${SB_GOMEMLIMIT}
-export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
-export ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true
-
-depend() {
-    need net
-    after nftables
-}
-
-start_pre() {
-    mkdir -p /dev/net
-    [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
-    : > "${SB_LOG_FILE}" 2>/dev/null || true
-}
-INIT_SB_ALP
-    chmod +x /etc/init.d/sing-box
-
-    cat << INIT_AGH_ALP > /etc/init.d/adguardhome
-#!/sbin/openrc-run
-name="adguardhome"
-description="AdGuard Home DNS Filter"
-supervisor="supervise-daemon"
-command="/usr/bin/AdGuardHome"
-command_args="-c /etc/AdGuardHome/AdGuardHome.yaml -w /etc/AdGuardHome --no-check-update"
-rc_ulimit="-n 65535"
-rc_oom_score_adj="-500"
-respawn_delay=3
-respawn_max=10
-retry="TERM/10/KILL/5"
-export GOGC=50
-export GOMEMLIMIT=${AGH_GOMEMLIMIT}
-
-depend() {
-    need net
-    after sing-box
-}
-INIT_AGH_ALP
-    chmod +x /etc/init.d/adguardhome
-
-    service_ctl sing-box enable
-    service_ctl sing-box restart
-    sleep 2
-    service_ctl adguardhome enable
-    service_ctl adguardhome restart
-    return 0
-}
-
-# ==============================================================================
-# Ядро подсистемы Homelab: Реестр модулей, Единое хранилище /srv/storage,
-# Центральный HTTPS/PKI прокси Caddy (*.lan) и Файловый сервер Samba (WSDD+Avahi)
-# ==============================================================================
-
-# Активация официального репозитория community в Alpine Linux
-ensure_alpine_community_repo() {
-    if [ -f /etc/apk/repositories ]; then
-        sed -i 's|^#[[:space:]]*\(https\?://.*/v[0-9.]*/community\)|\1|' /etc/apk/repositories 2>/dev/null || true
-        sed -i 's|^#[[:space:]]*\(https\?://.*/edge/community\)|\1|' /etc/apk/repositories 2>/dev/null || true
-        if ! grep -q '^https\?://.*/community' /etc/apk/repositories 2>/dev/null; then
-            MAIN_REPO_LINE=$(grep -E '^https?://.*/main' /etc/apk/repositories 2>/dev/null | head -n 1 || true)
-            if [ -n "$MAIN_REPO_LINE" ]; then
-                COMM_REPO_LINE=$(printf "%s" "$MAIN_REPO_LINE" | sed 's|/main$|/community|')
-                echo "$COMM_REPO_LINE" >> /etc/apk/repositories
-            fi
-        fi
-    fi
-    return 0
-}
-
-# Инициализация реестра модулей Homelab (/etc/sing-box/homelab/modules.state)
-# Формат: ID|ENABLED|OPENRC_SVC|PORT|DOMAIN|SYS_USER|TITLE
-init_homelab_registry() {
-    umask 022
-    mkdir -p "$HOMELAB_DIR" "$HOMELAB_LIB_DIR"
-    chmod 755 "$HOMELAB_LIB_DIR" 2>/dev/null || true
-    if [ ! -s "$HOMELAB_STATE" ]; then
-        cat << 'REG_EOF' > "$HOMELAB_STATE"
-# MODULE_ID|ENABLED|OPENRC_SVC|PORT|DOMAIN|SYS_USER|TITLE
-caddy|no|caddy|443|ca.lan|caddy|Caddy HTTPS & Local PKI
-samba|no|samba|445|_|homelab|Samba SMB2/3 + WSDD + Avahi
-vaultwarden|no|vaultwarden|8222|vaultwarden.lan|vaultwarden|Vaultwarden (Bitwarden Server)
-forgejo|no|forgejo|3001|forgejo.lan|forgejo|Forgejo (Git Service)
-code|no|code-server|8443|code.lan|coder|Server-Code (VS Code Web IDE)
-navidrome|no|navidrome|4533|music.lan|navidrome|Navidrome (Music Streaming)
-jellyfin|no|jellyfin|8096|jellyfin.lan|jellyfin|Jellyfin (Media Server)
-ytdlp|no|ytdlp-webui|8081|downloads.lan|ytdlp|yt-dlp Web UI (Video/Audio Downloader)
-torrent|no|qbittorrent-nox|8080|torrents.lan|qbittorrent|qBittorrent-nox (Torrent Web UI)
-REG_EOF
-    fi
-    return 0
-}
-
-# Проверка, включен ли модуль в реестре Homelab
-is_module_enabled() {
-    MOD_QUERY="$1"
-    [ -f "$HOMELAB_STATE" ] || return 1
-    awk -F'|' -v m="$MOD_QUERY" '$1 == m && $2 == "yes" {found=1} END {exit !found}' "$HOMELAB_STATE" 2>/dev/null
-}
-
-# Получение поля модуля из реестра (2=ENABLED, 3=SVC, 4=PORT, 5=DOMAIN, 6=USER, 7=TITLE)
-get_module_field() {
-    MOD_QUERY="$1"
-    FIELD_IDX="$2"
-    init_homelab_registry
-    awk -F'|' -v m="$MOD_QUERY" -v f="$FIELD_IDX" '$1 == m {print $f; exit}' "$HOMELAB_STATE" 2>/dev/null
-    return 0
-}
-
-# Обновление статуса ENABLED (yes/no) для модуля в реестре
-set_module_state() {
-    MOD_TARGET="$1"
-    NEW_STATE="$2"
-    init_homelab_registry
-    awk -F'|' -v OFS='|' -v m="$MOD_TARGET" -v st="$NEW_STATE" '
-        $1 == m { $2 = st }
-        { print }
-    ' "$HOMELAB_STATE" > "${HOMELAB_STATE}.tmp.$$" && mv -f "${HOMELAB_STATE}.tmp.$$" "$HOMELAB_STATE"
-    return 0
-}
-
-# Подсчет количества активных модулей Homelab
-count_enabled_homelab_modules() {
-    [ -f "$HOMELAB_STATE" ] || { echo "0"; return 0; }
-    awk -F'|' '$1 !~ /^#/ && $2 == "yes" {c++} END {print c+0}' "$HOMELAB_STATE" 2>/dev/null
-    return 0
-}
-
-# Создание единой группы media (GID 990) и системных пользователей для Samba и сервисов общего хранилища
-ensure_media_group_and_users() {
-    if [ -z "${SMB_USER:-}" ] || [ -z "${ADMIN_PASS:-}" ]; then
-        load_gateway_env
-    fi
-    [ -z "${SMB_USER:-}" ] && SMB_USER="${AGH_USER:-homelab}"
-
-    if ! grep -q "^${MEDIA_GROUP}:" /etc/group 2>/dev/null; then
-        addgroup -g "$MEDIA_GID" "$MEDIA_GROUP" 2>/dev/null || addgroup "$MEDIA_GROUP" 2>/dev/null || true
-    fi
-
-    if ! id "$SMB_USER" >/dev/null 2>&1; then
-        adduser -D -H -s /sbin/nologin -G "$MEDIA_GROUP" "$SMB_USER" 2>/dev/null || \
-        adduser -D -H -s /sbin/nologin "$SMB_USER" 2>/dev/null || true
-    fi
-    addgroup "$SMB_USER" "$MEDIA_GROUP" 2>/dev/null || true
-
-    # Разблокировка сервисных и пользовательских аккаунтов ('!' -> '*' в /etc/shadow) для smbd, OpenRC и su
-    for UNLOCK_U in "$SMB_USER" caddy vaultwarden forgejo navidrome jellyfin ytdlp qbittorrent coder homelab; do
-        if [ -f /etc/shadow ] && grep -q "^${UNLOCK_U}:!" /etc/shadow 2>/dev/null; then
-            sed -i "s/^${UNLOCK_U}:!/${UNLOCK_U}:*/" /etc/shadow 2>/dev/null || passwd -u "$UNLOCK_U" >/dev/null 2>&1 || true
-        fi
-    done
-
-    # Добавление установленных сервисных пользователей медиаконвейера в единую группу media
-    for SVC_U in jellyfin navidrome ytdlp qbittorrent coder; do
-        if id "$SVC_U" >/dev/null 2>&1; then
-            addgroup "$SVC_U" "$MEDIA_GROUP" 2>/dev/null || true
-        fi
-    done
-    return 0
-}
-
-# Инициализация структуры единого хранилища /srv/storage и настройка прав (setgid 2775 + POSIX ACL)
-init_homelab_storage() {
-    umask 002
-    ensure_media_group_and_users
-    mkdir -p \
-        "$STORAGE_MUSIC" \
-        "$STORAGE_VIDEOS" \
-        "$STORAGE_VIDEOS_MOVIES" \
-        "$STORAGE_VIDEOS_SERIES" \
-        "$STORAGE_DOWNLOADS" \
-        "$STORAGE_DL_MUSIC" \
-        "$STORAGE_DL_VIDEOS" \
-        "$STORAGE_DL_OTHER" \
-        "$STORAGE_INCOMPLETE" \
-        "$STORAGE_INC_TORRENTS" \
-        "$STORAGE_INC_YTDLP" \
-        "$STORAGE_BACKUPS" \
-        "$STORAGE_REPOS" \
-        "$STORAGE_CODE" \
-        "$STORAGE_PERSONAL"
-
-    repair_storage_permissions
-    umask 022
-    return 0
-}
-
-# Выставление эталонных прав доступа на /srv/storage (группа media, setgid 2775, POSIX ACL)
-repair_storage_permissions() {
-    ensure_media_group_and_users
-    [ -d "$STORAGE_ROOT" ] || return 0
-
-    chmod 755 /srv 2>/dev/null || true
-    chown "${SMB_USER}:${MEDIA_GROUP}" "$STORAGE_ROOT" 2>/dev/null || chown root:"$MEDIA_GROUP" "$STORAGE_ROOT" 2>/dev/null || true
-    chmod 2775 "$STORAGE_ROOT" 2>/dev/null || true
-
-    for SUB_D in \
-        "$STORAGE_MUSIC" \
-        "$STORAGE_VIDEOS" \
-        "$STORAGE_VIDEOS_MOVIES" \
-        "$STORAGE_VIDEOS_SERIES" \
-        "$STORAGE_DOWNLOADS" \
-        "$STORAGE_DL_MUSIC" \
-        "$STORAGE_DL_VIDEOS" \
-        "$STORAGE_DL_OTHER" \
-        "$STORAGE_INCOMPLETE" \
-        "$STORAGE_INC_TORRENTS" \
-        "$STORAGE_INC_YTDLP" \
-        "$STORAGE_BACKUPS" \
-        "$STORAGE_REPOS" \
-        "$STORAGE_CODE" \
-        "$STORAGE_PERSONAL"; do
-        [ -d "$SUB_D" ] || mkdir -p "$SUB_D" 2>/dev/null || continue
-    done
-
-    for TOP_D in "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" "$STORAGE_CODE" "$STORAGE_PERSONAL" "$STORAGE_BACKUPS"; do
-        [ -d "$TOP_D" ] || continue
-        chown -R "${SMB_USER}:${MEDIA_GROUP}" "$TOP_D" 2>/dev/null || chgrp -R "$MEDIA_GROUP" "$TOP_D" 2>/dev/null || true
-        find "$TOP_D" -type d -exec chmod 2775 {} + 2>/dev/null || true
-        find "$TOP_D" -type f -exec chmod 0664 {} + 2>/dev/null || true
-    done
-
-    # Выделение прав владельца на временные буферы соответствующим демонам при сохранении группы media (2775)
-    if id qbittorrent >/dev/null 2>&1 && [ -d "$STORAGE_INC_TORRENTS" ]; then
-        chown -R "qbittorrent:${MEDIA_GROUP}" "$STORAGE_INC_TORRENTS" 2>/dev/null || true
-        chmod 2775 "$STORAGE_INC_TORRENTS" 2>/dev/null || true
-    fi
-    if id ytdlp >/dev/null 2>&1 && [ -d "$STORAGE_INC_YTDLP" ]; then
-        chown -R "ytdlp:${MEDIA_GROUP}" "$STORAGE_INC_YTDLP" 2>/dev/null || true
-        chmod 2775 "$STORAGE_INC_YTDLP" 2>/dev/null || true
-    fi
-
-    # Применение наследуемых POSIX ACL (если установлен пакет acl и ФС поддерживает ACL)
-    if command -v setfacl >/dev/null 2>&1; then
-        setfacl -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" -d -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" "$STORAGE_ROOT" 2>/dev/null || true
-        setfacl -R -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" -d -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" \
-            "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" 2>/dev/null || true
-        for ACL_U in jellyfin navidrome ytdlp qbittorrent coder; do
-            if id "$ACL_U" >/dev/null 2>&1; then
-                setfacl -R -m "u:${ACL_U}:rwx" -d -m "u:${ACL_U}:rwx" \
-                    "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" 2>/dev/null || true
-            fi
-        done
-    fi
-    return 0
-}
-
-# Проверка: смонтирован ли внешний накопитель (и зашифрован ли он LUKS2) в /srv/storage
-get_storage_disk_badge() {
-    load_gateway_env
-    MNT_SRC=$(awk -v mp="${STORAGE_ROOT:-/srv/storage}" '$2 == mp {print $1; exit}' /proc/mounts 2>/dev/null || true)
-    MNT_FSTYPE=$(awk -v mp="${STORAGE_ROOT:-/srv/storage}" '$2 == mp {print $3; exit}' /proc/mounts 2>/dev/null || true)
-    if [ -n "$MNT_SRC" ]; then
-        case "$MNT_SRC" in
-            /dev/mapper/*|*luks*|*crypt*)
-                printf "● LUKS2 UNLOCKED [%s]" "${MNT_FSTYPE:-FS}"
-                return 0
-                ;;
-            *)
-                printf "● Внешний [%s: %s]" "$(basename "$MNT_SRC")" "${MNT_FSTYPE:-FS}"
-                return 0
-                ;;
-        esac
-    fi
-    if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ]; then
-        if [ -n "${EXT_STORAGE_LUKS_UUID:-}" ]; then
-            printf "▲ Ждет разблокировки LUKS2 (выполните: gateway unlock)"
-        else
-            printf "▲ Внешний диск отключен (выполните: gateway disk)"
-        fi
-        return 0
-    fi
-    printf "○ Системный раздел"
-    return 0
-}
-
-# Вывод статистики использования единого хранилища /srv/storage с прогресс-барами
-print_storage_stats() {
-    load_gateway_env
-    if is_storage_mount_ready; then
-        init_homelab_storage
-    fi
-    DISK_MODE_TXT=$(get_storage_disk_badge)
-    DISK_PCT=$(get_disk_usage_pct "$STORAGE_ROOT")
-    DISK_BAR=$(ui_progress_bar "$DISK_PCT" 14)
-
-    ui_box_top "💽 ЕДИНОЕ ФАЙЛОВОЕ ХРАНИЛИЩЕ: ${STORAGE_ROOT} (${DISK_MODE_TXT})"
-    DF_LINE=$(df -hT "$STORAGE_ROOT" 2>/dev/null | awk 'NR==2 {printf "Устройство: %-18s | ФС: %-6s | Занято: %s из %s (Свободно: %s)", $1, $2, $4, $3, $5}' || true)
-    ui_box_row "Заполнение: ${DISK_BAR}  ${C_DIM}${DF_LINE}${C_RES}"
-    if ! is_storage_mount_ready; then
-        ui_box_row "${C_YEL}[▲] ВНИМАНИЕ: Внешний накопитель ожидает разблокировки LUKS2 (gateway unlock) или подключения!${C_RES}"
-        ui_box_row "${C_DIM}    Зависимые медиа-сервисы удерживаются в безопасной паузе для защиты системного диска.${C_RES}"
-    fi
-    ui_box_sep "КАТАЛОГИ МЕДИАТЕКИ И ОБЛАКА"
-    for D_ITEM in \
-        "$STORAGE_MUSIC" \
-        "$STORAGE_VIDEOS" \
-        "$STORAGE_VIDEOS_MOVIES" \
-        "$STORAGE_VIDEOS_SERIES" \
-        "$STORAGE_DOWNLOADS" \
-        "$STORAGE_DL_MUSIC" \
-        "$STORAGE_DL_VIDEOS" \
-        "$STORAGE_DL_OTHER" \
-        "$STORAGE_REPOS" \
-        "$STORAGE_CODE" \
-        "$STORAGE_PERSONAL" \
-        "$STORAGE_BACKUPS" \
-        "$STORAGE_INCOMPLETE"; do
-        if [ -d "$D_ITEM" ]; then
-            D_SZ=$(du -sh "$D_ITEM" 2>/dev/null | awk '{print $1}' || echo "0")
-            D_PM=$(stat -c "%a %U:%G" "$D_ITEM" 2>/dev/null || echo "н/д")
-            printf "%s│%s  ▸ %-40s : %s%-8s%s (%s)\n" "$C_CYN" "$C_RES" "$D_ITEM" "$C_BLD" "$D_SZ" "$C_RES" "$D_PM"
-        fi
-    done
-    ui_box_bottom
-    return 0
-}
-
-# ==============================================================================
-# Подсистема внешних накопителей (USB / SATA / NVMe):
-# Поддержка LUKS2 шифрования, форматирования (ext4 / btrfs / f2fs),
-# авто-разблокировки при загрузке и переноса тяжелых данных сервисов Homelab
-# ==============================================================================
-
-# Установка утилит для работы с дисками, LUKS2 и файловыми системами ext4, btrfs, f2fs
 ensure_disk_tools() {
     ensure_alpine_community_repo
     NEED_APK="no"
@@ -6068,9 +5113,17 @@ https://${SITE_MOD}.${SSL_DOMAIN} {
         max_size 525MB
     }
 
+    @websockets {
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @websockets 127.0.0.1:${SITE_PORT}
+
     reverse_proxy 127.0.0.1:${SITE_PORT} {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto \"https\"
     }
 }"
         else
@@ -6098,9 +5151,17 @@ https://${SITE_DOM} {
         max_size 525MB
     }
 
+    @websockets {
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @websockets 127.0.0.1:${SITE_PORT}
+
     reverse_proxy 127.0.0.1:${SITE_PORT} {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto "https"
     }
 }
 ${LE_SITE_BLOCK}
@@ -6369,11 +5430,13 @@ apply_and_verify_samba_password() {
     # Если smbd уже запущен и установлен smbclient — проверяем реальную SMB2/3 авторизацию
     if command -v smbclient >/dev/null 2>&1 && rc-service samba status >/dev/null 2>&1; then
         PASS_TMP="/tmp/.smb_auth_check.$$"
+        trap 'rm -f "$PASS_TMP" 2>/dev/null || true' EXIT INT TERM
         umask 077
         printf "username = %s\npassword = %s\n" "$TARGET_SMB_USER" "$TARGET_SMB_PASS" > "$PASS_TMP"
         umask 022
         SMB_CHECK_OUT=$(smbclient -L //127.0.0.1 -A "$PASS_TMP" -m SMB3 2>&1 || true)
         rm -f "$PASS_TMP" 2>/dev/null || true
+        trap - EXIT INT TERM
         if printf "%s" "$SMB_CHECK_OUT" | grep -Eq "NT_STATUS_LOGON_FAILURE|NT_STATUS_ACCOUNT_DISABLED|NT_STATUS_ACCESS_DENIED"; then
             echo "${C_RED}[X] Ошибка проверки входа Samba (smbclient): неверный пароль или доступ запрещен!${C_RES}" >&2
             return 1
@@ -6592,6 +5655,343 @@ remove_module_samba() {
 # ==============================================================================
 
 # 1. Модуль Vaultwarden (Локальный менеджер паролей Bitwarden)
+ensure_alpine_community_repo() {
+    if [ -f /etc/apk/repositories ]; then
+        sed -i 's|^#[[:space:]]*\(https\?://.*/v[0-9.]*/community\)|\1|' /etc/apk/repositories 2>/dev/null || true
+        sed -i 's|^#[[:space:]]*\(https\?://.*/edge/community\)|\1|' /etc/apk/repositories 2>/dev/null || true
+        if ! grep -q '^https\?://.*/community' /etc/apk/repositories 2>/dev/null; then
+            MAIN_REPO_LINE=$(grep -E '^https?://.*/main' /etc/apk/repositories 2>/dev/null | head -n 1 || true)
+            if [ -n "$MAIN_REPO_LINE" ]; then
+                COMM_REPO_LINE=$(printf "%s" "$MAIN_REPO_LINE" | sed 's|/main$|/community|')
+                echo "$COMM_REPO_LINE" >> /etc/apk/repositories
+            fi
+        fi
+    fi
+    return 0
+}
+
+# Инициализация реестра модулей Homelab (/etc/sing-box/homelab/modules.state)
+# Формат: ID|ENABLED|OPENRC_SVC|PORT|DOMAIN|SYS_USER|TITLE
+init_homelab_registry() {
+    umask 022
+    mkdir -p "$HOMELAB_DIR" "$HOMELAB_LIB_DIR"
+    chmod 755 "$HOMELAB_LIB_DIR" 2>/dev/null || true
+    if [ ! -s "$HOMELAB_STATE" ]; then
+        cat << 'REG_EOF' > "$HOMELAB_STATE"
+# MODULE_ID|ENABLED|OPENRC_SVC|PORT|DOMAIN|SYS_USER|TITLE
+caddy|no|caddy|443|ca.lan|caddy|Caddy HTTPS & Local PKI
+samba|no|samba|445|_|homelab|Samba SMB2/3 + WSDD + Avahi
+vaultwarden|no|vaultwarden|8222|vaultwarden.lan|vaultwarden|Vaultwarden (Bitwarden Server)
+forgejo|no|forgejo|3001|forgejo.lan|forgejo|Forgejo (Git Service)
+code|no|code-server|8443|code.lan|coder|Server-Code (VS Code Web IDE)
+navidrome|no|navidrome|4533|music.lan|navidrome|Navidrome (Music Streaming)
+jellyfin|no|jellyfin|8096|jellyfin.lan|jellyfin|Jellyfin (Media Server)
+ytdlp|no|ytdlp-webui|8081|downloads.lan|ytdlp|yt-dlp Web UI (Video/Audio Downloader)
+torrent|no|qbittorrent-nox|8080|torrents.lan|qbittorrent|qBittorrent-nox (Torrent Web UI)
+REG_EOF
+    fi
+    return 0
+}
+
+# Проверка, включен ли модуль в реестре Homelab
+is_module_enabled() {
+    MOD_QUERY="$1"
+    [ -f "$HOMELAB_STATE" ] || return 1
+    awk -F'|' -v m="$MOD_QUERY" '$1 == m && $2 == "yes" {found=1} END {exit !found}' "$HOMELAB_STATE" 2>/dev/null
+}
+
+# Получение поля модуля из реестра (2=ENABLED, 3=SVC, 4=PORT, 5=DOMAIN, 6=USER, 7=TITLE)
+get_module_field() {
+    MOD_QUERY="$1"
+    FIELD_IDX="$2"
+    init_homelab_registry
+    awk -F'|' -v m="$MOD_QUERY" -v f="$FIELD_IDX" '$1 == m {print $f; exit}' "$HOMELAB_STATE" 2>/dev/null
+    return 0
+}
+
+# Обновление статуса ENABLED (yes/no) для модуля в реестре
+set_module_state() {
+    MOD_TARGET="$1"
+    NEW_STATE="$2"
+    init_homelab_registry
+    awk -F'|' -v OFS='|' -v m="$MOD_TARGET" -v st="$NEW_STATE" '
+        $1 == m { $2 = st }
+        { print }
+    ' "$HOMELAB_STATE" > "${HOMELAB_STATE}.tmp.$$" && mv -f "${HOMELAB_STATE}.tmp.$$" "$HOMELAB_STATE"
+    return 0
+}
+
+# Подсчет количества активных модулей Homelab
+count_enabled_homelab_modules() {
+    [ -f "$HOMELAB_STATE" ] || { echo "0"; return 0; }
+    awk -F'|' '$1 !~ /^#/ && $2 == "yes" {c++} END {print c+0}' "$HOMELAB_STATE" 2>/dev/null
+    return 0
+}
+
+# Создание единой группы media (GID 990) и системных пользователей для Samba и сервисов общего хранилища
+ensure_media_group_and_users() {
+    if [ -z "${SMB_USER:-}" ] || [ -z "${ADMIN_PASS:-}" ]; then
+        load_gateway_env
+    fi
+    [ -z "${SMB_USER:-}" ] && SMB_USER="${AGH_USER:-homelab}"
+
+    if ! grep -q "^${MEDIA_GROUP}:" /etc/group 2>/dev/null; then
+        addgroup -g "$MEDIA_GID" "$MEDIA_GROUP" 2>/dev/null || addgroup "$MEDIA_GROUP" 2>/dev/null || true
+    fi
+
+    if ! id "$SMB_USER" >/dev/null 2>&1; then
+        adduser -D -H -s /sbin/nologin -G "$MEDIA_GROUP" "$SMB_USER" 2>/dev/null || \
+        adduser -D -H -s /sbin/nologin "$SMB_USER" 2>/dev/null || true
+    fi
+    addgroup "$SMB_USER" "$MEDIA_GROUP" 2>/dev/null || true
+
+    # Разблокировка сервисных и пользовательских аккаунтов ('!' -> '*' в /etc/shadow) для smbd, OpenRC и su
+    for UNLOCK_U in "$SMB_USER" caddy vaultwarden forgejo navidrome jellyfin ytdlp qbittorrent coder homelab; do
+        if [ -f /etc/shadow ] && grep -q "^${UNLOCK_U}:!" /etc/shadow 2>/dev/null; then
+            sed -i "s/^${UNLOCK_U}:!/${UNLOCK_U}:*/" /etc/shadow 2>/dev/null || passwd -u "$UNLOCK_U" >/dev/null 2>&1 || true
+        fi
+    done
+
+    # Добавление установленных сервисных пользователей медиаконвейера в единую группу media
+    for SVC_U in jellyfin navidrome ytdlp qbittorrent coder; do
+        if id "$SVC_U" >/dev/null 2>&1; then
+            addgroup "$SVC_U" "$MEDIA_GROUP" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
+# Инициализация структуры единого хранилища /srv/storage и настройка прав (setgid 2775 + POSIX ACL)
+init_homelab_storage() {
+    umask 002
+    ensure_media_group_and_users
+    mkdir -p \
+        "$STORAGE_MUSIC" \
+        "$STORAGE_VIDEOS" \
+        "$STORAGE_VIDEOS_MOVIES" \
+        "$STORAGE_VIDEOS_SERIES" \
+        "$STORAGE_DOWNLOADS" \
+        "$STORAGE_DL_MUSIC" \
+        "$STORAGE_DL_VIDEOS" \
+        "$STORAGE_DL_OTHER" \
+        "$STORAGE_INCOMPLETE" \
+        "$STORAGE_INC_TORRENTS" \
+        "$STORAGE_INC_YTDLP" \
+        "$STORAGE_BACKUPS" \
+        "$STORAGE_REPOS" \
+        "$STORAGE_CODE" \
+        "$STORAGE_PERSONAL"
+
+    repair_storage_permissions
+    umask 022
+    return 0
+}
+
+# Выставление эталонных прав доступа на /srv/storage (группа media, setgid 2775, POSIX ACL)
+repair_storage_permissions() {
+    ensure_media_group_and_users
+    [ -d "$STORAGE_ROOT" ] || return 0
+
+    chmod 755 /srv 2>/dev/null || true
+    chown "${SMB_USER}:${MEDIA_GROUP}" "$STORAGE_ROOT" 2>/dev/null || chown root:"$MEDIA_GROUP" "$STORAGE_ROOT" 2>/dev/null || true
+    chmod 2775 "$STORAGE_ROOT" 2>/dev/null || true
+
+    for SUB_D in \
+        "$STORAGE_MUSIC" \
+        "$STORAGE_VIDEOS" \
+        "$STORAGE_VIDEOS_MOVIES" \
+        "$STORAGE_VIDEOS_SERIES" \
+        "$STORAGE_DOWNLOADS" \
+        "$STORAGE_DL_MUSIC" \
+        "$STORAGE_DL_VIDEOS" \
+        "$STORAGE_DL_OTHER" \
+        "$STORAGE_INCOMPLETE" \
+        "$STORAGE_INC_TORRENTS" \
+        "$STORAGE_INC_YTDLP" \
+        "$STORAGE_BACKUPS" \
+        "$STORAGE_REPOS" \
+        "$STORAGE_CODE" \
+        "$STORAGE_PERSONAL"; do
+        [ -d "$SUB_D" ] || mkdir -p "$SUB_D" 2>/dev/null || continue
+    done
+
+    for TOP_D in "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" "$STORAGE_CODE" "$STORAGE_PERSONAL" "$STORAGE_BACKUPS"; do
+        [ -d "$TOP_D" ] || continue
+        chown -R "${SMB_USER}:${MEDIA_GROUP}" "$TOP_D" 2>/dev/null || chgrp -R "$MEDIA_GROUP" "$TOP_D" 2>/dev/null || true
+        find "$TOP_D" -type d -exec chmod 2775 {} + 2>/dev/null || true
+        find "$TOP_D" -type f -exec chmod 0664 {} + 2>/dev/null || true
+    done
+
+    # Выделение прав владельца на временные буферы соответствующим демонам при сохранении группы media (2775)
+    if id qbittorrent >/dev/null 2>&1 && [ -d "$STORAGE_INC_TORRENTS" ]; then
+        chown -R "qbittorrent:${MEDIA_GROUP}" "$STORAGE_INC_TORRENTS" 2>/dev/null || true
+        chmod 2775 "$STORAGE_INC_TORRENTS" 2>/dev/null || true
+    fi
+    if id ytdlp >/dev/null 2>&1 && [ -d "$STORAGE_INC_YTDLP" ]; then
+        chown -R "ytdlp:${MEDIA_GROUP}" "$STORAGE_INC_YTDLP" 2>/dev/null || true
+        chmod 2775 "$STORAGE_INC_YTDLP" 2>/dev/null || true
+    fi
+
+    # Применение наследуемых POSIX ACL (если установлен пакет acl и ФС поддерживает ACL)
+    if command -v setfacl >/dev/null 2>&1; then
+        setfacl -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" -d -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" "$STORAGE_ROOT" 2>/dev/null || true
+        setfacl -R -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" -d -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" \
+            "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" 2>/dev/null || true
+        for ACL_U in jellyfin navidrome ytdlp qbittorrent coder; do
+            if id "$ACL_U" >/dev/null 2>&1; then
+                setfacl -R -m "u:${ACL_U}:rwx" -d -m "u:${ACL_U}:rwx" \
+                    "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" 2>/dev/null || true
+            fi
+        done
+    fi
+    return 0
+}
+
+# Проверка: смонтирован ли внешний накопитель (и зашифрован ли он LUKS2) в /srv/storage
+get_storage_disk_badge() {
+    load_gateway_env
+    MNT_SRC=$(awk -v mp="${STORAGE_ROOT:-/srv/storage}" '$2 == mp {print $1; exit}' /proc/mounts 2>/dev/null || true)
+    MNT_FSTYPE=$(awk -v mp="${STORAGE_ROOT:-/srv/storage}" '$2 == mp {print $3; exit}' /proc/mounts 2>/dev/null || true)
+    if [ -n "$MNT_SRC" ]; then
+        case "$MNT_SRC" in
+            /dev/mapper/*|*luks*|*crypt*)
+                printf "● LUKS2 UNLOCKED [%s]" "${MNT_FSTYPE:-FS}"
+                return 0
+                ;;
+            *)
+                printf "● Внешний [%s: %s]" "$(basename "$MNT_SRC")" "${MNT_FSTYPE:-FS}"
+                return 0
+                ;;
+        esac
+    fi
+    if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ]; then
+        if [ -n "${EXT_STORAGE_LUKS_UUID:-}" ]; then
+            printf "▲ Ждет разблокировки LUKS2 (выполните: gateway unlock)"
+        else
+            printf "▲ Внешний диск отключен (выполните: gateway disk)"
+        fi
+        return 0
+    fi
+    printf "○ Системный раздел"
+    return 0
+}
+
+# Вывод статистики использования единого хранилища /srv/storage с прогресс-барами
+print_storage_stats() {
+    load_gateway_env
+    if is_storage_mount_ready; then
+        init_homelab_storage
+    fi
+    DISK_MODE_TXT=$(get_storage_disk_badge)
+    DISK_PCT=$(get_disk_usage_pct "$STORAGE_ROOT")
+    DISK_BAR=$(ui_progress_bar "$DISK_PCT" 14)
+
+    ui_box_top "💽 ЕДИНОЕ ФАЙЛОВОЕ ХРАНИЛИЩЕ: ${STORAGE_ROOT} (${DISK_MODE_TXT})"
+    DF_LINE=$(df -hT "$STORAGE_ROOT" 2>/dev/null | awk 'NR==2 {printf "Устройство: %-18s | ФС: %-6s | Занято: %s из %s (Свободно: %s)", $1, $2, $4, $3, $5}' || true)
+    ui_box_row "Заполнение: ${DISK_BAR}  ${C_DIM}${DF_LINE}${C_RES}"
+    if ! is_storage_mount_ready; then
+        ui_box_row "${C_YEL}[▲] ВНИМАНИЕ: Внешний накопитель ожидает разблокировки LUKS2 (gateway unlock) или подключения!${C_RES}"
+        ui_box_row "${C_DIM}    Зависимые медиа-сервисы удерживаются в безопасной паузе для защиты системного диска.${C_RES}"
+    fi
+    ui_box_sep "КАТАЛОГИ МЕДИАТЕКИ И ОБЛАКА"
+    for D_ITEM in \
+        "$STORAGE_MUSIC" \
+        "$STORAGE_VIDEOS" \
+        "$STORAGE_VIDEOS_MOVIES" \
+        "$STORAGE_VIDEOS_SERIES" \
+        "$STORAGE_DOWNLOADS" \
+        "$STORAGE_DL_MUSIC" \
+        "$STORAGE_DL_VIDEOS" \
+        "$STORAGE_DL_OTHER" \
+        "$STORAGE_REPOS" \
+        "$STORAGE_CODE" \
+        "$STORAGE_PERSONAL" \
+        "$STORAGE_BACKUPS" \
+        "$STORAGE_INCOMPLETE"; do
+        if [ -d "$D_ITEM" ]; then
+            D_SZ=$(du -sh "$D_ITEM" 2>/dev/null | awk '{print $1}' || echo "0")
+            D_PM=$(stat -c "%a %U:%G" "$D_ITEM" 2>/dev/null || echo "н/д")
+            printf "%s│%s  ▸ %-40s : %s%-8s%s (%s)\n" "$C_CYN" "$C_RES" "$D_ITEM" "$C_BLD" "$D_SZ" "$C_RES" "$D_PM"
+        fi
+    done
+    ui_box_bottom
+    return 0
+}
+
+# ==============================================================================
+# Подсистема внешних накопителей (USB / SATA / NVMe):
+# Поддержка LUKS2 шифрования, форматирования (ext4 / btrfs / f2fs),
+# авто-разблокировки при загрузке и переноса тяжелых данных сервисов Homelab
+# ==============================================================================
+
+# Установка утилит для работы с дисками, LUKS2 и файловыми системами ext4, btrfs, f2fs
+show_media_architecture_advisor() {
+    load_gateway_env
+    init_homelab_storage
+    JF_ST=$(is_module_enabled "jellyfin" && echo "${C_GRN}УСТАНОВЛЕН${C_RES}" || echo "${C_DIM}НЕ АКТИВЕН${C_RES}")
+    ND_ST=$(is_module_enabled "navidrome" && echo "${C_GRN}УСТАНОВЛЕН (доп. модуль)${C_RES}" || echo "${C_DIM}ОТКЛЮЧЕН${C_RES}")
+
+    echo ""
+    ui_box_top "================================================================="
+    echo "${C_BLD} 🎬🎵 Архитектура медиасервера: Интеграция музыки и видео в Jellyfin${C_RES}"
+    ui_box_top "================================================================="
+    echo " • Статус Jellyfin:  ${JF_ST} | Режим единой медиаплатформы: ${C_GRN}${JELLYFIN_UNIFIED_MEDIA:-yes}${C_RES}"
+    echo " • Статус Navidrome: ${ND_ST}"
+    ui_box_sep
+    echo " ${C_BLD}Рекомендуемая структура библиотек в Jellyfin (https://${DOM_JELLYFIN}):${C_RES}"
+    echo "  1. Библиотека «Movies» (Фильмы)   -> каталог: ${C_CYN}${STORAGE_VIDEOS_MOVIES}${C_RES} (и ${STORAGE_VIDEOS})"
+    echo "  2. Библиотека «Shows»  (Сериалы)  -> каталог: ${C_CYN}${STORAGE_VIDEOS_SERIES}${C_RES}"
+    echo "  3. Библиотека «Music»  (Музыка)   -> каталог: ${C_CYN}${STORAGE_MUSIC}${C_RES}"
+    ui_box_sep
+    echo " ${C_BLD}Сравнение возможностей (на ноябрь 2026 г.):${C_RES}"
+    echo "  • ${C_GRN}Jellyfin как единая платформа (Видео + Музыка):${C_RES}"
+    echo "    [+] Один сервер и единый веб-интерфейс для фильмов, сериалов и музыки."
+    echo "    [+] Отличное мобильное приложение для музыки: Finamp (Android/iOS, офлайн-кэш, gapless)"
+    echo "        и Symfonium, плюс штатные клиенты Jellyfin на Smart TV / ПК."
+    echo "    [+] Аппаратное/программное транскодирование через jellyfin-ffmpeg (FLAC/ALAC/Opus/MP3)."
+    echo "    [-] Не поддерживает протокол Subsonic API из коробки."
+    echo "  • ${C_CYN}Navidrome как дополнительный музыкальный модуль:${C_RES}"
+    echo "    [+] Ультра-легкий (~40-50 МБ ОЗУ), мгновенная индексация больших аудиотек."
+    echo "    [+] Полная поддержка Subsonic / OpenSubsonic API (DSub, Ultrasonic, Amperfy, Supersonic)."
+    echo "    [+] Оба сервиса (Jellyfin и Navidrome) могут работать ОДНОВРЕМЕННО поверх"
+    echo "        единого каталога ${STORAGE_MUSIC} без конфликтов!"
+    ui_box_sep
+    echo " Выберите режим работы медиастэка:"
+    echo "  1) ${C_GRN}Единая платформа Jellyfin (Видео + Музыка)${C_RES} — установить/обновить Jellyfin и выдать права на ${STORAGE_MUSIC}"
+    echo "  2) ${C_CYN}Гибридный режим (Jellyfin + Navidrome одновременно)${C_RES} — оба сервиса читают ${STORAGE_MUSIC}"
+    echo "  3) Отключить Navidrome (оставить только Jellyfin для экономии ОЗУ, сохранив все файлы)"
+    echo "  0) Назад"
+    printf "Выбор [0-3]: "
+    read -r MA_ACT < /dev/tty || true
+    case "$MA_ACT" in
+        1)
+            JELLYFIN_UNIFIED_MEDIA="yes"
+            save_homelab_env
+            install_module_jellyfin || true
+            repair_storage_permissions
+            echo "${C_GRN}[✓] Jellyfin настроен как единая медиаплатформа с полным доступом к ${STORAGE_VIDEOS} и ${STORAGE_MUSIC}!${C_RES}"
+            ;;
+        2)
+            JELLYFIN_UNIFIED_MEDIA="yes"
+            save_homelab_env
+            install_module_jellyfin || true
+            install_module_navidrome || true
+            repair_storage_permissions
+            echo "${C_GRN}[✓] Активирован гибридный режим: Jellyfin и Navidrome работают параллельно над единой медиатекой!${C_RES}"
+            ;;
+        3)
+            JELLYFIN_UNIFIED_MEDIA="yes"
+            save_homelab_env
+            is_module_enabled "navidrome" && remove_module_navidrome || true
+            is_module_enabled "jellyfin" || install_module_jellyfin || true
+            repair_storage_permissions
+            echo "${C_GRN}[✓] Navidrome отключен, Jellyfin работает как единый сервер для музыки и видео.${C_RES}"
+            ;;
+    esac
+    return 0
+}
+
+# 6. Модуль yt-dlp с веб-интерфейсом (Очередь, прогресс, форматы, авто-сортировка Music / Videos / Movies / Series)
 detect_vaultwarden_web_dir() {
     for WV_CAND in \
         "/usr/share/webapps/vaultwarden-web" \
@@ -7054,73 +6454,6 @@ remove_module_jellyfin() {
 }
 
 # Сравнительный обзор и управление архитектурой медиатеки (Единый Jellyfin для видео+музыки vs связка с Navidrome)
-show_media_architecture_advisor() {
-    load_gateway_env
-    init_homelab_storage
-    JF_ST=$(is_module_enabled "jellyfin" && echo "${C_GRN}УСТАНОВЛЕН${C_RES}" || echo "${C_DIM}НЕ АКТИВЕН${C_RES}")
-    ND_ST=$(is_module_enabled "navidrome" && echo "${C_GRN}УСТАНОВЛЕН (доп. модуль)${C_RES}" || echo "${C_DIM}ОТКЛЮЧЕН${C_RES}")
-
-    echo ""
-    ui_box_top "================================================================="
-    echo "${C_BLD} 🎬🎵 Архитектура медиасервера: Интеграция музыки и видео в Jellyfin${C_RES}"
-    ui_box_top "================================================================="
-    echo " • Статус Jellyfin:  ${JF_ST} | Режим единой медиаплатформы: ${C_GRN}${JELLYFIN_UNIFIED_MEDIA:-yes}${C_RES}"
-    echo " • Статус Navidrome: ${ND_ST}"
-    ui_box_sep
-    echo " ${C_BLD}Рекомендуемая структура библиотек в Jellyfin (https://${DOM_JELLYFIN}):${C_RES}"
-    echo "  1. Библиотека «Movies» (Фильмы)   -> каталог: ${C_CYN}${STORAGE_VIDEOS_MOVIES}${C_RES} (и ${STORAGE_VIDEOS})"
-    echo "  2. Библиотека «Shows»  (Сериалы)  -> каталог: ${C_CYN}${STORAGE_VIDEOS_SERIES}${C_RES}"
-    echo "  3. Библиотека «Music»  (Музыка)   -> каталог: ${C_CYN}${STORAGE_MUSIC}${C_RES}"
-    ui_box_sep
-    echo " ${C_BLD}Сравнение возможностей (на ноябрь 2026 г.):${C_RES}"
-    echo "  • ${C_GRN}Jellyfin как единая платформа (Видео + Музыка):${C_RES}"
-    echo "    [+] Один сервер и единый веб-интерфейс для фильмов, сериалов и музыки."
-    echo "    [+] Отличное мобильное приложение для музыки: Finamp (Android/iOS, офлайн-кэш, gapless)"
-    echo "        и Symfonium, плюс штатные клиенты Jellyfin на Smart TV / ПК."
-    echo "    [+] Аппаратное/программное транскодирование через jellyfin-ffmpeg (FLAC/ALAC/Opus/MP3)."
-    echo "    [-] Не поддерживает протокол Subsonic API из коробки."
-    echo "  • ${C_CYN}Navidrome как дополнительный музыкальный модуль:${C_RES}"
-    echo "    [+] Ультра-легкий (~40-50 МБ ОЗУ), мгновенная индексация больших аудиотек."
-    echo "    [+] Полная поддержка Subsonic / OpenSubsonic API (DSub, Ultrasonic, Amperfy, Supersonic)."
-    echo "    [+] Оба сервиса (Jellyfin и Navidrome) могут работать ОДНОВРЕМЕННО поверх"
-    echo "        единого каталога ${STORAGE_MUSIC} без конфликтов!"
-    ui_box_sep
-    echo " Выберите режим работы медиастэка:"
-    echo "  1) ${C_GRN}Единая платформа Jellyfin (Видео + Музыка)${C_RES} — установить/обновить Jellyfin и выдать права на ${STORAGE_MUSIC}"
-    echo "  2) ${C_CYN}Гибридный режим (Jellyfin + Navidrome одновременно)${C_RES} — оба сервиса читают ${STORAGE_MUSIC}"
-    echo "  3) Отключить Navidrome (оставить только Jellyfin для экономии ОЗУ, сохранив все файлы)"
-    echo "  0) Назад"
-    printf "Выбор [0-3]: "
-    read -r MA_ACT < /dev/tty || true
-    case "$MA_ACT" in
-        1)
-            JELLYFIN_UNIFIED_MEDIA="yes"
-            save_homelab_env
-            install_module_jellyfin || true
-            repair_storage_permissions
-            echo "${C_GRN}[✓] Jellyfin настроен как единая медиаплатформа с полным доступом к ${STORAGE_VIDEOS} и ${STORAGE_MUSIC}!${C_RES}"
-            ;;
-        2)
-            JELLYFIN_UNIFIED_MEDIA="yes"
-            save_homelab_env
-            install_module_jellyfin || true
-            install_module_navidrome || true
-            repair_storage_permissions
-            echo "${C_GRN}[✓] Активирован гибридный режим: Jellyfin и Navidrome работают параллельно над единой медиатекой!${C_RES}"
-            ;;
-        3)
-            JELLYFIN_UNIFIED_MEDIA="yes"
-            save_homelab_env
-            is_module_enabled "navidrome" && remove_module_navidrome || true
-            is_module_enabled "jellyfin" || install_module_jellyfin || true
-            repair_storage_permissions
-            echo "${C_GRN}[✓] Navidrome отключен, Jellyfin работает как единый сервер для музыки и видео.${C_RES}"
-            ;;
-    esac
-    return 0
-}
-
-# 6. Модуль yt-dlp с веб-интерфейсом (Очередь, прогресс, форматы, авто-сортировка Music / Videos / Movies / Series)
 install_module_ytdlp() {
     echo "${C_CYN}[*] Установка модуля yt-dlp + Веб-панель загрузки (Audio -> Music / Video -> Videos)...${C_RES}"
     umask 022
@@ -7924,6 +7257,1632 @@ homelab_module_dispatch() {
 # ==============================================================================
 # Единый модуль резервного копирования (Шлюз + БД SQLite + Caddy PKI + Конфиги)
 # ==============================================================================
+print_homelab_services_table() {
+    init_homelab_registry
+    load_gateway_env
+    DISK_BADGE=$(get_storage_disk_badge)
+    DISK_PCT=$(get_disk_usage_pct "$STORAGE_ROOT")
+    DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
+
+    ui_box_top "🏠 МОДУЛИ ДОМАШНЕГО СЕРВЕРА (ALPINE HOMELAB & MEDIA STACK)"
+    ui_box_row "Хранилище ${STORAGE_ROOT}: ${DISK_BAR} ▸ ${C_CYN}${DISK_BADGE}${C_RES}"
+    ui_box_sep "СПИСОК МОДУЛЕЙ [1-9]"
+    IDX_M=0
+    while IFS='|' read -r M_ID M_EN M_SVC M_PORT M_DOM _M_USR M_TITLE; do
+        case "$M_ID" in ''|\#*) continue ;; esac
+        IDX_M=$((IDX_M + 1))
+        if [ "$M_EN" = "yes" ]; then
+            if rc-service "$M_SVC" status >/dev/null 2>&1; then
+                ST_BADGE="${C_GRN}[ ● РАБОТАЕТ ]  ${C_RES}"
+            elif ! is_storage_mount_ready && [ "$M_ID" != "caddy" ] && [ "$M_ID" != "vaultwarden" ]; then
+                ST_BADGE="${C_YEL}[ ▲ ЖДЕТ ДИСК ] ${C_RES}"
+            else
+                ST_BADGE="${C_RED}[ ✖ ОСТАНОВЛЕН ]${C_RES}"
+            fi
+        else
+            ST_BADGE="${C_DIM}[ ○ ВЫКЛЮЧЕН ]  ${C_RES}"
+        fi
+        if [ "$M_ID" = "caddy" ]; then
+            M_URL="http://ca.lan (PKI)"
+        elif [ "$M_DOM" != "_" ]; then
+            M_URL="https://${M_DOM}"
+        else
+            M_URL="\\\\$(hostname -s 2>/dev/null || echo HOMELAB)\\storage"
+        fi
+        printf "%s│%s  %s[%d]%s %-11s %s │ %-6s │ %-24s │ %s\n" "$C_CYN" "$C_RES" "$C_CYN" "$IDX_M" "$C_RES" "$M_ID" "$ST_BADGE" ":$M_PORT" "$M_URL" "$M_TITLE"
+    done < "$HOMELAB_STATE"
+    ui_box_bottom
+    return 0
+}
+
+# Глубокая проверка состояния подсистемы Homelab (Homelab Self-Test)
+run_homelab_self_test() {
+    init_homelab_registry
+    load_gateway_env
+    CUR_LIP=$(get_current_lan_ip)
+
+    ui_box_top "🔬 ДИАГНОСТИКА ПОДСИСТЕМЫ HOMELAB (HOMELAB SELF-TEST)"
+    if [ -d "$STORAGE_ROOT" ]; then
+        ST_PERM=$(stat -c "%a %U:%G" "$STORAGE_ROOT" 2>/dev/null || echo "н/д")
+        ui_box_row "${C_GRN}[✔]${C_RES} Единое хранилище (${STORAGE_ROOT}): ${C_GRN}ДОСТУПНО${C_RES} (права: ${ST_PERM} | $(get_storage_disk_badge))"
+    else
+        ui_box_row "${C_YEL}[▲]${C_RES} Единое хранилище (${STORAGE_ROOT}): еще не инициализировано"
+    fi
+
+    if find_caddy_root_cert; then
+        ui_box_row "${C_GRN}[✔]${C_RES} Локальный Root CA Caddy: ${C_GRN}СГЕНЕРИРОВАН${C_RES} (портал: http://${DOM_CA} / http://${CUR_LIP})"
+        ui_box_row "${C_GRN}[✔]${C_RES} Панели шлюза по HTTPS: ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} │ ${C_CYN}https://${DOM_ADGUARD}${C_RES}"
+    else
+        ui_box_row "${C_DIM}[○]${C_RES} Локальный Root CA Caddy: не активен (установите модуль caddy)"
+    fi
+
+    while IFS='|' read -r M_ID M_EN M_SVC M_PORT M_DOM _M_USR M_TITLE; do
+        case "$M_ID" in ''|\#*) continue ;; esac
+        [ "$M_EN" = "yes" ] || continue
+
+        if rc-service "$M_SVC" status >/dev/null 2>&1; then
+            SVC_TXT="${C_GRN}● ЗАПУЩЕН${C_RES}"
+        else
+            SVC_TXT="${C_RED}✖ ОСТАНОВЛЕН${C_RES}"
+        fi
+
+        if [ "$M_ID" = "samba" ]; then
+            WSDD_ST=$(rc-service wsdd status >/dev/null 2>&1 && echo "WSDD:OK" || echo "WSDD:OFF")
+            AVAHI_ST=$(rc-service avahi-daemon status >/dev/null 2>&1 && echo "Avahi:OK" || echo "Avahi:OFF")
+            PDB_ST="PDB:OK"
+            if command -v pdbedit >/dev/null 2>&1; then
+                pdbedit -L -w "${SMB_USER:-homelab}" 2>/dev/null | grep -q "^${SMB_USER:-homelab}:" || PDB_ST="PDB:FAIL"
+            fi
+            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ Юзер: ${SMB_USER:-homelab} (${PDB_ST}) │ LAN: ${C_CYN}${WSDD_ST}, ${AVAHI_ST}${C_RES}"
+        elif [ "$M_ID" = "caddy" ]; then
+            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ HTTPS :443 / PKI :80"
+        elif [ "$M_ID" = "vaultwarden" ]; then
+            HTTP_CODE=$(curl -k -o /dev/null -sS --connect-timeout 2 -m 4 -w '%{http_code}' "http://127.0.0.1:${M_PORT}/api/config" 2>/dev/null || true)
+            [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ] && HTTP_CODE="000"
+            WV_ST="WebVault:OK"
+            detect_vaultwarden_web_dir >/dev/null 2>&1 || WV_ST="WebVault:FAIL"
+            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ 127.0.0.1:${M_PORT} (HTTP ${HTTP_CODE}, ${WV_ST}) ▸ ${C_CYN}https://${M_DOM}${C_RES}"
+        else
+            HTTP_CODE=$(curl -k -o /dev/null -sS --connect-timeout 2 -m 4 -w '%{http_code}' "http://127.0.0.1:${M_PORT}" 2>/dev/null || true)
+            [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ] && HTTP_CODE="000"
+            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ 127.0.0.1:${M_PORT} (HTTP ${HTTP_CODE}) ▸ ${C_CYN}https://${M_DOM}${C_RES}"
+        fi
+    done < "$HOMELAB_STATE"
+    ui_box_bottom
+    return 0
+}
+
+# Мастер выбора модулей Homelab при первоначальной установке или доустановке
+#!/bin/sh
+# ==============================================================================
+# Модуль LXC (Linux Containers) для Universal Gateway & Homelab
+# Полноценная виртуализация ОС на базе пространств имен ядра и cgroups v2.
+# Поддержка официальных шаблонов (images.linuxcontainers.org), снимков (снапшотов),
+# сетевой изоляции (lxcbr0 / macvlan) и интеграции с хранилищем /srv/storage/lxc.
+# ==============================================================================
+
+LXC_STORAGE_DIR="/srv/storage/lxc"
+LXC_VAR_LIB="/var/lib/lxc"
+
+# Определение архитектуры для шаблонов images.linuxcontainers.org
+get_lxc_system_arch() {
+    ARCH=$(uname -m 2>/dev/null || echo "x86_64")
+    case "$ARCH" in
+        x86_64)  echo "amd64" ;;
+        aarch64) echo "arm64" ;;
+        armv7*)  echo "armhf" ;;
+        *)       echo "$ARCH" ;;
+    esac
+}
+
+# Инициализация и проверка подсистемы LXC (пакеты, cgroups v2, bridge lxcbr0, хранилище)
+ensure_lxc_subsystem() {
+    SILENT="${1:-no}"
+    [ "$SILENT" != "yes" ] && ui_info_msg "Проверка и подготовка подсистемы контейнеров LXC..."
+
+    # 1. Проверка системных пакетов
+    MISSING_LXC_PKGS=""
+    command -v lxc-create >/dev/null 2>&1 || MISSING_LXC_PKGS="$MISSING_LXC_PKGS lxc lxc-openrc lxc-bridge lxc-download lxc-templates lxcfs lxcfs-openrc bridge-utils dnsmasq cgroup-tools rsync"
+    command -v rsync >/dev/null 2>&1 || MISSING_LXC_PKGS="$MISSING_LXC_PKGS rsync"
+    if [ -n "$MISSING_LXC_PKGS" ]; then
+        [ "$SILENT" != "yes" ] && ui_step_progress 1 4 "Установка пакетов LXC и утилит виртуализации..."
+        apk add --no-cache $MISSING_LXC_PKGS >/dev/null 2>&1 || true
+    fi
+
+    # 2. Инициализация cgroups v2
+    if ! mount | grep -q "cgroup2 on /sys/fs/cgroup"; then
+        [ "$SILENT" != "yes" ] && ui_step_progress 2 4 "Монтирование контрольных групп cgroups v2..."
+        rc-service cgroups start >/dev/null 2>&1 || true
+    fi
+    rc-update add cgroups boot >/dev/null 2>&1 || true
+
+    # 3. Привязка каталога хранения контейнеров к /srv/storage/lxc
+    if [ -d "/srv/storage" ] && mountpoint -q /srv/storage 2>/dev/null; then
+        mkdir -p "$LXC_STORAGE_DIR"
+        chmod 755 "$LXC_STORAGE_DIR" 2>/dev/null || true
+        if [ ! -L "$LXC_VAR_LIB" ]; then
+            if [ -d "$LXC_VAR_LIB" ]; then
+                # Переносим существующие контейнеры при первой привязке
+                cp -a "${LXC_VAR_LIB}/." "${LXC_STORAGE_DIR}/" 2>/dev/null || true
+                rm -rf "$LXC_VAR_LIB"
+            fi
+            ln -sfn "$LXC_STORAGE_DIR" "$LXC_VAR_LIB"
+        fi
+    else
+        mkdir -p "$LXC_VAR_LIB"
+        chmod 755 "$LXC_VAR_LIB" 2>/dev/null || true
+    fi
+
+    # 4. Настройка сетевого моста lxcbr0 и DHCP (dnsmasq с port=0)
+    mkdir -p /etc/conf.d /etc/lxc
+    cat << 'CONF_EOF' > /etc/conf.d/dnsmasq.lxcbr0
+rc_before="lxc"
+BRIDGE_ADDR="10.0.3.1"
+BRIDGE_NETMASK="255.255.255.0"
+BRIDGE_NETWORK="10.0.3.0/24"
+BRIDGE_DHCP_RANGE="10.0.3.2,10.0.3.254"
+BRIDGE_DHCP_MAX="253"
+BRIDGE_MAC="00:16:3e:00:00:00"
+DNSMASQ_CONFFILE="/etc/lxc/dnsmasq.conf"
+DISABLE_IPTABLES="yes"
+CONF_EOF
+
+    # port=0 отключает встроенный DNS dnsmasq, чтобы не конфликтовать с AdGuard Home (:53)
+    # dhcp-option передает контейнерам адрес шлюза как DNS-резолвер
+    cat << 'DNSM_EOF' > /etc/lxc/dnsmasq.conf
+port=0
+dhcp-option=option:dns-server,10.0.3.1
+DNSM_EOF
+
+    # Конфигурация интерфейса по умолчанию для новых контейнеров
+    cat << 'DEF_EOF' > /etc/lxc/default.conf
+lxc.net.0.type = veth
+lxc.net.0.link = lxcbr0
+lxc.net.0.flags = up
+lxc.net.0.hwaddr = 10:66:6a:xx:xx:xx
+DEF_EOF
+
+    # 5. Запуск и регистрация служб в OpenRC
+    rc-service dnsmasq.lxcbr0 start >/dev/null 2>&1 || true
+    rc-update add dnsmasq.lxcbr0 default >/dev/null 2>&1 || true
+
+    rc-service lxcfs start >/dev/null 2>&1 || true
+    rc-update add lxcfs default >/dev/null 2>&1 || true
+
+    rc-service lxc start >/dev/null 2>&1 || true
+    rc-update add lxc default >/dev/null 2>&1 || true
+
+    [ "$SILENT" != "yes" ] && ui_ok_msg "Подсистема LXC активна. Мост lxcbr0 (10.0.3.1/24) готов к работе."
+    return 0
+}
+
+# Табличный список всех контейнеров, их IP, ОЗУ, статуса и автозапуска
+lxc_list_containers() {
+    ensure_lxc_subsystem "yes"
+    ui_box_top "📦 СПИСОК КОНТЕЙНЕРОВ LXC (LINUX CONTAINERS)"
+    printf "  ${C_CYN}%-16s %-12s %-16s %-10s %-8s %-10s${C_RES}\n" "ИМЯ" "СТАТУС" "IPV4" "ПАМЯТЬ" "АВТО" "СНАПШОТЫ"
+    echo "  ──────────────────────────────────────────────────────────────────────────"
+
+    REAL_LXC_PATH=$(readlink -f "$LXC_VAR_LIB" 2>/dev/null || echo "$LXC_VAR_LIB")
+    CT_FOUND=0
+
+    for CT_DIR in "${REAL_LXC_PATH}/"*; do
+        [ -d "$CT_DIR" ] || continue
+        CT_NAME=$(basename "$CT_DIR")
+        [ "$CT_NAME" = "*" ] && continue
+        [ -f "${CT_DIR}/config" ] || continue
+        CT_FOUND=$(( CT_FOUND + 1 ))
+
+        # Определение статуса и PID
+        STATE="STOPPED"
+        IPV4="-"
+        MEM_USE="-"
+        if command -v lxc-info >/dev/null 2>&1; then
+            INFO_OUT=$(lxc-info -n "$CT_NAME" 2>/dev/null || true)
+            if echo "$INFO_OUT" | grep -q "State:.*RUNNING"; then
+                STATE="RUNNING"
+                IPV4=$(echo "$INFO_OUT" | awk '/IP:/ {print $2}' | paste -sd "," - || echo "-")
+                [ -z "$IPV4" ] && IPV4="-"
+                RAW_MEM=$(echo "$INFO_OUT" | awk '/Memory use:/ {print $3, $4}' || true)
+                [ -n "$RAW_MEM" ] && MEM_USE="$RAW_MEM"
+            fi
+        fi
+
+        # Проверка автозапуска
+        AUTO_VAL="нет"
+        if grep -q "^lxc\.start\.auto[ \t]*=[ \t]*1" "${CT_DIR}/config" 2>/dev/null; then
+            AUTO_VAL="да"
+        fi
+
+        # Подсчет снапшотов
+        SNAPS_COUNT=0
+        if [ -d "${CT_DIR}/snaps" ]; then
+            SNAPS_COUNT=$(ls -1 "${CT_DIR}/snaps" 2>/dev/null | wc -l || echo 0)
+        fi
+
+        # Цветовая подсветка
+        if [ "$STATE" = "RUNNING" ]; then
+            STATE_FMT="${C_GRN}● RUNNING${C_RES} "
+        else
+            STATE_FMT="${C_DGR}○ STOPPED${C_RES} "
+        fi
+
+        printf "  %-16s %b %-16s %-10s %-8s %-10s\n" \
+               "$CT_NAME" "$STATE_FMT" "$IPV4" "$MEM_USE" "$AUTO_VAL" "${SNAPS_COUNT} шт."
+    done
+
+    if [ "$CT_FOUND" -eq 0 ]; then
+        ui_box_row "Контейнеры еще не созданы. Для создания выберите пункт 'Создать контейнер'."
+    fi
+    ui_box_bottom
+    echo ""
+    return 0
+}
+
+# Автоконфигурация сетевых интерфейсов и DHCP/DNS внутри rootfs гостевых ОС
+# Гарантирует немедленное получение IP для Debian, Kali, Ubuntu, Arch, Alma, Alpine
+lxc_autoseed_container_network() {
+    CT_NAME="$1"
+    DNS_IP="${2:-10.0.3.1}"
+    ROOTFS="${LXC_VAR_LIB}/${CT_NAME}/rootfs"
+    [ -d "$ROOTFS" ] || return 0
+
+    # 1. Debian / Ubuntu / Kali / Devuan (/etc/network/interfaces)
+    if [ -d "${ROOTFS}/etc/network" ]; then
+        if [ ! -f "${ROOTFS}/etc/network/interfaces" ] || ! grep -q "eth0" "${ROOTFS}/etc/network/interfaces" 2>/dev/null; then
+            cat << 'EOF' >> "${ROOTFS}/etc/network/interfaces"
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+EOF
+        fi
+    fi
+
+    # 2. systemd-networkd (Debian, Kali, Ubuntu, Arch Linux, AlmaLinux, Fedora)
+    if [ -d "${ROOTFS}/etc/systemd" ]; then
+        mkdir -p "${ROOTFS}/etc/systemd/network"
+        if [ ! -f "${ROOTFS}/etc/systemd/network/80-container-eth0.network" ]; then
+            cat << 'EOF' > "${ROOTFS}/etc/systemd/network/80-container-eth0.network"
+[Match]
+Name=eth0
+
+[Network]
+DHCP=yes
+EOF
+        fi
+        mkdir -p "${ROOTFS}/etc/systemd/system/multi-user.target.wants"
+        for srv in systemd-networkd.service systemd-resolved.service; do
+            for pfx in /lib/systemd/system /usr/lib/systemd/system; do
+                if [ -f "${ROOTFS}${pfx}/${srv}" ]; then
+                    ln -sf "${pfx}/${srv}" "${ROOTFS}/etc/systemd/system/multi-user.target.wants/${srv}" 2>/dev/null || true
+                fi
+            done
+        done
+    fi
+
+    # 3. Alpine Linux (OpenRC)
+    if [ -d "${ROOTFS}/etc/runlevels" ]; then
+        if [ -f "${ROOTFS}/etc/network/interfaces" ] && ! grep -q "eth0" "${ROOTFS}/etc/network/interfaces" 2>/dev/null; then
+            cat << 'EOF' >> "${ROOTFS}/etc/network/interfaces"
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+EOF
+        fi
+        if [ -f "${ROOTFS}/etc/init.d/networking" ]; then
+            mkdir -p "${ROOTFS}/etc/runlevels/default"
+            ln -sf /etc/init.d/networking "${ROOTFS}/etc/runlevels/default/networking" 2>/dev/null || true
+        fi
+    fi
+
+    # 4. Базовый resolv.conf (на случай задержек DHCP)
+    if [ ! -s "${ROOTFS}/etc/resolv.conf" ]; then
+        cat << EOF > "${ROOTFS}/etc/resolv.conf"
+nameserver ${DNS_IP}
+nameserver 1.1.1.1
+EOF
+    fi
+}
+
+# Интерактивное создание нового контейнера с загрузкой официального шаблона
+lxc_create_wizard() {
+    ensure_lxc_subsystem "no"
+    ui_banner "LXC // МАСТЕР СОЗДАНИЯ КОНТЕЙНЕРА"
+
+    LXC_ARCH=$(get_lxc_system_arch)
+
+    echo "${C_BOLD}Введите имя нового контейнера (латиница, цифры, дефис):${C_RES}"
+    read -r CT_NAME
+    CT_NAME=$(echo "$CT_NAME" | tr -cd 'a-zA-Z0-9_-')
+    if [ -z "$CT_NAME" ]; then
+        ui_warn_msg "Имя контейнера не может быть пустым. Отмена."
+        return 1
+    fi
+
+    if [ -d "${LXC_VAR_LIB}/${CT_NAME}" ]; then
+        ui_warn_msg "Контейнер с именем '${CT_NAME}' уже существует!"
+        return 1
+    fi
+
+    echo ""
+    LXC_ARCH=$(get_lxc_system_arch)
+    CACHE_FILE="/tmp/lxc_templates_${LXC_ARCH}.txt"
+
+    # Загружаем актуальный индекс образов images.linuxcontainers.org
+    if [ ! -s "$CACHE_FILE" ] || [ -n "$(find "$CACHE_FILE" -mmin +60 2>/dev/null)" ]; then
+        ui_step_progress 1 4 "Загрузка официального каталога образов images.linuxcontainers.org (${LXC_ARCH})..."
+        curl -s --connect-timeout 8 "https://images.linuxcontainers.org/meta/1.0/index-system" 2>/dev/null | \
+            awk -F';' -v a="$LXC_ARCH" '$3 == a && $4 == "default" {print $1, $2}' | \
+            sort -u -k1,1 -k2,2 > "${CACHE_FILE}.tmp" 2>/dev/null
+        if [ -s "${CACHE_FILE}.tmp" ]; then
+            mv -f "${CACHE_FILE}.tmp" "$CACHE_FILE"
+        fi
+    fi
+
+    # Резервный список шаблонов на случай отсутствия связи с сервером
+    if [ ! -s "$CACHE_FILE" ]; then
+        cat << 'FALLBACK_EOF' > "$CACHE_FILE"
+almalinux 9
+almalinux 10
+alpine 3.21
+alpine 3.22
+alpine 3.23
+alpine 3.24
+alpine edge
+alt p11
+archlinux current
+cachyos current
+centos 9-Stream
+centos 10-Stream
+debian bookworm
+debian trixie
+devuan daedalus
+fedora 43
+fedora 44
+kali current
+mint wilma
+nixos 26.05
+opensuse tumbleweed
+openwrt 25.12
+rockylinux 9
+ubuntu jammy
+ubuntu noble
+voidlinux current
+FALLBACK_EOF
+    fi
+
+    TOTAL_TMPL=$(wc -l < "$CACHE_FILE" | tr -d ' ')
+
+    ui_box_top "🌐 ОФИЦИАЛЬНЫЙ КАТАЛОГ ШАБЛОНОВ LXC (images.linuxcontainers.org / ${LXC_ARCH})"
+    awk '{lines[NR] = sprintf("  %2d) %-13s (%s)", NR, $1, $2)}
+    END {
+        half = int((NR + 1) / 2)
+        for (i = 1; i <= half; i++) {
+            right = (i + half <= NR) ? lines[i + half] : ""
+            printf "%-38s%s\n", lines[i], right
+        }
+    }' "$CACHE_FILE"
+    echo ""
+    echo "   0) Ввести произвольный дистрибутив и релиз вручную"
+    ui_box_bottom
+    echo ""
+
+    # Номер Alpine по умолчанию
+    DEFAULT_NUM=$(grep -n "^alpine 3\.24" "$CACHE_FILE" 2>/dev/null | cut -d: -f1 || echo "")
+    [ -z "$DEFAULT_NUM" ] && DEFAULT_NUM=$(grep -n "^alpine" "$CACHE_FILE" 2>/dev/null | head -n1 | cut -d: -f1 || echo "1")
+
+    printf "Выберите номер шаблона [1-%s, 0 для ручного ввода, по умолчанию %s]: " "$TOTAL_TMPL" "$DEFAULT_NUM"
+    read -r DIST_CHOICE
+    [ -z "$DIST_CHOICE" ] && DIST_CHOICE="$DEFAULT_NUM"
+
+    T_DIST="alpine"
+    T_REL="3.24"
+    if [ "$DIST_CHOICE" = "0" ]; then
+        echo "Введите название дистрибутива (например, fedora, debian, kali, opensuse):"
+        read -r T_DIST
+        echo "Введите версию релиза (например, current, bookworm, noble, 41):"
+        read -r T_REL
+    elif [ "$DIST_CHOICE" -ge 1 ] 2>/dev/null && [ "$DIST_CHOICE" -le "$TOTAL_TMPL" ] 2>/dev/null; then
+        SELECTED_LINE=$(sed -n "${DIST_CHOICE}p" "$CACHE_FILE")
+        T_DIST=$(echo "$SELECTED_LINE" | awk '{print $1}')
+        T_REL=$(echo "$SELECTED_LINE" | awk '{print $2}')
+    else
+        ui_warn_msg "Некорректный выбор. Используется Alpine по умолчанию."
+        T_DIST="alpine"
+        T_REL="3.24"
+    fi
+
+    echo ""
+    ui_info_msg "Выберите режим сетевого подключения:"
+    echo "  1) NAT / Изолированный мост lxcbr0 (10.0.3.X, DNS AdGuard, трафик через Sing-Box) [Рекомендуется]"
+    echo "  2) Прямой мост в домашнюю сеть (Macvlan на $(get_lan_ifname), свой IP от домашнего роутера)"
+    printf "Ваш выбор [1-2, по умолчанию 1]: "
+    read -r NET_CHOICE
+    [ -z "$NET_CHOICE" ] && NET_CHOICE="1"
+
+    echo ""
+    ui_info_msg "Конфигурация IP адреса контейнера:"
+    echo "  1) Динамический DHCP (автоматическое получение адреса) [Рекомендуется]"
+    echo "  2) Статический IPv4 (ручная фиксация адреса, шлюза и DNS)"
+    printf "Ваш выбор [1-2, по умолчанию 1]: "
+    read -r IP_MODE_CHOICE
+    [ -z "$IP_MODE_CHOICE" ] && IP_MODE_CHOICE="1"
+
+    STATIC_IP=""
+    STATIC_GW=""
+    STATIC_DNS=""
+    if [ "$IP_MODE_CHOICE" = "2" ]; then
+        DEFAULT_GW="10.0.3.1"
+        [ "$NET_CHOICE" = "2" ] && DEFAULT_GW="$(get_current_lan_ip | sed 's/\.[0-9]*$/.1/' 2>/dev/null || echo "192.168.1.1")"
+        echo "Введите статический IPv4 с CIDR маской (например, $([ "$NET_CHOICE" = "2" ] && echo "192.168.1.150/24" || echo "10.0.3.50/24")):"
+        read -r STATIC_IP
+        echo "Введите шлюз по умолчанию [Enter для ${DEFAULT_GW}]:"
+        read -r STATIC_GW
+        [ -z "$STATIC_GW" ] && STATIC_GW="$DEFAULT_GW"
+        echo "Введите DNS сервер [Enter для ${DEFAULT_GW}]:"
+        read -r STATIC_DNS
+        [ -z "$STATIC_DNS" ] && STATIC_DNS="$DEFAULT_GW"
+    fi
+
+    echo ""
+    ui_info_msg "Ограничение оперативной памяти (cgroups v2):"
+    echo "  Введите лимит (например: 256M, 512M, 1G) или нажмите Enter для безлимитного:"
+    read -r MEM_LIMIT
+
+    echo ""
+    ui_info_msg "Включить автозапуск контейнера при старте сервера Gateway?"
+    printf "Автозапуск (y/n, по умолчанию y): "
+    read -r AUTO_START_ANS
+    [ -z "$AUTO_START_ANS" ] && AUTO_START_ANS="y"
+
+    echo ""
+    ui_box_top "🚀 ПАРАМЕТРЫ СОЗДАНИЯ КОНТЕЙНЕРА"
+    ui_box_row "• Имя:          ${CT_NAME}"
+    ui_box_row "• Дистрибутив:  ${T_DIST} (релиз: ${T_REL}, архитектура: ${LXC_ARCH})"
+    ui_box_row "• Сеть:         $([ "$NET_CHOICE" = "2" ] && echo "Macvlan (LAN direct)" || echo "NAT (lxcbr0, 10.0.3.X)")"
+    ui_box_row "• Режим IP:     $([ -n "$STATIC_IP" ] && echo "Статический (${STATIC_IP}, шлюз ${STATIC_GW})" || echo "DHCP (Автоматически)")"
+    ui_box_row "• Лимит ОЗУ:    $([ -n "$MEM_LIMIT" ] && echo "$MEM_LIMIT" || echo "Без ограничений")"
+    ui_box_row "• Автозапуск:   $([ "$AUTO_START_ANS" = "y" ] && echo "Включен (lxc.start.auto = 1)" || echo "Выключен")"
+    ui_box_bottom
+    echo ""
+
+    ui_step_progress 1 3 "Загрузка официального шаблона из images.linuxcontainers.org..."
+    if ! lxc-create -t download -n "$CT_NAME" -- -d "$T_DIST" -r "$T_REL" -a "$LXC_ARCH"; then
+        ui_warn_box "Не удалось создать контейнер из шаблона." \
+                    "Проверьте соединение с images.linuxcontainers.org или правильность релиза."
+        return 1
+    fi
+
+    # Настройка конфигурационного файла контейнера
+    CT_CONF="${LXC_VAR_LIB}/${CT_NAME}/config"
+    if [ -f "$CT_CONF" ]; then
+        ui_step_progress 2 3 "Применение параметров сети, лимитов и автозапуска..."
+
+        if [ "$NET_CHOICE" = "2" ]; then
+            # Переопределение на Macvlan
+            LAN_IF=$(get_lan_ifname)
+            sed -i '/lxc\.net\.0\./d' "$CT_CONF"
+            cat << NET_MACVLAN >> "$CT_CONF"
+lxc.net.0.type = macvlan
+lxc.net.0.macvlan.mode = bridge
+lxc.net.0.link = ${LAN_IF}
+lxc.net.0.flags = up
+lxc.net.0.hwaddr = 10:66:6a:$(hexdump -n 3 -e '/1 ":%02x"' /dev/urandom 2>/dev/null | cut -c 2- || echo "11:22:33")
+NET_MACVLAN
+        fi
+
+        if [ -n "$STATIC_IP" ]; then
+            sed -i '/lxc\.net\.0\.ipv4\./d' "$CT_CONF"
+            echo "lxc.net.0.ipv4.address = ${STATIC_IP}" >> "$CT_CONF"
+            [ -n "$STATIC_GW" ] && echo "lxc.net.0.ipv4.gateway = ${STATIC_GW}" >> "$CT_CONF"
+        fi
+
+        if [ -n "$MEM_LIMIT" ]; then
+            sed -i '/lxc\.cgroup2\.memory\.max/d' "$CT_CONF"
+            echo "lxc.cgroup2.memory.max = ${MEM_LIMIT}" >> "$CT_CONF"
+        fi
+
+        if [ "$AUTO_START_ANS" = "y" ] || [ "$AUTO_START_ANS" = "Y" ]; then
+            sed -i '/lxc\.start\.auto/d' "$CT_CONF"
+            echo "lxc.start.auto = 1" >> "$CT_CONF"
+            echo "lxc.start.delay = 3" >> "$CT_CONF"
+        fi
+    fi
+
+    # Автонастройка сетевых сервисов внутри гостевого rootfs
+    lxc_autoseed_container_network "$CT_NAME" "${STATIC_DNS:-10.0.3.1}"
+
+    ui_step_progress 3 3 "Запуск контейнера ${CT_NAME}..."
+    lxc-start -n "$CT_NAME" 2>/dev/null || true
+    sleep 2
+
+    ui_ok_msg "Контейнер '${CT_NAME}' успешно создан и запущен!"
+    echo "• Для входа в консоль выполните: ${C_CYN}gw lxc attach ${CT_NAME}${C_RES}"
+    echo "• Для просмотра IP и статуса:     ${C_CYN}gw lxc list${C_RES}"
+    return 0
+}
+
+# Управление состоянием контейнера (start / stop / restart / attach)
+lxc_control() {
+    ACTION="$1"
+    NAME="$2"
+
+    if [ -z "$NAME" ]; then
+        echo "Введите имя контейнера:"
+        read -r NAME
+    fi
+    [ -z "$NAME" ] && return 1
+
+    case "$ACTION" in
+        start)
+            ui_info_msg "Запуск контейнера ${NAME}..."
+            lxc_autoseed_container_network "$NAME"
+            lxc-start -n "$NAME" && ui_ok_msg "Контейнер ${NAME} запущен." || ui_warn_msg "Ошибка запуска ${NAME}."
+            ;;
+        stop)
+            ui_info_msg "Остановка контейнера ${NAME}..."
+            lxc-stop -n "$NAME" -t 10 && ui_ok_msg "Контейнер ${NAME} остановлен." || lxc-stop -n "$NAME" -k
+            ;;
+        restart)
+            ui_info_msg "Перезапуск контейнера ${NAME}..."
+            lxc_autoseed_container_network "$NAME"
+            lxc-stop -n "$NAME" -t 5 2>/dev/null || true
+            sleep 1
+            lxc-start -n "$NAME" && ui_ok_msg "Контейнер ${NAME} перезапущен." || ui_warn_msg "Ошибка перезапуска."
+            ;;
+        fix-net|net-fix)
+            ui_info_msg "Автоисправление сетевой конфигурации для '${NAME}'..."
+            lxc_autoseed_container_network "$NAME"
+            if lxc-info -n "$NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
+                lxc-attach -n "$NAME" -- ip link set eth0 up 2>/dev/null || true
+                lxc-attach -n "$NAME" -- systemctl enable --now systemd-networkd 2>/dev/null || \
+                lxc-attach -n "$NAME" -- dhclient eth0 2>/dev/null || \
+                lxc-attach -n "$NAME" -- udhcpc -i eth0 2>/dev/null || true
+            fi
+            ui_ok_msg "Сетевая конфигурация для '${NAME}' успешно применена."
+            ;;
+        attach)
+            ui_info_msg "Вход в интерактивную сессию контейнера ${NAME} (выход: exit)..."
+            lxc-attach -n "$NAME"
+            ;;
+        delete|destroy)
+            ui_warn_msg "ВНИМАНИЕ! Контейнер '${NAME}' и все его файлы будут безвозвратно удалены."
+            printf "Вы уверены? (yes/no): "
+            read -r CONFIRM
+            if [ "$CONFIRM" = "yes" ]; then
+                lxc-stop -n "$NAME" -k 2>/dev/null || true
+                lxc-destroy -n "$NAME" -s -f && ui_ok_msg "Контейнер ${NAME} успешно удален." || ui_warn_msg "Ошибка удаления."
+            else
+                ui_info_msg "Удаление отменено."
+            fi
+            ;;
+        autostart)
+            CT_CONF="${LXC_VAR_LIB}/${NAME}/config"
+            if [ ! -f "$CT_CONF" ]; then
+                ui_warn_msg "Контейнер ${NAME} не найден."
+                return 1
+            fi
+            MODE="$3"
+            if [ "$MODE" = "on" ] || { [ -z "$MODE" ] && ! grep -q "^lxc\.start\.auto[ \t]*=[ \t]*1" "$CT_CONF"; }; then
+                sed -i '/lxc\.start\.auto/d' "$CT_CONF"
+                echo "lxc.start.auto = 1" >> "$CT_CONF"
+                echo "lxc.start.delay = 3" >> "$CT_CONF"
+                ui_ok_msg "Автозапуск для '${NAME}' ВКЛЮЧЕН."
+            else
+                sed -i '/lxc\.start\.auto/d' "$CT_CONF"
+                sed -i '/lxc\.start\.delay/d' "$CT_CONF"
+                ui_info_msg "Автозапуск для '${NAME}' ВЫКЛЮЧЕН."
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# Управление снимками (снапшотами) контейнера
+lxc_manage_snapshots() {
+    ARG1="${1:-}"
+    ARG2="${2:-}"
+    ARG3="${3:-}"
+
+    # Поддержка любого порядка аргументов: gw lxc snap <имя> <действие> ИЛИ gw lxc snap <действие> <имя>
+    case "$ARG1" in
+        create|snap|list|ls|restore|revert|delete|del|rm)
+            SUBACTION="$ARG1"
+            NAME="$ARG2"
+            SNAPNAME="$ARG3"
+            ;;
+        *)
+            NAME="$ARG1"
+            SUBACTION="$ARG2"
+            SNAPNAME="$ARG3"
+            ;;
+    esac
+    [ -z "$SUBACTION" ] && SUBACTION="list"
+
+    if [ -z "$NAME" ]; then
+        echo "Введите имя контейнера:"
+        read -r NAME
+    fi
+    [ -z "$NAME" ] && return 1
+
+    case "$SUBACTION" in
+        create|snap)
+            ui_info_msg "Создание снимка (снапшота) контейнера ${NAME}..."
+            # Директории требуют остановки или флага --allowrunning
+            lxc-snapshot -n "$NAME" --allowrunning 2>/dev/null || {
+                lxc-stop -n "$NAME" -t 5 2>/dev/null || true
+                lxc-snapshot -n "$NAME"
+                lxc-start -n "$NAME" 2>/dev/null || true
+            }
+            ui_ok_msg "Снимок контейнера ${NAME} успешно создан."
+            lxc-snapshot -n "$NAME" -L 2>/dev/null || true
+            ;;
+        list|ls)
+            ui_box_top "📸 СНИМКИ (СНАПШОТЫ) ДЛЯ КОНТЕЙНЕРА ${NAME}"
+            SN_LINES=$(lxc-snapshot -n "$NAME" -L 2>/dev/null || true)
+            if [ -n "$SN_LINES" ]; then
+                printf "%s\n" "$SN_LINES" | while read -r line; do
+                    ui_box_row "  • ${line}"
+                done
+            else
+                ui_box_row "  У контейнера ${NAME} пока нет сохраненных снимков."
+            fi
+            ui_box_bottom
+            ;;
+        restore)
+            if [ -z "$SNAPNAME" ]; then
+                ui_info_msg "Доступные снимки:"
+                lxc-snapshot -n "$NAME" -L 2>/dev/null || true
+                echo "Введите имя снимка для отката (например: snap0):"
+                read -r SNAPNAME
+            fi
+            [ -z "$SNAPNAME" ] && return 1
+
+            ui_warn_msg "Откат контейнера ${NAME} к снимку ${SNAPNAME} уничтожит текущие несохраненные изменения!"
+            printf "Продолжить откат? (yes/no): "
+            read -r C_ROLL
+            if [ "$C_ROLL" = "yes" ]; then
+                lxc-stop -n "$NAME" -k 2>/dev/null || true
+                if lxc-snapshot -n "$NAME" -r "$SNAPNAME"; then
+                    ui_ok_msg "Контейнер ${NAME} успешно восстановлен из снимка ${SNAPNAME}!"
+                    lxc-start -n "$NAME" 2>/dev/null || true
+                else
+                    ui_warn_msg "Ошибка восстановления из снимка."
+                fi
+            fi
+            ;;
+        delete)
+            if [ -z "$SNAPNAME" ]; then
+                echo "Введите имя снимка для удаления (например: snap0):"
+                read -r SNAPNAME
+            fi
+            [ -z "$SNAPNAME" ] && return 1
+            lxc-snapshot -n "$NAME" -d "$SNAPNAME" && ui_ok_msg "Снимок ${SNAPNAME} удален." || ui_warn_msg "Ошибка удаления снимка."
+            ;;
+        *)
+            echo "Использование: gw lxc snap <имя> [create|list|restore|delete] [имя_снимка]"
+            ;;
+    esac
+    return 0
+}
+
+# Диагностика и самоисцеление подсистемы LXC для gw doctor
+check_and_heal_lxc_doctor() {
+    # 1. Проверяем наличие пакетов lxc
+    if ! command -v lxc-create >/dev/null 2>&1; then
+        return 0
+    fi
+
+    # 2. Проверяем монтирование cgroups v2
+    if ! mount | grep -q "cgroup2 on /sys/fs/cgroup"; then
+        rc-service cgroups start >/dev/null 2>&1 || true
+    fi
+
+    # 3. Проверяем сетевой мост lxcbr0 и dnsmasq
+    if [ -f "/etc/conf.d/dnsmasq.lxcbr0" ]; then
+        if ! grep -q 'port=0' /etc/lxc/dnsmasq.conf 2>/dev/null; then
+            echo 'port=0' >> /etc/lxc/dnsmasq.conf
+            echo 'dhcp-option=option:dns-server,10.0.3.1' >> /etc/lxc/dnsmasq.conf
+        fi
+        if ! pgrep -f "dnsmasq.*lxcbr0" >/dev/null 2>&1; then
+            rc-service dnsmasq.lxcbr0 restart >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # 4. Проверяем службу lxcfs
+    if [ -f "/etc/init.d/lxcfs" ] && ! pgrep lxcfs >/dev/null 2>&1; then
+        rc-service lxcfs start >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# Интерактивное TUI меню управления LXC контейнерами
+lxc_interactive_menu() {
+    ensure_lxc_subsystem "no"
+    while true; do
+        ui_banner "LXC // УПРАВЛЕНИЕ КОНТЕЙНЕРАМИ И СНАПШОТАМИ"
+        lxc_list_containers
+
+        echo "  ${C_BOLD}Действия:${C_RES}"
+        echo "  1) ➕ Создать новый контейнер (Alpine, Debian, Ubuntu, Arch...)"
+        echo "  2) ▶  Запустить контейнер"
+        echo "  3) ⏹  Остановить контейнер"
+        echo "  4) 🔄 Перезапустить контейнер"
+        echo "  5) 💻 Войти в терминал контейнера (lxc-attach)"
+        echo "  6) 📸 Управление снимками (Снапшоты: создать / список / откат)"
+        echo "  7) ⚙  Переключить автозапуск при старте сервера"
+        echo "  8) 🔧 Автоисправление сети контейнера (DHCP / DNS)"
+        echo "  9) 🗑  Удалить контейнер"
+        echo "  0) ⬅  Назад в главное меню"
+        echo ""
+        printf "Выберите действие [0-9]: "
+        read -r M_ACT
+        case "$M_ACT" in
+            1) lxc_create_wizard ;;
+            2) lxc_control "start" ;;
+            3) lxc_control "stop" ;;
+            4) lxc_control "restart" ;;
+            5) lxc_control "attach" ;;
+            6)
+                echo "Введите имя контейнера для работы со снимками:"
+                read -r S_CT
+                if [ -n "$S_CT" ]; then
+                    echo "  1) Создать снимок (snapshot)"
+                    echo "  2) Список снимков"
+                    echo "  3) Восстановить из снимка"
+                    echo "  4) Удалить снимок"
+                    printf "Действие [1-4]: "
+                    read -r SS_ACT
+                    case "$SS_ACT" in
+                        1) lxc_manage_snapshots "create" "$S_CT" ;;
+                        2) lxc_manage_snapshots "list" "$S_CT" ;;
+                        3) lxc_manage_snapshots "restore" "$S_CT" ;;
+                        4) lxc_manage_snapshots "delete" "$S_CT" ;;
+                    esac
+                fi
+                ;;
+            7)
+                echo "Введите имя контейнера для переключения автозапуска:"
+                read -r A_CT
+                [ -n "$A_CT" ] && lxc_control "autostart" "$A_CT"
+                ;;
+            8)
+                echo "Введите имя контейнера для автоисправления сети:"
+                read -r N_CT
+                [ -n "$N_CT" ] && lxc_control "fix-net" "$N_CT"
+                ;;
+            9) lxc_control "delete" ;;
+            0|q|Q) break ;;
+        esac
+        echo ""
+        echo "Нажмите Enter для продолжения..."
+        read -r _DUMMY
+    done
+    return 0
+}
+send_telegram_msg() {
+    MSG_TEXT="$1"
+    load_gateway_env
+    is_telegram_configured || return 0
+
+    TG_API_URL="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage"
+    for CURL_P in "-x http://127.0.0.1:7890" ""; do
+        # shellcheck disable=SC2086
+        if curl -fsSL --curves X25519:P-256 --connect-timeout 4 -m 8 $CURL_P \
+            -X POST "$TG_API_URL" \
+            --data-urlencode "chat_id=${TG_CHAT_ID}" \
+            --data-urlencode "text=${MSG_TEXT}" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Отправка архива резервной копии шлюза и Homelab файлом в Telegram
+send_telegram_backup() {
+    BAK_FILE="${1:-$BACKUP_ARCHIVE}"
+    load_gateway_env
+    if ! is_telegram_configured; then
+        echo "${C_YEL}[!] Telegram-бот не настроен (укажите Токен и Chat ID в меню).${C_RES}"
+        return 1
+    fi
+    if [ ! -f "$BAK_FILE" ]; then
+        echo "${C_RED}[X] Файл бэкапа ${BAK_FILE} не найден!${C_RES}"
+        return 1
+    fi
+
+    CAPTION_TXT="📦 Бэкап шлюза и Homelab (${OS_NAME})
+🌐 LAN IP: $(get_current_lan_ip)
+🕒 Дата: $(date '+%Y-%m-%d %H:%M:%S')"
+    TG_DOC_URL="https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument"
+
+    echo "Отправка архива ${BAK_FILE} в ваш Telegram..."
+    for CURL_P in "-x http://127.0.0.1:7890" ""; do
+        # shellcheck disable=SC2086
+        if curl -fsSL --curves X25519:P-256 --connect-timeout 5 -m 30 $CURL_P \
+            -F "chat_id=${TG_CHAT_ID}" \
+            -F "caption=${CAPTION_TXT}" \
+            -F "document=@${BAK_FILE}" \
+            "$TG_DOC_URL" >/dev/null 2>&1; then
+            echo "${C_GRN}[✓] Архив бэкапа успешно доставлен в ваш Telegram!${C_RES}"
+            return 0
+        fi
+    done
+    echo "${C_RED}[X] Не удалось отправить бэкап в Telegram (проверьте Токен, Chat ID и соединение).${C_RES}"
+    return 1
+}
+
+# Интерактивная настройка Telegram-бота для облачных бэкапов и уведомлений
+configure_telegram_menu() {
+    load_gateway_env
+    echo ""
+    ui_box_top "Настройка Telegram (Облачный бэкап + Уведомления)"
+    if is_telegram_configured; then
+        echo " • Статус: ${C_GRN}ПОДКЛЮЧЕН${C_RES} (Chat ID: ${TG_CHAT_ID})"
+    else
+        echo " • Статус: ${C_DIM}НЕ НАСТРОЕН${C_RES}"
+    fi
+    ui_box_sep
+    echo " 1) Указать / изменить Токен бота (@BotFather) и ваш Chat ID"
+    echo " 2) Отправить тестовое сообщение в Telegram"
+    echo " 3) Отключить Telegram-уведомления и очистить токен"
+    echo " 0) Назад"
+    printf "Выбор [0-3]: "
+    read -r TG_ACT < /dev/tty || true
+    case "$TG_ACT" in
+        1)
+            printf "Введите API Token бота (от @BotFather): "
+            read -r IN_TOK < /dev/tty || true
+            IN_TOK=$(printf "%s" "$IN_TOK" | tr -d ' \t\r\n')
+            printf "Введите ваш Chat ID (узнать можно в @userinfobot): "
+            read -r IN_CID < /dev/tty || true
+            IN_CID=$(printf "%s" "$IN_CID" | tr -d ' \t\r\n')
+            if [ -n "$IN_TOK" ] && [ -n "$IN_CID" ]; then
+                TG_BOT_TOKEN="$IN_TOK"
+                TG_CHAT_ID="$IN_CID"
+                save_gateway_env
+                if send_telegram_msg "✅ Сервер (${OS_NAME} | $(get_current_lan_ip)) успешно подключен к Telegram!"; then
+                    echo "${C_GRN}[✓] Настройки сохранены, тестовое сообщение доставлено!${C_RES}"
+                else
+                    echo "${C_YEL}[!] Настройки сохранены, но тестовое сообщение не прошло (проверьте нажали ли вы /start у бота).${C_RES}"
+                fi
+            else
+                echo "${C_RED}[X] Отмена: Токен и Chat ID не могут быть пустыми.${C_RES}"
+            fi
+            ;;
+        2)
+            if send_telegram_msg "🔔 Проверка связи с сервером (${OS_NAME} | $(get_current_lan_ip)). Все системы работают нормально."; then
+                echo "${C_GRN}[✓] Тестовое уведомление успешно отправлено!${C_RES}"
+            else
+                echo "${C_RED}[X] Ошибка отправки сообщения.${C_RES}"
+            fi
+            ;;
+        3)
+            TG_BOT_TOKEN=""
+            TG_CHAT_ID=""
+            save_gateway_env
+            echo "${C_GRN}[✓] Telegram-уведомления отключены.${C_RES}"
+            ;;
+    esac
+    return 0
+}
+
+# Авто-ротация логов шлюза и сервисов Homelab (защита от переполнения диска)
+rotate_gateway_logs() {
+    for LOG_F in "$SB_LOG_FILE" "$AUTOUPDATE_LOG" /var/log/caddy.log /var/log/vaultwarden.log /var/log/ytdlp-webui.log /var/log/code-server.log /var/log/navidrome.log /var/log/jellyfin.log /var/log/qbittorrent-nox.log; do
+        if [ -f "$LOG_F" ]; then
+            F_SIZE=$(wc -c < "$LOG_F" 2>/dev/null | tr -d ' \t\r\n' || echo "0")
+            if [ "${F_SIZE:-0}" -gt 1048576 ]; then
+                tail -n 500 "$LOG_F" > "${LOG_F}.tmp" 2>/dev/null && mv -f "${LOG_F}.tmp" "$LOG_F" 2>/dev/null || true
+            fi
+        fi
+    done
+    return 0
+}
+
+# ==============================================================================
+# Движок проверки обновлений Git и самообновления всего комплекса Gateway
+# ==============================================================================
+
+# Проверка наличия обновлений в Git-репозитории шлюза (с кэшированием на 2 часа для нулевых задержек)
+check_gateway_repo_updates() {
+    FORCE_CHK="${1:-no}"
+    CACHE_F="/tmp/gateway_update_check.cache"
+    NOW_TS=$(date +%s 2>/dev/null || echo 0)
+
+    if [ "$FORCE_CHK" != "force" ] && [ -f "$CACHE_F" ]; then
+        IFS='|' read -r C_STAT C_BEHIND C_REM C_TIME < "$CACHE_F" 2>/dev/null || true
+        AGE=$(( NOW_TS - ${C_TIME:-0} ))
+        if [ "$AGE" -ge 0 ] && [ "$AGE" -lt 7200 ]; then
+            [ "$C_STAT" = "UPDATE_AVAILABLE" ] && return 0 || return 1
+        fi
+    fi
+
+    if [ ! -d "${GATEWAY_DIR}/.git" ] || ! command -v git >/dev/null 2>&1; then
+        echo "NO_GIT|0||${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
+        return 1
+    fi
+
+    CUR_BRANCH=$(git -C "${GATEWAY_DIR}" branch --show-current 2>/dev/null || echo "main")
+    [ -z "$CUR_BRANCH" ] && CUR_BRANCH="main"
+
+    # Быстрый fetch с таймаутом без блокировки консоли
+    if ! git -C "${GATEWAY_DIR}" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=4 fetch --quiet origin "$CUR_BRANCH" >/dev/null 2>&1; then
+        return 1
+    fi
+
+    LOCAL_H=$(git -C "${GATEWAY_DIR}" rev-parse HEAD 2>/dev/null || true)
+    REMOTE_H=$(git -C "${GATEWAY_DIR}" rev-parse "origin/${CUR_BRANCH}" 2>/dev/null || true)
+
+    if [ -n "$LOCAL_H" ] && [ -n "$REMOTE_H" ] && [ "$LOCAL_H" != "$REMOTE_H" ]; then
+        BEHIND_CNT=$(git -C "${GATEWAY_DIR}" rev-list --count "HEAD..origin/${CUR_BRANCH}" 2>/dev/null || echo 1)
+        echo "UPDATE_AVAILABLE|${BEHIND_CNT}|${REMOTE_H}|${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
+        return 0
+    else
+        echo "UP_TO_DATE|0|${LOCAL_H}|${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
+        return 1
+    fi
+}
+
+# Получение компактного статуса версии для баннера MOTD и шапки меню
+get_gateway_update_badge() {
+    if check_gateway_repo_updates "no"; then
+        B_CNT=$(awk -F'|' '{print $2}' /tmp/gateway_update_check.cache 2>/dev/null || echo 1)
+        printf "%b" "${C_YEL}🔔 Доступно обновление (${B_CNT} комм.) ➔ gw update${C_RES}"
+    else
+        if [ -d "${GATEWAY_DIR}/.git" ] && command -v git >/dev/null 2>&1; then
+            CUR_SHORT=$(git -C "${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo "main")
+            printf "%b" "${C_GRN}v2026.11 (${CUR_SHORT}) [актуальна ●]${C_RES}"
+        else
+            printf "%b" "${C_GRN}v2026.11 (Standalone) [актуальна ●]${C_RES}"
+        fi
+    fi
+}
+
+# Полное атомарное самообновление: Git-репозиторий + ядра + модули Homelab
+self_update_gateway() {
+    SU_MODE="${1:-}"
+
+    if [ "$SU_MODE" = "check" ] || [ "$SU_MODE" = "status" ]; then
+        ui_banner "GATEWAY UPDATE // ПРОВЕРКА ОБНОВЛЕНИЙ ИЗ GIT"
+        ui_step_progress 1 1 "Связь с удаленным Git-репозиторием..."
+        CUR_BRANCH=$(git -C "${GATEWAY_DIR}" branch --show-current 2>/dev/null || echo "main")
+        [ -z "$CUR_BRANCH" ] && CUR_BRANCH="main"
+        if check_gateway_repo_updates "force"; then
+            B_CNT=$(awk -F'|' '{print $2}' /tmp/gateway_update_check.cache 2>/dev/null || echo 1)
+            ui_box_top "🔔 ДОСТУПНА НОВАЯ ВЕРСИЯ ШЛЮЗА (новых коммитов: ${B_CNT})"
+            git -C "${GATEWAY_DIR}" log --oneline -n 5 "HEAD..origin/${CUR_BRANCH}" 2>/dev/null | while read -r line; do
+                ui_box_row "  • ${line}"
+            done
+            ui_box_bottom
+            echo "Для установки обновления выполните: ${C_CYN}gw update${C_RES}"
+        else
+            CUR_H=$(git -C "${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo "HEAD")
+            ui_ok_msg "У вас установлена последняя версия Gateway (${CUR_H}), обновлений нет."
+        fi
+        return 0
+    fi
+
+    ui_banner "GATEWAY UPDATE // ПОЛНОЕ ОБНОВЛЕНИЕ ШЛЮЗА, ЯДЕР И HOMELAB"
+
+    # 1. Обновление кодовой базы из Git
+    UPDATED_REPO="no"
+    if [ -d "${GATEWAY_DIR}/.git" ] && command -v git >/dev/null 2>&1; then
+        ui_step_progress 1 5 "Загрузка обновлений скриптов шлюза из Git-репозитория..."
+        cd "${GATEWAY_DIR}"
+        CUR_BRANCH=$(git branch --show-current 2>/dev/null || echo "main")
+        [ -z "$CUR_BRANCH" ] && CUR_BRANCH="main"
+        if git fetch --quiet origin "$CUR_BRANCH" 2>/dev/null; then
+            LOC_H=$(git rev-parse HEAD 2>/dev/null || true)
+            REM_H=$(git rev-parse "origin/${CUR_BRANCH}" 2>/dev/null || true)
+            if [ -n "$LOC_H" ] && [ -n "$REM_H" ] && [ "$LOC_H" != "$REM_H" ]; then
+                ui_info_msg "Обнаружены новые изменения. Применение (git pull)..."
+                STASHED="no"
+                if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+                    git stash save --include-untracked "gateway_auto_stash_$(date +%s)" >/dev/null 2>&1 && STASHED="yes" || true
+                fi
+                if git pull --ff-only origin "$CUR_BRANCH" 2>/dev/null || git pull origin "$CUR_BRANCH" 2>/dev/null; then
+                    UPDATED_REPO="yes"
+                    ui_ok_msg "Кодовая база шлюза успешно обновлена до $(git rev-parse --short HEAD 2>/dev/null)!"
+                else
+                    ui_warn_box "Не удалось автоматически слить изменения Git (возможен локальный конфликт)." \
+                                "Проверьте git status в каталоге ${GATEWAY_DIR}."
+                fi
+                if [ "$STASHED" = "yes" ]; then
+                    git stash pop >/dev/null 2>&1 || true
+                fi
+            else
+                ui_ok_msg "Скрипты шлюза уже соответствуют последней версии в репозитории."
+            fi
+        else
+            ui_warn_box "Не удалось подключиться к Git-репозиторию." "Продолжаем обновление локальных бинарников и ядер."
+        fi
+        chmod +x "${GATEWAY_DIR}/gateway.sh" "${GATEWAY_DIR}/setup.sh" 2>/dev/null || true
+        [ -d "${GATEWAY_DIR}/scripts" ] && chmod +x "${GATEWAY_DIR}/scripts/"*.sh 2>/dev/null || true
+        ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gateway 2>/dev/null || true
+        ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gw 2>/dev/null || true
+        rm -f /tmp/gateway_update_check.cache 2>/dev/null || true
+    fi
+
+    # 2. Обновление ядер Sing-Box Extended, AdGuard Home и панели Zashboard
+    ui_step_progress 2 5 "Обновление ядер Sing-Box Extended, AdGuard Home и панели Zashboard..."
+    update_cores_only "yes"
+
+    # 3. Обновление активных модулей Homelab
+    ui_step_progress 3 5 "Проверка обновлений для активных модулей Homelab..."
+    if [ -f "$HOMELAB_STATE" ]; then
+        while IFS='|' read -r M_ID M_EN _REST; do
+            case "$M_ID" in ''|\#*) continue ;; esac
+            if [ "$M_EN" = "yes" ]; then
+                homelab_module_dispatch "$M_ID" "update" 2>/dev/null || true
+            fi
+        done < "$HOMELAB_STATE"
+    fi
+
+    # 4. Пересборка конфига, сброс conntrack и перезапуск
+    ui_step_progress 4 5 "Пересборка конфигурации Sing-Box и перезапуск служб..."
+    backup_gateway_state
+    load_gateway_env
+    if apply_and_verify_singbox "Полное обновление шлюза и компонентов"; then
+        conntrack -F >/dev/null 2>&1 || true
+        service_ctl sing-box restart || true
+        service_ctl adguardhome restart || true
+    fi
+
+    # 5. Итоговый отчет о готовности
+    ui_step_progress 5 5 "Верификация состояния обновленной системы..."
+    sleep 2
+    echo ""
+    ui_box_top "🎉 РЕЗУЛЬТАТ ПОЛНОГО ОБНОВЛЕНИЯ СЕРВЕРА"
+    if pgrep sing-box >/dev/null 2>&1 && pgrep AdGuardHome >/dev/null 2>&1; then
+        ui_box_row "${C_GRN}[✔] Все службы шлюза и модули Homelab активны и работают стабильно!${C_RES}"
+    else
+        ui_box_row "${C_YEL}[▲] Некоторые службы перезапускаются или требуют внимания (запустите: gw doctor)${C_RES}"
+    fi
+    ui_box_row "• Версия скриптов: $(git -C "${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'Standalone')"
+    ui_box_row "• Ядро Sing-Box:   $(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || echo 'OK')"
+    ui_box_row "• AdGuard Home:    $(/usr/bin/AdGuardHome --version 2>&1 | sed -n 's/.*version \(v[0-9.a-zA-Z_.-]*\).*/\1/p' | head -n 1 || echo 'OK')"
+    ui_box_bottom
+    echo ""
+
+    if [ "$UPDATED_REPO" = "yes" ]; then
+        ui_info_msg "Процесс шлюза будет перезапущен для применения обновленного кода..."
+        sleep 1
+        exec /usr/bin/gw motd
+    fi
+    return 0
+}
+
+# Активное сканирование всей /24 подсети LAN (прогрев ARP-таблицы за ~1.5 сек)
+change_unified_password() {
+    NEW_PASS=$(printf "%s" "$1" | tr -d '\r\n')
+    SYNC_SMB_ANS="${2:-ask}"
+    if [ -z "$NEW_PASS" ]; then
+        echo "${C_RED}[X] Ошибка: Пароль не может быть пустым!${C_RES}"
+        return 1
+    fi
+    load_gateway_env
+    OLD_ADMIN_PASS="${ADMIN_PASS:-}"
+    OLD_SMB_PASS="${SMB_PASS:-}"
+
+    ADMIN_PASS="$NEW_PASS"
+    if [ "$SYNC_SMB_ANS" = "yes" ] || [ -z "$OLD_SMB_PASS" ] || [ "$OLD_SMB_PASS" = "$OLD_ADMIN_PASS" ]; then
+        SMB_PASS="$NEW_PASS"
+    elif [ "$SYNC_SMB_ANS" = "ask" ] && [ -t 0 ]; then
+        printf "Обновить также пароль сетевой папки Samba для пользователя '%s'? (y/n) [Enter = y]: " "${SMB_USER:-homelab}"
+        read -r IN_SYNC_SMB < /dev/tty || true
+        IN_SYNC_SMB=$(printf "%s" "$IN_SYNC_SMB" | tr -d ' \t\r\n')
+        [ -z "$IN_SYNC_SMB" ] && IN_SYNC_SMB="y"
+        case "$IN_SYNC_SMB" in
+            [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа]) SMB_PASS="$NEW_PASS" ;;
+        esac
+    fi
+
+    save_gateway_env
+    save_homelab_env
+    generate_singbox_config
+
+    service_ctl adguardhome stop
+    command -v htpasswd >/dev/null 2>&1 || apk add --no-cache apache2-utils >/dev/null 2>&1 || true
+    if [ -f "$AGH_CONF" ]; then
+        CUR_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
+        [ -z "$CUR_AGH_USER" ] && CUR_AGH_USER="admin" || true
+        NEW_HASH=""
+        if command -v htpasswd >/dev/null 2>&1; then
+            NEW_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$CUR_AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
+            [ -z "$NEW_HASH" ] && NEW_HASH=$(htpasswd -nbBC 10 "$CUR_AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true) || true
+        elif [ -x /usr/sbin/caddy ]; then
+            NEW_HASH=$(/usr/sbin/caddy hash-password --plaintext "$ADMIN_PASS" 2>/dev/null | tail -n 1 | tr -d '\r\n' || true)
+        fi
+        if [ -n "$NEW_HASH" ]; then
+            CUR_AGH_USER="$CUR_AGH_USER" NEW_HASH="$NEW_HASH" awk '
+                BEGIN {
+                    u = ENVIRON["CUR_AGH_USER"];
+                    h = ENVIRON["NEW_HASH"];
+                }
+                /^users:/ {
+                    print "users:"
+                    print "  - name: " u
+                    print "    password: " h
+                    in_users=1; next
+                }
+                in_users && /^[^[:space:]]/ { in_users=0 }
+                in_users { next }
+                { print }
+            ' "$AGH_CONF" > "${AGH_CONF}.tmp" && mv "${AGH_CONF}.tmp" "$AGH_CONF"
+            chmod 600 "$AGH_CONF" 2>/dev/null || true
+        fi
+    fi
+
+    # Синхронизация и верификация пароля Samba
+    if command -v smbpasswd >/dev/null 2>&1; then
+        if ! apply_and_verify_samba_password "${SMB_USER:-homelab}" "${SMB_PASS:-$ADMIN_PASS}"; then
+            echo "${C_YEL}[!] Предупреждение: Не удалось подтвердить обновление записи Samba passdb для ${SMB_USER:-homelab}.${C_RES}"
+        fi
+    fi
+
+    # Синхронизация ADMIN_TOKEN в Vaultwarden (если модуль установлен)
+    if [ -f /etc/conf.d/vaultwarden ] || is_module_enabled "vaultwarden"; then
+        sync_vaultwarden_config >/dev/null 2>&1 || true
+        is_module_enabled "vaultwarden" && service_ctl vaultwarden restart || true
+    fi
+
+    # Синхронизация BasicAuth в Caddy для защищенных модулей
+    if [ -x /usr/sbin/caddy ] && [ -d "$CADDY_CONFD" ]; then
+        is_module_enabled "ytdlp" && register_caddy_site "ytdlp" "$DOM_YTDLP" "$PORT_YTDLP" "yes" >/dev/null 2>&1 || true
+        is_module_enabled "torrent" && register_caddy_site "torrent" "$DOM_TORRENT" "$PORT_TORRENT_WEB" "yes" >/dev/null 2>&1 || true
+        is_module_enabled "code" && register_caddy_site "code" "$DOM_CODE" "$PORT_CODE" "yes" >/dev/null 2>&1 || true
+    fi
+
+    service_ctl sing-box restart || true
+    service_ctl adguardhome start || true
+    echo "${C_GRN}[✓] Единый пароль успешно синхронизирован (Sing-Box, AdGuard Home, Samba, Vaultwarden, Caddy)!${C_RES}"
+    return 0
+}
+
+# Управление Умным DHCP-сервером на Alpine Linux (dnsmasq на порту 5353)
+is_autoupdate_enabled() {
+    grep -q "/usr/bin/gateway autoupdate" "$CRON_FILE" 2>/dev/null
+}
+
+is_watchdog_enabled() {
+    grep -q "/usr/bin/gateway watchdog" "$CRON_FILE" 2>/dev/null
+}
+
+# Включение автообновления (ежедневно в 04:00 через crond)
+enable_autoupdate() {
+    mkdir -p /etc/crontabs
+    touch "$CRON_FILE"
+    sed -i '\|/usr/bin/gateway autoupdate|d' "$CRON_FILE" 2>/dev/null || true
+    echo "0 4 * * * /usr/bin/gateway autoupdate >${AUTOUPDATE_LOG} 2>&1" >> "$CRON_FILE"
+    service_ctl cron enable
+    service_ctl cron restart
+    return 0
+}
+
+# Отключение автообновления
+disable_autoupdate() {
+    if [ -f "$CRON_FILE" ]; then
+        sed -i '\|/usr/bin/gateway autoupdate|d' "$CRON_FILE" 2>/dev/null || true
+    fi
+    service_ctl cron reload
+    return 0
+}
+
+# Управление встроенным Watchdog (самоисцеление служб каждые 5 минут)
+enable_watchdog() {
+    mkdir -p /etc/crontabs
+    touch "$CRON_FILE"
+    sed -i '\|/usr/bin/gateway watchdog|d' "$CRON_FILE" 2>/dev/null || true
+    echo "*/5 * * * * /usr/bin/gateway watchdog >/dev/null 2>&1" >> "$CRON_FILE"
+    service_ctl cron enable
+    service_ctl cron restart
+    return 0
+}
+
+disable_watchdog() {
+    if [ -f "$CRON_FILE" ]; then
+        sed -i '\|/usr/bin/gateway watchdog|d' "$CRON_FILE" 2>/dev/null || true
+    fi
+    service_ctl cron reload
+    return 0
+}
+
+# Проверка: смонтирован ли сейчас внешний диск в /srv/storage
+run_gateway_doctor() {
+    set +e
+    detect_os
+    load_gateway_env
+    ui_banner "GATEWAY DOCTOR // АВТОМАТИЧЕСКАЯ ДИАГНОСТИКА И ПОЧИНКА"
+    ui_box_top "🩺 ПРОТОКОЛ САМОИСЦЕЛЕНИЯ СИСТЕМЫ (DOCTOR 2.0)"
+
+    ui_step_progress 1 6 "Проверка целостности конфигов, PID-блокировок и баз SQLite после сбоя питания..."
+    rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
+    check_and_recover_power_loss_state
+    rm -f "$POWER_LOSS_FLAG" 2>/dev/null || true
+
+    ui_step_progress 2 6 "Подгрузка ядерных модулей (tun, tcp_bbr, nftables, dm_crypt) и настройка sysctl..."
+    ensure_alpine_modules
+    [ -f /etc/sysctl.d/99-gateway-forward.conf ] && sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf >/dev/null 2>&1 || true
+
+    ui_step_progress 3 6 "Проверка DNS-резолвера (/etc/resolv.conf) и таблиц файрвола nftables..."
+    write_resolv_conf "nameserver 127.0.0.1
+nameserver ${GW_IP:-192.168.1.1}
+nameserver 77.88.8.8"
+    sync_user_domain_rulesets
+    sync_dns_firewall "yes" "keep" >/dev/null 2>&1 || true
+
+    ui_step_progress 4 6 "Проверка внешнего накопителя (${STORAGE_ROOT}), LUKS2 и прав доступа (${MEDIA_GROUP})..."
+    if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] && ! is_external_storage_mounted; then
+        if try_auto_unlock_and_mount_storage; then
+            ui_ok_msg "Внешний накопитель автоматически разблокирован, проверен fsck и смонтирован!"
+        else
+            ui_warn_box "Внешний накопитель (${STORAGE_ROOT}) ожидает ручного ввода пароля LUKS2 или подключения кабеля." \
+                        "Подключите диск и выполните команду: gateway unlock"
+        fi
+    fi
+    if is_storage_mount_ready; then
+        sync_all_homelab_permissions >/dev/null 2>&1 || true
+    fi
+
+    ui_step_progress 5 6 "Валидация и перезапуск служб Sing-Box Extended, AdGuard Home и Conntrack..."
+    if [ ! -s "$SB_CONF" ] || ! check_singbox_config; then
+        generate_singbox_config
+    fi
+    service_ctl sing-box restart
+    sleep 2
+    service_ctl adguardhome restart
+    conntrack -F >/dev/null 2>&1 || true
+    reload_singbox_api
+
+    ui_step_progress 6 6 "Проверка и запуск активных модулей Homelab..."
+    if is_module_enabled "caddy"; then
+        reload_caddy_safe >/dev/null 2>&1 || true
+    fi
+    if is_storage_mount_ready; then
+        start_storage_dependent_services
+    else
+        stop_storage_dependent_services
+    fi
+    check_and_heal_lxc_doctor
+    backup_gateway_state
+    ui_ok_msg "Авто-починка (gateway doctor) успешно завершена!"
+    ui_box_bottom
+    run_self_test
+    return 0
+}
+
+# Фоновая проверка здоровья служб шлюза и активных модулей Homelab (Watchdog Auto-Healer + Mount Guard)
+run_watchdog() {
+    set +e
+    acquire_gateway_lock "watchdog" || return 0
+    trap 'release_gateway_lock' EXIT INT TERM HUP
+    detect_os
+    rotate_gateway_logs
+    check_and_recover_power_loss_state
+    load_gateway_env
+
+    if [ ! -f "$SB_CONF" ]; then
+        release_gateway_lock
+        trap - EXIT INT TERM HUP
+        return 0
+    fi
+    ensure_alpine_modules
+    RECOVERED_MSG=""
+
+    if ! pgrep sing-box >/dev/null 2>&1 || ! ip link show singbox-tun >/dev/null 2>&1; then
+        logger -t gateway-watchdog "Sing-Box or singbox-tun down, restarting service..." 2>/dev/null || true
+        if ! check_singbox_config && [ -s "${STATE_BAK_DIR}/config.json" ]; then
+            cp -f "${STATE_BAK_DIR}/config.json" "$SB_CONF" 2>/dev/null || true
+        fi
+        service_ctl sing-box restart
+        sleep 2
+        RECOVERED_MSG="⚡ [Авто-Доктор] На сервере ($(get_current_lan_ip)) перезапущен туннель Sing-Box."
+    fi
+
+    if ! pgrep AdGuardHome >/dev/null 2>&1; then
+        logger -t gateway-watchdog "AdGuardHome down, restarting service..." 2>/dev/null || true
+        service_ctl adguardhome restart
+        RECOVERED_MSG="${RECOVERED_MSG}
+⚡ [Авто-Доктор] Перезапущена служба AdGuard Home."
+    fi
+
+    # Caddy и Vaultwarden не зависят от внешнего USB-диска и всегда поддерживаются в работе
+    for CORE_HL in caddy vaultwarden; do
+        if is_module_enabled "$CORE_HL"; then
+            C_SVC=$(get_module_field "$CORE_HL" 3)
+            if [ -n "$C_SVC" ] && [ -x "/etc/init.d/${C_SVC}" ] && ! rc-service "$C_SVC" status >/dev/null 2>&1; then
+                rc-service "$C_SVC" restart >/dev/null 2>&1 || true
+            fi
+        fi
+    done
+
+    # Mount Guard для внешнего накопителя /srv/storage после сбоя питания
+    if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] && ! is_external_storage_mounted; then
+        if try_auto_unlock_and_mount_storage; then
+            RECOVERED_MSG="${RECOVERED_MSG}
+🔒 [Авто-Доктор] Внешний накопитель (${STORAGE_ROOT}) автоматически разблокирован и смонтирован после перезагрузки."
+        else
+            # Удерживаем зависимые от диска сервисы в безопасной паузе, чтобы не забить корневую флешку
+            stop_storage_dependent_services
+            NOW_TS=$(date +%s 2>/dev/null || echo "0")
+            LAST_ALERT_TS=0
+            [ -f "$STORAGE_ALERT_CACHE" ] && LAST_ALERT_TS=$(cat "$STORAGE_ALERT_CACHE" 2>/dev/null | tr -d ' \t\r\n' || echo "0")
+            case "$LAST_ALERT_TS" in ''|*[!0-9]*) LAST_ALERT_TS=0 ;; esac
+            if [ $((NOW_TS - LAST_ALERT_TS)) -ge 3600 ]; then
+                echo "$NOW_TS" > "$STORAGE_ALERT_CACHE" 2>/dev/null || true
+                send_telegram_msg "⚡ Сервер ($(get_current_lan_ip)) перезагрузился после сбоя питания. Сетевой шлюз (Sing-Box + AdGuard) работает, но внешний диск (${STORAGE_ROOT}) ожидает подключения или разблокировки (выполните: gateway unlock)" >/dev/null 2>&1 || true
+            fi
+            if [ -n "$RECOVERED_MSG" ]; then
+                send_telegram_msg "$RECOVERED_MSG" >/dev/null 2>&1 || true
+            fi
+            release_gateway_lock
+            trap - EXIT INT TERM HUP
+            return 0
+        fi
+    fi
+
+    # Проверка активных служб Homelab из реестра modules.state (только когда диск смонтирован и готов)
+    if [ -f "$HOMELAB_STATE" ] && is_storage_mount_ready; then
+        while IFS='|' read -r M_ID M_EN M_SVC _REST; do
+            case "$M_ID" in ''|\#*) continue ;; esac
+            [ "$M_EN" = "yes" ] || continue
+            [ -z "$M_SVC" ] && continue
+            if [ -x "/etc/init.d/${M_SVC}" ] && ! rc-service "$M_SVC" status >/dev/null 2>&1; then
+                logger -t gateway-watchdog "Homelab module ${M_ID} (${M_SVC}) down, restarting..." 2>/dev/null || true
+                rc-service "$M_SVC" restart >/dev/null 2>&1 || true
+                RECOVERED_MSG="${RECOVERED_MSG}
+⚡ [Авто-Доктор Homelab] Перезапущен модуль ${M_ID} (${M_SVC})."
+            fi
+        done < "$HOMELAB_STATE"
+    fi
+
+    if [ -n "$RECOVERED_MSG" ]; then
+        send_telegram_msg "$RECOVERED_MSG" >/dev/null 2>&1 || true
+    fi
+    release_gateway_lock
+    trap - EXIT INT TERM HUP
+    return 0
+}
+
+# Фоновая задача автообновления для cron (с эксклюзивной блокировкой против гонки с Watchdog в 04:00)
+run_autoupdate() {
+    set +e
+    WAIT_LCK=0
+    while ! acquire_gateway_lock "autoupdate"; do
+        sleep 1
+        WAIT_LCK=$((WAIT_LCK + 1))
+        [ "$WAIT_LCK" -ge 15 ] && break
+    done
+    trap 'release_gateway_lock' EXIT INT TERM HUP
+    detect_os
+    echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Запуск автообновления шлюза и Homelab (${OS_NAME}) ==="
+    update_cores_only "yes"
+    if ! pgrep sing-box >/dev/null 2>&1; then
+        service_ctl sing-box start
+    fi
+    if ! pgrep AdGuardHome >/dev/null 2>&1; then
+        service_ctl adguardhome start
+    fi
+    reload_singbox_api
+    rotate_gateway_logs
+    send_telegram_msg "🔄 [Автообновление 04:00] Сервер (${OS_NAME} | $(get_current_lan_ip)) проверил обновления. Текущие версии: Sing-Box ${LATEST_SB_TAG}, AdGuard ${LATEST_AGH_TAG}." >/dev/null 2>&1 || true
+    echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Автообновление завершено ==="
+    release_gateway_lock
+    trap - EXIT INT TERM HUP
+    return 0
+}
+
+# Получение последнего тега релиза с GitHub
+fetch_latest_github_tag() {
+    REPO="$1"
+    TAG=""
+    RAW_JSON=$(curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || \
+               curl -fsSL --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+    if [ -n "$RAW_JSON" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            TAG=$(printf "%s" "$RAW_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
+        fi
+        if [ -z "$TAG" ]; then
+            TAG=$(printf "%s" "$RAW_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 | tr -d ' \t\r\n' || true)
+        fi
+    fi
+    case "$TAG" in *[\/:]*|"") TAG="" ;; esac
+    if [ -z "$TAG" ]; then
+        TAG=$(curl -fsSLI --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d '\r\n' || true)
+        [ "$TAG" = "latest" ] && TAG="" || true
+        case "$TAG" in *[\/:]*|"") TAG="" ;; esac
+    fi
+    printf "%s" "$TAG"
+    return 0
+}
+
+# Мгновенное чтение кэша версий из /tmp (чтобы меню открывалось за 0.01 сек без паузы!)
+refresh_remote_versions() {
+    FORCE_FETCH="${1:-no}"
+    if [ "$FORCE_FETCH" != "yes" ] && [ -f "$VER_CACHE_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$VER_CACHE_FILE" 2>/dev/null || true
+        return 0
+    fi
+
+    LATEST_SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
+    LATEST_AGH_TAG=$(fetch_latest_github_tag "AdguardTeam/AdGuardHome")
+    if [ -f "${SB_DIR}/ui/index.html" ]; then
+        LATEST_UI_TAG=$(fetch_latest_github_tag "$UI_REPO")
+        if [ ! -f "$UI_VER_FILE" ] && [ -n "$LATEST_UI_TAG" ]; then
+            echo "$LATEST_UI_TAG" > "$UI_VER_FILE"
+        fi
+    fi
+
+    cat << VC_EOF > "$VER_CACHE_FILE" 2>/dev/null || true
+LATEST_SB_TAG='${LATEST_SB_TAG}'
+LATEST_AGH_TAG='${LATEST_AGH_TAG}'
+LATEST_UI_TAG='${LATEST_UI_TAG}'
+VC_EOF
+    return 0
+}
+
+# Отрисовка телеметрии и статуса шлюза / стека Homelab в шапке главного меню (Spacecraft Dashboard)
+print_gateway_header() {
+    load_gateway_env
+    calc_hardware_limits
+    LAN_IP_NOW=$(get_current_lan_ip)
+    LAN_IF_NOW=$(get_lan_ifname)
+
+    if pgrep sing-box >/dev/null 2>&1; then
+        S_BADGE=$(ui_badge "on" "SING-BOX: АКТИВЕН")
+    else
+        S_BADGE=$(ui_badge "err" "SING-BOX: СТОП")
+    fi
+
+    if [ -x /usr/bin/sing-box ]; then
+        S_VER_RAW=$(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || true)
+        [ -n "$S_VER_RAW" ] && S_VER="v${S_VER_RAW#v}" || S_VER="неизвестно"
+    else
+        S_VER="не установлен"
+    fi
+
+    if [ -n "$LATEST_SB_TAG" ] && [ "$S_VER" != "не установлен" ]; then
+        if [ "$S_VER" = "$LATEST_SB_TAG" ]; then
+            S_VER_INFO="${S_VER} ${C_DIM}(актуальна)${C_RES}"
+        else
+            S_VER_INFO="${S_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_SB_TAG}!${C_RES}"
+        fi
+    else
+        S_VER_INFO="${S_VER}"
+    fi
+
+    if pgrep AdGuardHome >/dev/null 2>&1; then
+        A_BADGE=$(ui_badge "on" "ADGUARD: АКТИВЕН")
+    else
+        A_BADGE=$(ui_badge "err" "ADGUARD: СТОП")
+    fi
+
+    if [ -x /usr/bin/AdGuardHome ]; then
+        A_VER=$(/usr/bin/AdGuardHome --version 2>&1 | sed -n 's/.*version \(v[0-9.a-zA-Z_.-]*\).*/\1/p' | head -n 1 || true)
+        [ -z "$A_VER" ] && A_VER="установлен"
+    else
+        A_VER="не установлен"
+    fi
+
+    if [ -n "$LATEST_AGH_TAG" ] && [ "$A_VER" != "не установлен" ]; then
+        if [ "$A_VER" = "$LATEST_AGH_TAG" ]; then
+            A_VER_INFO="${A_VER} ${C_DIM}(актуальна)${C_RES}"
+        else
+            A_VER_INFO="${A_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_AGH_TAG}!${C_RES}"
+        fi
+    else
+        A_VER_INFO="${A_VER}"
+    fi
+
+    SUB_CNT=$(count_sub_urls)
+    MY_CNT=$(count_my_nodes)
+    if [ "$SUB_CNT" -gt 1 ]; then
+        P_BADGE=$(ui_badge "info" "МУЛЬТИ-САБ: ${SUB_CNT}")
+        P_INFO="подписок: ${SUB_CNT} шт. | ключей URI: ${MY_CNT}"
+    elif [ "$SUB_CNT" -eq 1 ]; then
+        P_BADGE=$(ui_badge "info" "ПОДПИСКА HTTP")
+        P_INFO="${SUB_URL}"
+    elif [ "$MY_CNT" -gt 0 ]; then
+        P_BADGE=$(ui_badge "info" "КЛЮЧИ URI: ${MY_CNT}")
+        P_INFO="активно в my_nodes.yaml: ${MY_CNT} шт."
+    elif is_warp_enabled; then
+        P_BADGE=$(ui_badge "on" "ТОЛЬКО WARP 2.0")
+        P_INFO="гибридный Amnezia WARP 2.0 + MASQUE H2"
+    else
+        P_BADGE=$(ui_badge "warn" "РЕЖИМ DIRECT")
+        P_INFO="прокси не заданы (весь трафик напрямую)"
+    fi
+
+    if is_warp_enabled; then
+        W_BADGE=$(ui_badge "on" "WARP 2.0: ON")
+        if [ -n "${WARP_LICENSE:-}" ]; then
+            W_INFO="4 ноды AWG WARP+ + MASQUE TCP/H2"
+        else
+            W_INFO="4 ноды AWG 2.0 + MASQUE TCP/H2"
+        fi
+    else
+        W_BADGE=$(ui_badge "off" "WARP 2.0: OFF")
+        W_INFO="можно включить бесплатно в п. 2"
+    fi
+
+    if [ -f "${SB_DIR}/ui/index.html" ]; then
+        UI_VER=""
+        [ -f "$UI_VER_FILE" ] && UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
+        [ -z "$UI_VER" ] && UI_VER="установлена"
+        UI_BADGE=$(ui_badge "on" "ZASHBOARD")
+        if [ -n "$LATEST_UI_TAG" ] && [ "$UI_VER" != "установлена" ] && [ "$UI_VER" != "$LATEST_UI_TAG" ]; then
+            UI_VER_INFO="${UI_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_UI_TAG}!${C_RES}"
+        else
+            UI_VER_INFO="${UI_VER}"
+        fi
+    else
+        UI_BADGE=$(ui_badge "err" "UI: НЕТ")
+        UI_VER_INFO="не установлена"
+    fi
+
+    if is_killswitch_enabled; then
+        KS_BADGE=$(ui_badge "info" "KILL-SWITCH: ON")
+        KS_INFO="строгая блокировка мимо singbox-tun (${LAN_IF_NOW})"
+    else
+        KS_BADGE=$(ui_badge "on" "FIREWALL: GUARD")
+        KS_INFO="блок IPv6 + DoT/853 + перехват DNS :53 (${LAN_IF_NOW})"
+    fi
+
+    is_watchdog_enabled && WD_TXT="${C_GRN}● ВКЛ${C_RES}" || WD_TXT="${C_DIM}○ ВЫКЛ${C_RES}"
+    is_telegram_configured && TG_TXT="${C_GRN}● ВКЛ${C_RES}" || TG_TXT="${C_DIM}○ ВЫКЛ${C_RES}"
+    is_dhcp_server_enabled && DHCP_TXT="${C_GRN}● ВКЛ${C_RES}" || DHCP_TXT="${C_DIM}○ ВЫКЛ${C_RES}"
+    is_autoupdate_enabled && AU_BADGE=$(ui_badge "on" "AUTO-UPD: 04:00") || AU_BADGE=$(ui_badge "off" "AUTO-UPD: РУЧНОЙ")
+
+    RAM_PCT=$(get_ram_usage_pct)
+    RAM_USED=$(get_ram_used_mb)
+    RAM_BAR=$(ui_progress_bar "$RAM_PCT" 10)
+
+    DISK_PCT=$(get_disk_usage_pct "$STORAGE_ROOT")
+    DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
+    DISK_FREE_TXT=$(df -h "${STORAGE_ROOT:-/}" 2>/dev/null | awk 'NR==2 {print $4 " своб. из " $2}' || echo "н/д")
+    DISK_BADGE=$(get_storage_disk_badge)
+
+    HL_ACT_CNT=$(count_enabled_homelab_modules)
+    if [ "$HL_ACT_CNT" -gt 0 ]; then
+        HL_BADGE=$(ui_badge "on" "HOMELAB: ${HL_ACT_CNT}/9")
+    else
+        HL_BADGE=$(ui_badge "off" "HOMELAB: 0/9")
+    fi
+
+    ui_box_top "⚡ ПРИБОРНАЯ ПАНЕЛЬ ТЕЛЕМЕТРИИ ШЛЮЗА И HOMELAB (${OS_NAME})"
+    ui_box_row "Сеть LAN:     ${C_BLD}${LAN_IF_NOW}: ${LAN_IP_NOW}${C_RES} ▸ Роутер: ${C_CYN}${GW_IP}${C_RES} │ Умный DHCP: ${DHCP_TXT}"
+    ui_box_row "Загрузка ОЗУ: ${RAM_BAR} (${RAM_USED}/${TOTAL_RAM_MB} МБ, лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
+    ui_box_row "Накопитель:   ${DISK_BAR} (${DISK_FREE_TXT}) ▸ ${C_CYN}${DISK_BADGE}${C_RES}"
+    ui_box_sep "СТАТУС ЯДЕР И СЛУЖБ"
+    ui_box_row "Sing-Box Ext: ${S_BADGE} ${S_VER_INFO} │ Веб-панель: ${UI_BADGE} ${UI_VER_INFO}"
+    ui_box_row "AdGuard Home: ${A_BADGE} ${A_VER_INFO} (DNS :53 + *.lan Rewrites)"
+    ui_box_row "Основной пул: ${P_BADGE} ${P_INFO}"
+    ui_box_row "Amnezia WARP: ${W_BADGE} ${W_INFO}"
+    ui_box_row "Защита сети:  ${KS_BADGE} ${KS_INFO}"
+    ui_box_row "Автономность: ${AU_BADGE} │ Watchdog: ${WD_TXT} │ Telegram: ${TG_TXT} │ Стек: ${HL_BADGE}"
+
+    if [ -f "$POWER_LOSS_FLAG" ]; then
+        PL_TIME=$(cat "$POWER_LOSS_FLAG" 2>/dev/null || echo "недавно")
+        ui_box_sep "ПРЕДУПРЕЖДЕНИЕ ПИТАНИЯ"
+        ui_box_row "${C_YEL}▲ Зафиксировано авто-восстановление после сбоя питания (${PL_TIME}). Рекомендуется: gateway doctor${C_RES}"
+    fi
+    if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] && ! is_external_storage_mounted; then
+        ui_box_sep "СТАТУС ВНЕШНЕГО ДИСКА LUKS2"
+        ui_box_row "${C_YEL}▲ Внешний накопитель ожидает разблокировки! Выполните в терминале: ${C_BLD}gateway unlock${C_RES}"
+    fi
+    ui_box_bottom
+    return 0
+}
+
+# Проверка прямого доступа к GitHub (с защитой от фрагментации TLS 1.3 Kyber)
 create_unified_backup() {
     INCLUDE_MEDIA="${1:-no}"
     STAGE_DIR="/var/lib/gateway_backup_stage"
@@ -8069,102 +9028,246 @@ restore_unified_backup() {
 # ==============================================================================
 
 # Сводная таблица всех модулей Homelab (реальный статус демона OpenRC, порт и домен)
-print_homelab_services_table() {
-    init_homelab_registry
-    load_gateway_env
-    DISK_BADGE=$(get_storage_disk_badge)
-    DISK_PCT=$(get_disk_usage_pct "$STORAGE_ROOT")
-    DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
+run_self_test() {
+    set +e
+    detect_os
+    ui_box_top "⚡ [SELF-TEST 2.0] МАТРИЦА ЗДОРОВЬЯ И ОТКЛИКА ШЛЮЗА (${OS_NAME})"
+    WAIT_CNT=0
+    while [ "$WAIT_CNT" -lt 10 ]; do
+        if pgrep sing-box >/dev/null 2>&1 && ip link show singbox-tun >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        WAIT_CNT=$((WAIT_CNT + 1))
+    done
 
-    ui_box_top "🏠 МОДУЛИ ДОМАШНЕГО СЕРВЕРА (ALPINE HOMELAB & MEDIA STACK)"
-    ui_box_row "Хранилище ${STORAGE_ROOT}: ${DISK_BAR} ▸ ${C_CYN}${DISK_BADGE}${C_RES}"
-    ui_box_sep "СПИСОК МОДУЛЕЙ [1-9]"
-    IDX_M=0
-    while IFS='|' read -r M_ID M_EN M_SVC M_PORT M_DOM _M_USR M_TITLE; do
-        case "$M_ID" in ''|\#*) continue ;; esac
-        IDX_M=$((IDX_M + 1))
-        if [ "$M_EN" = "yes" ]; then
-            if rc-service "$M_SVC" status >/dev/null 2>&1; then
-                ST_BADGE="${C_GRN}[ ● РАБОТАЕТ ]  ${C_RES}"
-            elif ! is_storage_mount_ready && [ "$M_ID" != "caddy" ] && [ "$M_ID" != "vaultwarden" ]; then
-                ST_BADGE="${C_YEL}[ ▲ ЖДЕТ ДИСК ] ${C_RES}"
-            else
-                ST_BADGE="${C_RED}[ ✖ ОСТАНОВЛЕН ]${C_RES}"
-            fi
+    load_gateway_env
+    calc_hardware_limits
+    LAN_IF_NOW=$(get_lan_ifname)
+    is_dhcp_server_enabled && DHCP_ST="${C_GRN}● ВКЛ${C_RES}" || DHCP_ST="${C_DIM}○ ВЫКЛ${C_RES}"
+    ui_box_row "Сеть сервера: ${C_BLD}[${OS_NAME} (${LAN_IF_NOW}): $(get_current_lan_ip)]${C_RES} ▸ [Роутер: ${GW_IP}] │ DHCP: ${DHCP_ST}"
+    print_proxy_slots_report
+
+    ui_box_sep "СОСТОЯНИЕ ЯДРА И СЕТЕВОГО СТЕКА"
+    SB_PID=$(pgrep sing-box 2>/dev/null | head -n 1 || true)
+    if [ -n "$SB_PID" ]; then
+        SB_RSS=$(awk '/^VmRSS:/ {printf "%.1f МБ", $2/1024}' "/proc/${SB_PID}/status" 2>/dev/null || echo "активен")
+        ui_box_row "${C_GRN}[✔]${C_RES} Sing-Box Extended: ${C_GRN}● ЗАПУЩЕН${C_RES} (PID ${SB_PID}, ОЗУ: ${SB_RSS} / лимит ${SB_GOMEMLIMIT})"
+    else
+        ui_box_row "${C_RED}[✖] Sing-Box Extended: ОСТАНОВЛЕН (исправить: gateway doctor)${C_RES}"
+    fi
+
+    AGH_PID=$(pgrep AdGuardHome 2>/dev/null | head -n 1 || true)
+    if [ -n "$AGH_PID" ]; then
+        AGH_RSS=$(awk '/^VmRSS:/ {printf "%.1f МБ", $2/1024}' "/proc/${AGH_PID}/status" 2>/dev/null || echo "активен")
+        ui_box_row "${C_GRN}[✔]${C_RES} AdGuard Home (:53): ${C_GRN}● ЗАПУЩЕН${C_RES} (PID ${AGH_PID}, ОЗУ: ${AGH_RSS} / лимит ${AGH_GOMEMLIMIT})"
+    else
+        ui_box_row "${C_RED}[✖] AdGuard Home (:53): ОСТАНОВЛЕН (исправить: gateway doctor)${C_RES}"
+    fi
+
+    if ip link show singbox-tun >/dev/null 2>&1; then
+        ui_box_row "${C_GRN}[✔]${C_RES} Виртуальный интерфейс (singbox-tun): ${C_GRN}● АКТИВЕН${C_RES} (MTU 1492, mixed stack)"
+    else
+        ui_box_row "${C_RED}[✖] Виртуальный интерфейс (singbox-tun): НЕ НАЙДЕН${C_RES}"
+    fi
+
+    RP_STAT=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo "unknown")
+    BBR_STAT=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+    CT_CNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "0")
+    ui_box_row "${C_GRN}[✔]${C_RES} Сетевой стек: TCP ${C_CYN}${BBR_STAT}${C_RES} │ rp_filter=${RP_STAT} │ Сессии Conntrack: ${C_BLD}${CT_CNT}${C_RES} из ${SYS_CONNTRACK_MAX}"
+
+    if is_killswitch_enabled; then
+        ui_box_row "${C_GRN}[✔]${C_RES} Защита от утечек: ${C_GRN}◆ Kill-Switch АКТИВЕН${C_RES} + блок Type 65 (HTTPS/ECH), IPv6 и DoT 853"
+    else
+        ui_box_row "${C_GRN}[✔]${C_RES} Защита от утечек: Блок Type 65 (HTTPS/ECH), IPv6 Drop, DoT/DoQ 853 Reject и DNS 53 Redirect"
+    fi
+
+    if [ -f "$SB_CONF" ] && [ -n "$SB_PID" ]; then
+        ui_box_sep "МАТРИЦА ЗАДЕРЖЕК (PING MATRIX)"
+        ACTIVE_NODE=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null | jq -r '.proxies["⚡ Авто (Самый быстрый)"].now // empty' 2>/dev/null)
+        [ -n "$ACTIVE_NODE" ] && ui_box_row "Активная нода (Авто): ${C_CYN}${C_BLD}${ACTIVE_NODE}${C_RES}"
+        CF_TRACE=$(curl -fsS --curves X25519:P-256 --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
+        if [ -n "$CF_TRACE" ]; then
+            ui_box_row "Внешний выход (Cloudflare Trace): ${C_GRN}${CF_TRACE}${C_RES}"
+            PING_RU=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 2 -w '%{time_connect}' "http://ya.ru" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            PING_CF=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://cp.cloudflare.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            PING_GG=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "https://www.youtube.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            PING_AI=$(curl -o /dev/null -sS --curves X25519:P-256 --connect-timeout 3 -m 4 -x http://127.0.0.1:7890 -w '%{time_appconnect}' "https://api.openai.com" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            ui_box_row "▸ Напрямую РФ (ya.ru):       $(ui_ping_bar "$PING_RU")"
+            ui_box_row "▸ Cloudflare Anycast (TUN):  $(ui_ping_bar "$PING_CF")"
+            ui_box_row "▸ YouTube / Google Video:    $(ui_ping_bar "$PING_GG")"
+            ui_box_row "▸ OpenAI / AI API (TLS 1.3): $(ui_ping_bar "$PING_AI")"
         else
-            ST_BADGE="${C_DIM}[ ○ ВЫКЛЮЧЕН ]  ${C_RES}"
+            ui_box_row "${C_YEL}[▲] Туннель еще прогревается или все внешние ноды недоступны (проверьте: gateway proxy).${C_RES}"
         fi
-        if [ "$M_ID" = "caddy" ]; then
-            M_URL="http://ca.lan (PKI)"
-        elif [ "$M_DOM" != "_" ]; then
-            M_URL="https://${M_DOM}"
+    fi
+    ui_box_bottom
+
+    if [ "$(count_enabled_homelab_modules)" -gt 0 ]; then
+        run_homelab_self_test
+    fi
+    return 0
+}
+
+# Быстрая неинвазивная проверка синтаксиса и доступности ключевых сервисов (без перезапусков)
+run_gateway_quick_check() {
+    set +e
+    detect_os
+    load_gateway_env
+    ui_box_top "🩺 НЕИНВАЗИВНЫЙ АУДИТ СИСТЕМЫ (GATEWAY CHECK)"
+
+    # 1. Синтаксис Sing-Box
+    if [ -x /usr/bin/sing-box ] && [ -s "$SB_CONF" ]; then
+        if /usr/bin/sing-box check -c "$SB_CONF" -D /etc/sing-box >/dev/null 2>&1; then
+            ui_box_row "${C_GRN}[✔]${C_RES} Sing-Box Config:      ${C_GRN}КОРРЕКТЕН${C_RES} (${SB_CONF})"
         else
-            M_URL="\\\\$(hostname -s 2>/dev/null || echo HOMELAB)\\storage"
+            ui_box_row "${C_RED}[✖] Sing-Box Config:      ОШИБКА ВАЛИДАЦИИ СИНТАКСИСА${C_RES}"
         fi
-        printf "%s│%s  %s[%d]%s %-11s %s │ %-6s │ %-24s │ %s\n" "$C_CYN" "$C_RES" "$C_CYN" "$IDX_M" "$C_RES" "$M_ID" "$ST_BADGE" ":$M_PORT" "$M_URL" "$M_TITLE"
-    done < "$HOMELAB_STATE"
+    else
+        ui_box_row "${C_YEL}[▲] Sing-Box Config:      НЕ НАЙДЕН (${SB_CONF})${C_RES}"
+    fi
+
+    # 2. Синтаксис Caddy
+    if [ -x /usr/sbin/caddy ] && [ -s "$CADDY_CONF" ]; then
+        if su -s /bin/sh caddy -c "XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/var/lib/caddy HOME=/var/lib/caddy /usr/sbin/caddy validate --config '$CADDY_CONF' --adapter caddyfile" >/dev/null 2>&1 || \
+           /usr/sbin/caddy validate --config "$CADDY_CONF" --adapter caddyfile >/dev/null 2>&1; then
+            ui_box_row "${C_GRN}[✔]${C_RES} Caddyfile & PKI:      ${C_GRN}КОРРЕКТЕН${C_RES} (${CADDY_CONF})"
+        else
+            ui_box_row "${C_RED}[✖] Caddyfile & PKI:      ОШИБКА ВАЛИДАЦИИ CADDYFILE${C_RES}"
+        fi
+    fi
+
+    # 2.5. Статус SSL/TLS
+    if is_letsencrypt_ssl_active 2>/dev/null; then
+        ui_box_row "${C_GRN}[✔]${C_RES} SSL/TLS Сертификат:   ${C_GRN}Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
+    else
+        ui_box_row "${C_CYN}[✔]${C_RES} SSL/TLS Сертификат:   Локальный PKI (*.lan)"
+    fi
+
+    # 3. AdGuard Home DNS (:53)
+    if nc -z -u -w 1 127.0.0.1 53 >/dev/null 2>&1 || pgrep AdGuardHome >/dev/null 2>&1; then
+        ui_box_row "${C_GRN}[✔]${C_RES} AdGuard Home DNS:     ${C_GRN}АКТИВЕН${C_RES} (127.0.0.1:53 слушает запросы)"
+    else
+        ui_box_row "${C_RED}[✖] AdGuard Home DNS:     НЕ ОТВЕЧАЕТ НА ПОРТУ 53${C_RES}"
+    fi
+
+    # 4. Sing-Box Clash API (:9090)
+    if curl -fsS -m 2 -H "Authorization: Bearer ${ADMIN_PASS:-admin}" "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
+        ui_box_row "${C_GRN}[✔]${C_RES} Clash API (:9090):    ${C_GRN}АКТИВЕН${C_RES} (REST API отвечает, токен валиден)"
+    else
+        ui_box_row "${C_YEL}[▲] Clash API (:9090):    НЕДОСТУПЕН ИЛИ НЕВЕРНЫЙ СЕКРЕТ${C_RES}"
+    fi
+
+    # 5. Состояние памяти и Conntrack
+    MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    MEM_AVAIL_KB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    if [ "$MEM_TOTAL_KB" -gt 0 ]; then
+        MEM_USE_PCT=$(( (MEM_TOTAL_KB - MEM_AVAIL_KB) * 100 / MEM_TOTAL_KB ))
+        ui_box_row "${C_GRN}[✔]${C_RES} Оперативная память:   ${MEM_USE_PCT}% занято ($((MEM_AVAIL_KB/1024)) МБ свободно из $((MEM_TOTAL_KB/1024)) МБ)"
+    fi
+
+    CT_NOW=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
+    CT_MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 1)
+    CT_PCT=$(( CT_NOW * 100 / (CT_MAX > 0 ? CT_MAX : 1) ))
+    ui_box_row "${C_GRN}[✔]${C_RES} Таблица Conntrack:    ${CT_NOW} / ${CT_MAX} сессий (${CT_PCT}%)"
+
     ui_box_bottom
     return 0
 }
 
-# Глубокая проверка состояния подсистемы Homelab (Homelab Self-Test)
-run_homelab_self_test() {
-    init_homelab_registry
+# ==============================================================================
+# Динамический баннер приветствия SSH / Консоли (Fast Non-blocking MOTD)
+# Вызывается автоматически при логине в систему через /etc/profile.d/00-gateway-motd.sh
+# или вручную по команде `gw motd` / `gateway motd`
+# ==============================================================================
+print_gateway_motd() {
     load_gateway_env
-    CUR_LIP=$(get_current_lan_ip)
+    [ -f "$HOMELAB_ENV" ] && . "$HOMELAB_ENV" 2>/dev/null || true
 
-    ui_box_top "🔬 ДИАГНОСТИКА ПОДСИСТЕМЫ HOMELAB (HOMELAB SELF-TEST)"
-    if [ -d "$STORAGE_ROOT" ]; then
-        ST_PERM=$(stat -c "%a %U:%G" "$STORAGE_ROOT" 2>/dev/null || echo "н/д")
-        ui_box_row "${C_GRN}[✔]${C_RES} Единое хранилище (${STORAGE_ROOT}): ${C_GRN}ДОСТУПНО${C_RES} (права: ${ST_PERM} | $(get_storage_disk_badge))"
-    else
-        ui_box_row "${C_YEL}[▲]${C_RES} Единое хранилище (${STORAGE_ROOT}): еще не инициализировано"
-    fi
+    HN=$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "alpine")
+    ARCH_INFO=$(uname -m 2>/dev/null || echo "x86_64")
+    UPTIME_RAW=$(uptime 2>/dev/null || echo "")
+    UPTIME_STR=$(printf "%s" "$UPTIME_RAW" | sed -E 's/.*up[[:space:]]+([^,]+),.*/\1/' | sed 's/^[[:space:]]*//' || echo "online")
+    LOAD_STR=$(awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null || echo "0.00")
 
-    if find_caddy_root_cert; then
-        ui_box_row "${C_GRN}[✔]${C_RES} Локальный Root CA Caddy: ${C_GRN}СГЕНЕРИРОВАН${C_RES} (портал: http://${DOM_CA} / http://${CUR_LIP})"
-        ui_box_row "${C_GRN}[✔]${C_RES} Панели шлюза по HTTPS: ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} │ ${C_CYN}https://${DOM_ADGUARD}${C_RES}"
-    else
-        ui_box_row "${C_DIM}[○]${C_RES} Локальный Root CA Caddy: не активен (установите модуль caddy)"
-    fi
+    LAN_IP_CUR=$(get_current_lan_ip)
+    LAN_DEV_CUR=$(get_lan_ifname)
+    ROUTER_IP="${GW_IP:-$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -n 1)}"
 
-    while IFS='|' read -r M_ID M_EN M_SVC M_PORT M_DOM _M_USR M_TITLE; do
-        case "$M_ID" in ''|\#*) continue ;; esac
-        [ "$M_EN" = "yes" ] || continue
+    # ОЗУ
+    RAM_LINE=$(free -m 2>/dev/null | awk '/Mem:/ {if ($2>0) printf "%d МБ / %d МБ (%.0f%%)", $3, $2, ($3/$2)*100; else print "N/A"}')
+    [ -z "$RAM_LINE" ] && RAM_LINE="${TOTAL_RAM_MB:-2048} МБ"
 
-        if rc-service "$M_SVC" status >/dev/null 2>&1; then
-            SVC_TXT="${C_GRN}● ЗАПУЩЕН${C_RES}"
+    # Хранилище
+    if is_external_storage_mounted 2>/dev/null; then
+        ST_LINE=$(df -h "$STORAGE_ROOT" 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
+        ST_SRC=$(findmnt -n -o SOURCE "$STORAGE_ROOT" 2>/dev/null || true)
+        ST_FS=$(blkid -s TYPE -o value "$ST_SRC" 2>/dev/null || echo "ext4")
+        if [ -n "${EXT_STORAGE_LUKS_UUID:-}" ] || echo "$ST_SRC" | grep -q "mapper"; then
+            ST_TAG=" [${ST_FS} / LUKS2 🔒]"
         else
-            SVC_TXT="${C_RED}✖ ОСТАНОВЛЕН${C_RES}"
+            ST_TAG=" [${ST_FS}]"
         fi
+        ST_INFO="${STORAGE_ROOT}: ${ST_LINE}${ST_TAG}"
+    else
+        ST_ROOT_LINE=$(df -h / 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
+        ST_INFO="Локальный системный раздел: ${ST_ROOT_LINE} (диск не подключен)"
+    fi
 
-        if [ "$M_ID" = "samba" ]; then
-            WSDD_ST=$(rc-service wsdd status >/dev/null 2>&1 && echo "WSDD:OK" || echo "WSDD:OFF")
-            AVAHI_ST=$(rc-service avahi-daemon status >/dev/null 2>&1 && echo "Avahi:OK" || echo "Avahi:OFF")
-            PDB_ST="PDB:OK"
-            if command -v pdbedit >/dev/null 2>&1; then
-                pdbedit -L -w "${SMB_USER:-homelab}" 2>/dev/null | grep -q "^${SMB_USER:-homelab}:" || PDB_ST="PDB:FAIL"
+    # Статус ядер шлюза
+    SB_ST="${C_RED}○${C_RES}"
+    pgrep sing-box >/dev/null 2>&1 && SB_ST="${C_GRN}●${C_RES}"
+    AGH_ST="${C_RED}○${C_RES}"
+    pgrep AdGuardHome >/dev/null 2>&1 && AGH_ST="${C_GRN}●${C_RES}"
+    TUN_ST="${C_RED}○${C_RES}"
+    ip link show singbox-tun >/dev/null 2>&1 && TUN_ST="${C_GRN}●${C_RES}"
+
+    # SSL / Домен
+    if [ "${SSL_MODE:-local}" = "duckdns" ] && [ -n "${DUCKDNS_DOMAIN:-}" ]; then
+        SSL_INFO="Let's Encrypt Wildcard (*.${DUCKDNS_DOMAIN})"
+    else
+        SSL_INFO="Локальный доверенный CA (*.lan)"
+    fi
+
+    # Homelab сервисы
+    HL_SUMMARY=""
+    if [ -f "$HOMELAB_STATE" ]; then
+        while IFS='|' read -r M_ID M_EN M_SVC _REST; do
+            case "$M_ID" in ''|\#*) continue ;; esac
+            if [ "$M_EN" = "yes" ]; then
+                if [ -n "$M_SVC" ] && rc-service "$M_SVC" status >/dev/null 2>&1; then
+                    DOT="${C_GRN}●${C_RES}"
+                else
+                    DOT="${C_RED}○${C_RES}"
+                fi
+                HL_SUMMARY="${HL_SUMMARY} ${M_ID}[${DOT}]"
             fi
-            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ Юзер: ${SMB_USER:-homelab} (${PDB_ST}) │ LAN: ${C_CYN}${WSDD_ST}, ${AVAHI_ST}${C_RES}"
-        elif [ "$M_ID" = "caddy" ]; then
-            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ HTTPS :443 / PKI :80"
-        elif [ "$M_ID" = "vaultwarden" ]; then
-            HTTP_CODE=$(curl -k -o /dev/null -sS --connect-timeout 2 -m 4 -w '%{http_code}' "http://127.0.0.1:${M_PORT}/api/config" 2>/dev/null || true)
-            [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ] && HTTP_CODE="000"
-            WV_ST="WebVault:OK"
-            detect_vaultwarden_web_dir >/dev/null 2>&1 || WV_ST="WebVault:FAIL"
-            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ 127.0.0.1:${M_PORT} (HTTP ${HTTP_CODE}, ${WV_ST}) ▸ ${C_CYN}https://${M_DOM}${C_RES}"
-        else
-            HTTP_CODE=$(curl -k -o /dev/null -sS --connect-timeout 2 -m 4 -w '%{http_code}' "http://127.0.0.1:${M_PORT}" 2>/dev/null || true)
-            [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ] && HTTP_CODE="000"
-            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ 127.0.0.1:${M_PORT} (HTTP ${HTTP_CODE}) ▸ ${C_CYN}https://${M_DOM}${C_RES}"
-        fi
-    done < "$HOMELAB_STATE"
-    ui_box_bottom
-    return 0
+        done < "$HOMELAB_STATE"
+    fi
+    [ -z "$HL_SUMMARY" ] && HL_SUMMARY="только сетевой шлюз"
+
+    echo ""
+    echo "${C_BLU}╔══════════════════════════════════════════════════════════════════════════════╗${C_RES}"
+    echo "${C_BLU}║${C_RES}  ${C_CYN}🚀 UNIVERSAL SIDECAR GATEWAY & HOMELAB // ALPINE LINUX${C_RES}"
+    echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Хост / ОС:${C_RES}    %-24s │ Uptime: %-10s │ Load: %s\n" "${HN} (${ARCH_INFO})" "$UPTIME_STR" "$LOAD_STR"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Сеть:${C_RES}         LAN: %s (%s) │ Роутер: %s\n" "$LAN_IP_CUR" "$LAN_DEV_CUR" "$ROUTER_IP"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Память (RAM):${C_RES} %s\n" "$RAM_LINE"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Хранилище:${C_RES}    %s\n" "$ST_INFO"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Ядро шлюза:${C_RES}   Sing-Box [%b] │ AdGuard Home (:53) [%b] │ singbox-tun [%b]\n" "$SB_ST" "$AGH_ST" "$TUN_ST"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Homelab:${C_RES}     %s\n" "$HL_SUMMARY"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• SSL / Домен:${C_RES}  %s\n" "$SSL_INFO"
+    UPDATE_BADGE=$(get_gateway_update_badge 2>/dev/null || echo "")
+    if [ -n "$UPDATE_BADGE" ]; then
+        printf "${C_BLU}║${C_RES}  ${C_BLD}• Обновление:${C_RES}   %b\n" "$UPDATE_BADGE"
+    fi
+    echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
+    echo "${C_BLU}║${C_RES}  ⚡ Быстрая команда: ${C_GRN}${C_BLD}gw${C_RES} │ Меню: ${C_CYN}gateway${C_RES} │ Ссылки: ${C_CYN}gw links${C_RES} │ Доктор: ${C_CYN}gw doctor${C_RES}"
+    echo "${C_BLU}╚══════════════════════════════════════════════════════════════════════════════╝${C_RES}"
+    echo ""
 }
 
-# Мастер выбора модулей Homelab при первоначальной установке или доустановке
+# Преобразование ввода пользователя (номер 1..9 или ID модуля) в канонический ID модуля
 prompt_homelab_modules_wizard() {
     PRE_SEL="${1:-}"
     init_homelab_registry
@@ -8295,8 +9398,7 @@ run_installer() {
         echo "Файл ответов: ${C_CYN}${ANSWERS_FILE}${C_RES}"
         echo "Режим:        ${C_GRN}Полностью автономный запуск (Zero-Touch)${C_RES}"
         ui_box_sep
-        # shellcheck source=/dev/null
-        . "$ANSWERS_FILE"
+        parse_env_file_safely "$ANSWERS_FILE"
 
         USE_INITIAL_WARP="no"
         ANS_SUB="${SUB_URL:-warp}"
@@ -8618,9 +9720,12 @@ SYS_EOF
     # ЭТАП 4: Настройка AdGuard Home с автоматической поддержкой локальных доменов *.lan
     echo "Генерация bcrypt-хэша пароля..."
     AGH_PASS_HASH=""
+    command -v htpasswd >/dev/null 2>&1 || apk add --no-cache apache2-utils >/dev/null 2>&1 || true
     if command -v htpasswd >/dev/null 2>&1; then
         AGH_PASS_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
         [ -z "$AGH_PASS_HASH" ] && AGH_PASS_HASH=$(htpasswd -nbBC 10 "$AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true) || true
+    elif [ -x /usr/sbin/caddy ]; then
+        AGH_PASS_HASH=$(/usr/sbin/caddy hash-password --plaintext "$ADMIN_PASS" 2>/dev/null | tail -n 1 | tr -d '\r\n' || true)
     fi
     disable_apache_daemon
     [ -z "$AGH_PASS_HASH" ] && { echo "${C_RED}[X] Ошибка генерации bcrypt-хэша!${C_RES}"; exit 1; }
@@ -8629,7 +9734,12 @@ SYS_EOF
     mkdir -p /etc/AdGuardHome/data
 
     if [ -f "$AGH_CONF" ]; then
-        awk -v u="$AGH_USER" -v h="$AGH_PASS_HASH" -v gw="$GW_IP" '
+        AGH_USER="$AGH_USER" AGH_PASS_HASH="$AGH_PASS_HASH" GW_IP="$GW_IP" awk '
+            BEGIN {
+                u = ENVIRON["AGH_USER"];
+                h = ENVIRON["AGH_PASS_HASH"];
+                gw = ENVIRON["GW_IP"];
+            }
             /^users:/ {
                 print "users:"
                 print "  - name: " u
@@ -8769,246 +9879,6 @@ nameserver 77.88.8.8"
 }
 
 # Матрица глубокой диагностики шлюза и стека Homelab (Self-Test 2.0 с визуальными шкалами Ping Matrix)
-run_self_test() {
-    set +e
-    detect_os
-    ui_box_top "⚡ [SELF-TEST 2.0] МАТРИЦА ЗДОРОВЬЯ И ОТКЛИКА ШЛЮЗА (${OS_NAME})"
-    WAIT_CNT=0
-    while [ "$WAIT_CNT" -lt 10 ]; do
-        if pgrep sing-box >/dev/null 2>&1 && ip link show singbox-tun >/dev/null 2>&1; then
-            break
-        fi
-        sleep 1
-        WAIT_CNT=$((WAIT_CNT + 1))
-    done
-
-    load_gateway_env
-    calc_hardware_limits
-    LAN_IF_NOW=$(get_lan_ifname)
-    is_dhcp_server_enabled && DHCP_ST="${C_GRN}● ВКЛ${C_RES}" || DHCP_ST="${C_DIM}○ ВЫКЛ${C_RES}"
-    ui_box_row "Сеть сервера: ${C_BLD}[${OS_NAME} (${LAN_IF_NOW}): $(get_current_lan_ip)]${C_RES} ▸ [Роутер: ${GW_IP}] │ DHCP: ${DHCP_ST}"
-    print_proxy_slots_report
-
-    ui_box_sep "СОСТОЯНИЕ ЯДРА И СЕТЕВОГО СТЕКА"
-    SB_PID=$(pgrep sing-box 2>/dev/null | head -n 1 || true)
-    if [ -n "$SB_PID" ]; then
-        SB_RSS=$(awk '/^VmRSS:/ {printf "%.1f МБ", $2/1024}' "/proc/${SB_PID}/status" 2>/dev/null || echo "активен")
-        ui_box_row "${C_GRN}[✔]${C_RES} Sing-Box Extended: ${C_GRN}● ЗАПУЩЕН${C_RES} (PID ${SB_PID}, ОЗУ: ${SB_RSS} / лимит ${SB_GOMEMLIMIT})"
-    else
-        ui_box_row "${C_RED}[✖] Sing-Box Extended: ОСТАНОВЛЕН (исправить: gateway doctor)${C_RES}"
-    fi
-
-    AGH_PID=$(pgrep AdGuardHome 2>/dev/null | head -n 1 || true)
-    if [ -n "$AGH_PID" ]; then
-        AGH_RSS=$(awk '/^VmRSS:/ {printf "%.1f МБ", $2/1024}' "/proc/${AGH_PID}/status" 2>/dev/null || echo "активен")
-        ui_box_row "${C_GRN}[✔]${C_RES} AdGuard Home (:53): ${C_GRN}● ЗАПУЩЕН${C_RES} (PID ${AGH_PID}, ОЗУ: ${AGH_RSS} / лимит ${AGH_GOMEMLIMIT})"
-    else
-        ui_box_row "${C_RED}[✖] AdGuard Home (:53): ОСТАНОВЛЕН (исправить: gateway doctor)${C_RES}"
-    fi
-
-    if ip link show singbox-tun >/dev/null 2>&1; then
-        ui_box_row "${C_GRN}[✔]${C_RES} Виртуальный интерфейс (singbox-tun): ${C_GRN}● АКТИВЕН${C_RES} (MTU 1492, mixed stack)"
-    else
-        ui_box_row "${C_RED}[✖] Виртуальный интерфейс (singbox-tun): НЕ НАЙДЕН${C_RES}"
-    fi
-
-    RP_STAT=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo "unknown")
-    BBR_STAT=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-    CT_CNT=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo "0")
-    ui_box_row "${C_GRN}[✔]${C_RES} Сетевой стек: TCP ${C_CYN}${BBR_STAT}${C_RES} │ rp_filter=${RP_STAT} │ Сессии Conntrack: ${C_BLD}${CT_CNT}${C_RES} из ${SYS_CONNTRACK_MAX}"
-
-    if is_killswitch_enabled; then
-        ui_box_row "${C_GRN}[✔]${C_RES} Защита от утечек: ${C_GRN}◆ Kill-Switch АКТИВЕН${C_RES} + блок Type 65 (HTTPS/ECH), IPv6 и DoT 853"
-    else
-        ui_box_row "${C_GRN}[✔]${C_RES} Защита от утечек: Блок Type 65 (HTTPS/ECH), IPv6 Drop, DoT/DoQ 853 Reject и DNS 53 Redirect"
-    fi
-
-    if [ -f "$SB_CONF" ] && [ -n "$SB_PID" ]; then
-        ui_box_sep "МАТРИЦА ЗАДЕРЖЕК (PING MATRIX)"
-        ACTIVE_NODE=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null | jq -r '.proxies["⚡ Авто (Самый быстрый)"].now // empty' 2>/dev/null)
-        [ -n "$ACTIVE_NODE" ] && ui_box_row "Активная нода (Авто): ${C_CYN}${C_BLD}${ACTIVE_NODE}${C_RES}"
-        CF_TRACE=$(curl -fsS --curves X25519:P-256 --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
-        if [ -n "$CF_TRACE" ]; then
-            ui_box_row "Внешний выход (Cloudflare Trace): ${C_GRN}${CF_TRACE}${C_RES}"
-            PING_RU=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 2 -w '%{time_connect}' "http://ya.ru" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
-            PING_CF=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://cp.cloudflare.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
-            PING_GG=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "https://www.youtube.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
-            PING_AI=$(curl -o /dev/null -sS --curves X25519:P-256 --connect-timeout 3 -m 4 -x http://127.0.0.1:7890 -w '%{time_appconnect}' "https://api.openai.com" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
-            ui_box_row "▸ Напрямую РФ (ya.ru):       $(ui_ping_bar "$PING_RU")"
-            ui_box_row "▸ Cloudflare Anycast (TUN):  $(ui_ping_bar "$PING_CF")"
-            ui_box_row "▸ YouTube / Google Video:    $(ui_ping_bar "$PING_GG")"
-            ui_box_row "▸ OpenAI / AI API (TLS 1.3): $(ui_ping_bar "$PING_AI")"
-        else
-            ui_box_row "${C_YEL}[▲] Туннель еще прогревается или все внешние ноды недоступны (проверьте: gateway proxy).${C_RES}"
-        fi
-    fi
-    ui_box_bottom
-
-    if [ "$(count_enabled_homelab_modules)" -gt 0 ]; then
-        run_homelab_self_test
-    fi
-    return 0
-}
-
-# Быстрая неинвазивная проверка синтаксиса и доступности ключевых сервисов (без перезапусков)
-run_gateway_quick_check() {
-    set +e
-    detect_os
-    load_gateway_env
-    ui_box_top "🩺 НЕИНВАЗИВНЫЙ АУДИТ СИСТЕМЫ (GATEWAY CHECK)"
-
-    # 1. Синтаксис Sing-Box
-    if [ -x /usr/bin/sing-box ] && [ -s "$SB_CONF" ]; then
-        if /usr/bin/sing-box check -c "$SB_CONF" -D /etc/sing-box >/dev/null 2>&1; then
-            ui_box_row "${C_GRN}[✔]${C_RES} Sing-Box Config:      ${C_GRN}КОРРЕКТЕН${C_RES} (${SB_CONF})"
-        else
-            ui_box_row "${C_RED}[✖] Sing-Box Config:      ОШИБКА ВАЛИДАЦИИ СИНТАКСИСА${C_RES}"
-        fi
-    else
-        ui_box_row "${C_YEL}[▲] Sing-Box Config:      НЕ НАЙДЕН (${SB_CONF})${C_RES}"
-    fi
-
-    # 2. Синтаксис Caddy
-    if [ -x /usr/sbin/caddy ] && [ -s "$CADDY_CONF" ]; then
-        if su -s /bin/sh caddy -c "XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/var/lib/caddy HOME=/var/lib/caddy /usr/sbin/caddy validate --config '$CADDY_CONF' --adapter caddyfile" >/dev/null 2>&1 || \
-           /usr/sbin/caddy validate --config "$CADDY_CONF" --adapter caddyfile >/dev/null 2>&1; then
-            ui_box_row "${C_GRN}[✔]${C_RES} Caddyfile & PKI:      ${C_GRN}КОРРЕКТЕН${C_RES} (${CADDY_CONF})"
-        else
-            ui_box_row "${C_RED}[✖] Caddyfile & PKI:      ОШИБКА ВАЛИДАЦИИ CADDYFILE${C_RES}"
-        fi
-    fi
-
-    # 2.5. Статус SSL/TLS
-    if is_letsencrypt_ssl_active 2>/dev/null; then
-        ui_box_row "${C_GRN}[✔]${C_RES} SSL/TLS Сертификат:   ${C_GRN}Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
-    else
-        ui_box_row "${C_CYN}[✔]${C_RES} SSL/TLS Сертификат:   Локальный PKI (*.lan)"
-    fi
-
-    # 3. AdGuard Home DNS (:53)
-    if nc -z -u -w 1 127.0.0.1 53 >/dev/null 2>&1 || pgrep AdGuardHome >/dev/null 2>&1; then
-        ui_box_row "${C_GRN}[✔]${C_RES} AdGuard Home DNS:     ${C_GRN}АКТИВЕН${C_RES} (127.0.0.1:53 слушает запросы)"
-    else
-        ui_box_row "${C_RED}[✖] AdGuard Home DNS:     НЕ ОТВЕЧАЕТ НА ПОРТУ 53${C_RES}"
-    fi
-
-    # 4. Sing-Box Clash API (:9090)
-    if curl -fsS -m 2 -H "Authorization: Bearer ${ADMIN_PASS:-admin}" "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
-        ui_box_row "${C_GRN}[✔]${C_RES} Clash API (:9090):    ${C_GRN}АКТИВЕН${C_RES} (REST API отвечает, токен валиден)"
-    else
-        ui_box_row "${C_YEL}[▲] Clash API (:9090):    НЕДОСТУПЕН ИЛИ НЕВЕРНЫЙ СЕКРЕТ${C_RES}"
-    fi
-
-    # 5. Состояние памяти и Conntrack
-    MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
-    MEM_AVAIL_KB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
-    if [ "$MEM_TOTAL_KB" -gt 0 ]; then
-        MEM_USE_PCT=$(( (MEM_TOTAL_KB - MEM_AVAIL_KB) * 100 / MEM_TOTAL_KB ))
-        ui_box_row "${C_GRN}[✔]${C_RES} Оперативная память:   ${MEM_USE_PCT}% занято ($((MEM_AVAIL_KB/1024)) МБ свободно из $((MEM_TOTAL_KB/1024)) МБ)"
-    fi
-
-    CT_NOW=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
-    CT_MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 1)
-    CT_PCT=$(( CT_NOW * 100 / (CT_MAX > 0 ? CT_MAX : 1) ))
-    ui_box_row "${C_GRN}[✔]${C_RES} Таблица Conntrack:    ${CT_NOW} / ${CT_MAX} сессий (${CT_PCT}%)"
-
-    ui_box_bottom
-    return 0
-}
-
-# ==============================================================================
-# Динамический баннер приветствия SSH / Консоли (Fast Non-blocking MOTD)
-# Вызывается автоматически при логине в систему через /etc/profile.d/00-gateway-motd.sh
-# или вручную по команде `gw motd` / `gateway motd`
-# ==============================================================================
-print_gateway_motd() {
-    load_gateway_env
-    [ -f "$HOMELAB_ENV" ] && . "$HOMELAB_ENV" 2>/dev/null || true
-
-    HN=$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "alpine")
-    ARCH_INFO=$(uname -m 2>/dev/null || echo "x86_64")
-    UPTIME_RAW=$(uptime 2>/dev/null || echo "")
-    UPTIME_STR=$(printf "%s" "$UPTIME_RAW" | sed -E 's/.*up[[:space:]]+([^,]+),.*/\1/' | sed 's/^[[:space:]]*//' || echo "online")
-    LOAD_STR=$(awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null || echo "0.00")
-
-    LAN_IP_CUR=$(get_current_lan_ip)
-    LAN_DEV_CUR=$(get_lan_ifname)
-    ROUTER_IP="${GW_IP:-$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -n 1)}"
-
-    # ОЗУ
-    RAM_LINE=$(free -m 2>/dev/null | awk '/Mem:/ {if ($2>0) printf "%d МБ / %d МБ (%.0f%%)", $3, $2, ($3/$2)*100; else print "N/A"}')
-    [ -z "$RAM_LINE" ] && RAM_LINE="${TOTAL_RAM_MB:-2048} МБ"
-
-    # Хранилище
-    if is_external_storage_mounted 2>/dev/null; then
-        ST_LINE=$(df -h "$STORAGE_ROOT" 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
-        ST_SRC=$(findmnt -n -o SOURCE "$STORAGE_ROOT" 2>/dev/null || true)
-        ST_FS=$(blkid -s TYPE -o value "$ST_SRC" 2>/dev/null || echo "ext4")
-        if [ -n "${EXT_STORAGE_LUKS_UUID:-}" ] || echo "$ST_SRC" | grep -q "mapper"; then
-            ST_TAG=" [${ST_FS} / LUKS2 🔒]"
-        else
-            ST_TAG=" [${ST_FS}]"
-        fi
-        ST_INFO="${STORAGE_ROOT}: ${ST_LINE}${ST_TAG}"
-    else
-        ST_ROOT_LINE=$(df -h / 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
-        ST_INFO="Локальный системный раздел: ${ST_ROOT_LINE} (диск не подключен)"
-    fi
-
-    # Статус ядер шлюза
-    SB_ST="${C_RED}○${C_RES}"
-    pgrep sing-box >/dev/null 2>&1 && SB_ST="${C_GRN}●${C_RES}"
-    AGH_ST="${C_RED}○${C_RES}"
-    pgrep AdGuardHome >/dev/null 2>&1 && AGH_ST="${C_GRN}●${C_RES}"
-    TUN_ST="${C_RED}○${C_RES}"
-    ip link show singbox-tun >/dev/null 2>&1 && TUN_ST="${C_GRN}●${C_RES}"
-
-    # SSL / Домен
-    if [ "${SSL_MODE:-local}" = "duckdns" ] && [ -n "${DUCKDNS_DOMAIN:-}" ]; then
-        SSL_INFO="Let's Encrypt Wildcard (*.${DUCKDNS_DOMAIN})"
-    else
-        SSL_INFO="Локальный доверенный CA (*.lan)"
-    fi
-
-    # Homelab сервисы
-    HL_SUMMARY=""
-    if [ -f "$HOMELAB_STATE" ]; then
-        while IFS='|' read -r M_ID M_EN M_SVC _REST; do
-            case "$M_ID" in ''|\#*) continue ;; esac
-            if [ "$M_EN" = "yes" ]; then
-                if [ -n "$M_SVC" ] && rc-service "$M_SVC" status >/dev/null 2>&1; then
-                    DOT="${C_GRN}●${C_RES}"
-                else
-                    DOT="${C_RED}○${C_RES}"
-                fi
-                HL_SUMMARY="${HL_SUMMARY} ${M_ID}[${DOT}]"
-            fi
-        done < "$HOMELAB_STATE"
-    fi
-    [ -z "$HL_SUMMARY" ] && HL_SUMMARY="только сетевой шлюз"
-
-    echo ""
-    echo "${C_BLU}╔══════════════════════════════════════════════════════════════════════════════╗${C_RES}"
-    echo "${C_BLU}║${C_RES}  ${C_CYN}🚀 UNIVERSAL SIDECAR GATEWAY & HOMELAB // ALPINE LINUX${C_RES}"
-    echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
-    printf "${C_BLU}║${C_RES}  ${C_BLD}• Хост / ОС:${C_RES}    %-24s │ Uptime: %-10s │ Load: %s\n" "${HN} (${ARCH_INFO})" "$UPTIME_STR" "$LOAD_STR"
-    printf "${C_BLU}║${C_RES}  ${C_BLD}• Сеть:${C_RES}         LAN: %s (%s) │ Роутер: %s\n" "$LAN_IP_CUR" "$LAN_DEV_CUR" "$ROUTER_IP"
-    printf "${C_BLU}║${C_RES}  ${C_BLD}• Память (RAM):${C_RES} %s\n" "$RAM_LINE"
-    printf "${C_BLU}║${C_RES}  ${C_BLD}• Хранилище:${C_RES}    %s\n" "$ST_INFO"
-    printf "${C_BLU}║${C_RES}  ${C_BLD}• Ядро шлюза:${C_RES}   Sing-Box [%b] │ AdGuard Home (:53) [%b] │ singbox-tun [%b]\n" "$SB_ST" "$AGH_ST" "$TUN_ST"
-    printf "${C_BLU}║${C_RES}  ${C_BLD}• Homelab:${C_RES}     %s\n" "$HL_SUMMARY"
-    printf "${C_BLU}║${C_RES}  ${C_BLD}• SSL / Домен:${C_RES}  %s\n" "$SSL_INFO"
-    UPDATE_BADGE=$(get_gateway_update_badge 2>/dev/null || echo "")
-    if [ -n "$UPDATE_BADGE" ]; then
-        printf "${C_BLU}║${C_RES}  ${C_BLD}• Обновление:${C_RES}   %b\n" "$UPDATE_BADGE"
-    fi
-    echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
-    echo "${C_BLU}║${C_RES}  ⚡ Быстрая команда: ${C_GRN}${C_BLD}gw${C_RES} │ Меню: ${C_CYN}gateway${C_RES} │ Ссылки: ${C_CYN}gw links${C_RES} │ Доктор: ${C_CYN}gw doctor${C_RES}"
-    echo "${C_BLU}╚══════════════════════════════════════════════════════════════════════════════╝${C_RES}"
-    echo ""
-}
-
-# Преобразование ввода пользователя (номер 1..9 или ID модуля) в канонический ID модуля
 resolve_homelab_module_id() {
     RAW_M=$(printf "%s" "${1:-}" | tr 'A-Z' 'a-z' | tr -d ' \t\r\n')
     case "$RAW_M" in
@@ -9097,6 +9967,7 @@ cli_proxy_add() {
                 *" ${CLEAN_P} "*) ;;
                 *) SUB_URL="${SUB_URL:+${SUB_URL} }${CLEAN_P}" ;;
             esac
+            save_gateway_env
             apply_and_verify_singbox "CLI: Добавление подписки в Слот 1"
             ;;
         warp|WARP|amnezia|masque)
@@ -9229,10 +10100,9 @@ verify_answers_file() {
     fi
     echo "${C_GRN}[✔] Синтаксис shell: КОРРЕКТЕН${C_RES}"
 
-    # 2. Изолированная загрузка переменных
+    # 2. Изолированная безопасная загрузка переменных
     (
-        # shellcheck source=/dev/null
-        . "$IN_F"
+        parse_env_file_safely "$IN_F"
 
         # Сеть
         printf "• Сеть:             LAN IP: %s │ GW IP: %s │ Подписка: %s\n" "${TARGET_LAN_IP:-auto}" "${GW_IP:-auto}" "${SUB_URL:-warp}"
@@ -10241,7 +11111,7 @@ gateway_cli_dispatch() {
                 cli_domain_rule_add "proxy" "${3:-}"
                 ;;
             test|check|inspect)
-                inspect_domain_route
+                inspect_domain_route "${3:-}"
                 ;;
             *)
                 ui_warn_box "Укажите действие для домена: direct или proxy." \

@@ -143,13 +143,20 @@ FORCE_GRP
         "tls": {
           "enabled": true,
           "server_name": "common.dot.dns.yandex.net"
-        }
+        },
+        "detour": "DIRECT"
       },
       {
-        "tag": "dns_ru_udp",
-        "type": "udp",
-        "server": "77.88.8.8",
-        "server_port": 53
+        "tag": "dns_ru_backup",
+        "type": "https",
+        "server": "77.88.8.1",
+        "server_port": 443,
+        "path": "/dns-query",
+        "tls": {
+          "enabled": true,
+          "server_name": "common.dot.dns.yandex.net"
+        },
+        "detour": "DIRECT"
       },
       {
         "tag": "dns_local",
@@ -204,9 +211,12 @@ FORCE_GRP
       {
         "domain_suffix": [
           ".home.arpa",
-          ".local"
+          ".local",
+          "alpinelinux.org",
+          "github.com",
+          "githubusercontent.com"
         ],
-        "server": "dns_local"
+        "server": "dns_ru"
       },
       {
         "domain": [
@@ -392,7 +402,10 @@ FORCE_GRP
         "domain_suffix": [
           ".lan",
           ".home.arpa",
-          ".local"
+          ".local",
+          "alpinelinux.org",
+          "github.com",
+          "githubusercontent.com"
         ],
         "outbound": "DIRECT"
       },
