@@ -163,6 +163,77 @@ lxc_list_containers() {
     return 0
 }
 
+# Автоконфигурация сетевых интерфейсов и DHCP/DNS внутри rootfs гостевых ОС
+# Гарантирует немедленное получение IP для Debian, Kali, Ubuntu, Arch, Alma, Alpine
+lxc_autoseed_container_network() {
+    CT_NAME="$1"
+    DNS_IP="${2:-10.0.3.1}"
+    ROOTFS="${LXC_VAR_LIB}/${CT_NAME}/rootfs"
+    [ -d "$ROOTFS" ] || return 0
+
+    # 1. Debian / Ubuntu / Kali / Devuan (/etc/network/interfaces)
+    if [ -d "${ROOTFS}/etc/network" ]; then
+        if [ ! -f "${ROOTFS}/etc/network/interfaces" ] || ! grep -q "eth0" "${ROOTFS}/etc/network/interfaces" 2>/dev/null; then
+            cat << 'EOF' >> "${ROOTFS}/etc/network/interfaces"
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+EOF
+        fi
+    fi
+
+    # 2. systemd-networkd (Debian, Kali, Ubuntu, Arch Linux, AlmaLinux, Fedora)
+    if [ -d "${ROOTFS}/etc/systemd" ]; then
+        mkdir -p "${ROOTFS}/etc/systemd/network"
+        if [ ! -f "${ROOTFS}/etc/systemd/network/80-container-eth0.network" ]; then
+            cat << 'EOF' > "${ROOTFS}/etc/systemd/network/80-container-eth0.network"
+[Match]
+Name=eth0
+
+[Network]
+DHCP=yes
+EOF
+        fi
+        mkdir -p "${ROOTFS}/etc/systemd/system/multi-user.target.wants"
+        for srv in systemd-networkd.service systemd-resolved.service; do
+            for pfx in /lib/systemd/system /usr/lib/systemd/system; do
+                if [ -f "${ROOTFS}${pfx}/${srv}" ]; then
+                    ln -sf "${pfx}/${srv}" "${ROOTFS}/etc/systemd/system/multi-user.target.wants/${srv}" 2>/dev/null || true
+                fi
+            done
+        done
+    fi
+
+    # 3. Alpine Linux (OpenRC)
+    if [ -d "${ROOTFS}/etc/runlevels" ]; then
+        if [ -f "${ROOTFS}/etc/network/interfaces" ] && ! grep -q "eth0" "${ROOTFS}/etc/network/interfaces" 2>/dev/null; then
+            cat << 'EOF' >> "${ROOTFS}/etc/network/interfaces"
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+EOF
+        fi
+        if [ -f "${ROOTFS}/etc/init.d/networking" ]; then
+            mkdir -p "${ROOTFS}/etc/runlevels/default"
+            ln -sf /etc/init.d/networking "${ROOTFS}/etc/runlevels/default/networking" 2>/dev/null || true
+        fi
+    fi
+
+    # 4. Базовый resolv.conf (на случай задержек DHCP)
+    if [ ! -s "${ROOTFS}/etc/resolv.conf" ]; then
+        cat << EOF > "${ROOTFS}/etc/resolv.conf"
+nameserver ${DNS_IP}
+nameserver 1.1.1.1
+EOF
+    fi
+}
+
 # Интерактивное создание нового контейнера с загрузкой официального шаблона
 lxc_create_wizard() {
     ensure_lxc_subsystem "no"
@@ -184,36 +255,92 @@ lxc_create_wizard() {
     fi
 
     echo ""
-    ui_info_msg "Выберите дистрибутив операционной системы для загрузки:"
-    echo "  1) Alpine Linux 3.24 (Ультралегкий ~2MB, рекомендован для микросервисов)"
-    echo "  2) Alpine Linux 3.23"
-    echo "  3) Debian 12 (Bookworm) (Стандартный серверный glibc дистрибутив)"
-    echo "  4) Ubuntu 24.04 LTS (Noble Numbat)"
-    echo "  5) Ubuntu 22.04 LTS (Jammy Jellyfish)"
-    echo "  6) AlmaLinux 9 (RHEL 9 совместимый корпоративный Linux)"
-    echo "  7) Arch Linux (Свежие rolling-release пакеты)"
-    echo "  8) Ввести произвольный дистрибутив и релиз из images.linuxcontainers.org"
+    LXC_ARCH=$(get_lxc_system_arch)
+    CACHE_FILE="/tmp/lxc_templates_${LXC_ARCH}.txt"
+
+    # Загружаем актуальный индекс образов images.linuxcontainers.org
+    if [ ! -s "$CACHE_FILE" ] || [ -n "$(find "$CACHE_FILE" -mmin +60 2>/dev/null)" ]; then
+        ui_step_progress 1 4 "Загрузка официального каталога образов images.linuxcontainers.org (${LXC_ARCH})..."
+        curl -s --connect-timeout 8 "https://images.linuxcontainers.org/meta/1.0/index-system" 2>/dev/null | \
+            awk -F';' -v a="$LXC_ARCH" '$3 == a && $4 == "default" {print $1, $2}' | \
+            sort -u -k1,1 -k2,2 > "${CACHE_FILE}.tmp" 2>/dev/null
+        if [ -s "${CACHE_FILE}.tmp" ]; then
+            mv -f "${CACHE_FILE}.tmp" "$CACHE_FILE"
+        fi
+    fi
+
+    # Резервный список шаблонов на случай отсутствия связи с сервером
+    if [ ! -s "$CACHE_FILE" ]; then
+        cat << 'FALLBACK_EOF' > "$CACHE_FILE"
+almalinux 9
+almalinux 10
+alpine 3.21
+alpine 3.22
+alpine 3.23
+alpine 3.24
+alpine edge
+alt p11
+archlinux current
+cachyos current
+centos 9-Stream
+centos 10-Stream
+debian bookworm
+debian trixie
+devuan daedalus
+fedora 43
+fedora 44
+kali current
+mint wilma
+nixos 26.05
+opensuse tumbleweed
+openwrt 25.12
+rockylinux 9
+ubuntu jammy
+ubuntu noble
+voidlinux current
+FALLBACK_EOF
+    fi
+
+    TOTAL_TMPL=$(wc -l < "$CACHE_FILE" | tr -d ' ')
+
+    ui_box_top "🌐 ОФИЦИАЛЬНЫЙ КАТАЛОГ ШАБЛОНОВ LXC (images.linuxcontainers.org / ${LXC_ARCH})"
+    awk '{lines[NR] = sprintf("  %2d) %-13s (%s)", NR, $1, $2)}
+    END {
+        half = int((NR + 1) / 2)
+        for (i = 1; i <= half; i++) {
+            right = (i + half <= NR) ? lines[i + half] : ""
+            printf "%-38s%s\n", lines[i], right
+        }
+    }' "$CACHE_FILE"
     echo ""
-    printf "Ваш выбор [1-8, по умолчанию 1]: "
+    echo "   0) Ввести произвольный дистрибутив и релиз вручную"
+    ui_box_bottom
+    echo ""
+
+    # Номер Alpine по умолчанию
+    DEFAULT_NUM=$(grep -n "^alpine 3\.24" "$CACHE_FILE" 2>/dev/null | cut -d: -f1 || echo "")
+    [ -z "$DEFAULT_NUM" ] && DEFAULT_NUM=$(grep -n "^alpine" "$CACHE_FILE" 2>/dev/null | head -n1 | cut -d: -f1 || echo "1")
+
+    printf "Выберите номер шаблона [1-%s, 0 для ручного ввода, по умолчанию %s]: " "$TOTAL_TMPL" "$DEFAULT_NUM"
     read -r DIST_CHOICE
+    [ -z "$DIST_CHOICE" ] && DIST_CHOICE="$DEFAULT_NUM"
 
     T_DIST="alpine"
     T_REL="3.24"
-    case "$DIST_CHOICE" in
-        2) T_DIST="alpine"; T_REL="3.23" ;;
-        3) T_DIST="debian"; T_REL="bookworm" ;;
-        4) T_DIST="ubuntu"; T_REL="noble" ;;
-        5) T_DIST="ubuntu"; T_REL="jammy" ;;
-        6) T_DIST="almalinux"; T_REL="9" ;;
-        7) T_DIST="archlinux"; T_REL="current" ;;
-        8)
-            echo "Введите название дистрибутива (например, fedora, debian, opensuse):"
-            read -r T_DIST
-            echo "Введите версию релиза (например, 41, sid, tumbleweed):"
-            read -r T_REL
-            ;;
-        *) T_DIST="alpine"; T_REL="3.24" ;;
-    esac
+    if [ "$DIST_CHOICE" = "0" ]; then
+        echo "Введите название дистрибутива (например, fedora, debian, kali, opensuse):"
+        read -r T_DIST
+        echo "Введите версию релиза (например, current, bookworm, noble, 41):"
+        read -r T_REL
+    elif [ "$DIST_CHOICE" -ge 1 ] 2>/dev/null && [ "$DIST_CHOICE" -le "$TOTAL_TMPL" ] 2>/dev/null; then
+        SELECTED_LINE=$(sed -n "${DIST_CHOICE}p" "$CACHE_FILE")
+        T_DIST=$(echo "$SELECTED_LINE" | awk '{print $1}')
+        T_REL=$(echo "$SELECTED_LINE" | awk '{print $2}')
+    else
+        ui_warn_msg "Некорректный выбор. Используется Alpine по умолчанию."
+        T_DIST="alpine"
+        T_REL="3.24"
+    fi
 
     echo ""
     ui_info_msg "Выберите режим сетевого подключения:"
@@ -222,6 +349,30 @@ lxc_create_wizard() {
     printf "Ваш выбор [1-2, по умолчанию 1]: "
     read -r NET_CHOICE
     [ -z "$NET_CHOICE" ] && NET_CHOICE="1"
+
+    echo ""
+    ui_info_msg "Конфигурация IP адреса контейнера:"
+    echo "  1) Динамический DHCP (автоматическое получение адреса) [Рекомендуется]"
+    echo "  2) Статический IPv4 (ручная фиксация адреса, шлюза и DNS)"
+    printf "Ваш выбор [1-2, по умолчанию 1]: "
+    read -r IP_MODE_CHOICE
+    [ -z "$IP_MODE_CHOICE" ] && IP_MODE_CHOICE="1"
+
+    STATIC_IP=""
+    STATIC_GW=""
+    STATIC_DNS=""
+    if [ "$IP_MODE_CHOICE" = "2" ]; then
+        DEFAULT_GW="10.0.3.1"
+        [ "$NET_CHOICE" = "2" ] && DEFAULT_GW="$(get_current_lan_ip | sed 's/\.[0-9]*$/.1/' 2>/dev/null || echo "192.168.1.1")"
+        echo "Введите статический IPv4 с CIDR маской (например, $([ "$NET_CHOICE" = "2" ] && echo "192.168.1.150/24" || echo "10.0.3.50/24")):"
+        read -r STATIC_IP
+        echo "Введите шлюз по умолчанию [Enter для ${DEFAULT_GW}]:"
+        read -r STATIC_GW
+        [ -z "$STATIC_GW" ] && STATIC_GW="$DEFAULT_GW"
+        echo "Введите DNS сервер [Enter для ${DEFAULT_GW}]:"
+        read -r STATIC_DNS
+        [ -z "$STATIC_DNS" ] && STATIC_DNS="$DEFAULT_GW"
+    fi
 
     echo ""
     ui_info_msg "Ограничение оперативной памяти (cgroups v2):"
@@ -239,6 +390,7 @@ lxc_create_wizard() {
     ui_box_row "• Имя:          ${CT_NAME}"
     ui_box_row "• Дистрибутив:  ${T_DIST} (релиз: ${T_REL}, архитектура: ${LXC_ARCH})"
     ui_box_row "• Сеть:         $([ "$NET_CHOICE" = "2" ] && echo "Macvlan (LAN direct)" || echo "NAT (lxcbr0, 10.0.3.X)")"
+    ui_box_row "• Режим IP:     $([ -n "$STATIC_IP" ] && echo "Статический (${STATIC_IP}, шлюз ${STATIC_GW})" || echo "DHCP (Автоматически)")"
     ui_box_row "• Лимит ОЗУ:    $([ -n "$MEM_LIMIT" ] && echo "$MEM_LIMIT" || echo "Без ограничений")"
     ui_box_row "• Автозапуск:   $([ "$AUTO_START_ANS" = "y" ] && echo "Включен (lxc.start.auto = 1)" || echo "Выключен")"
     ui_box_bottom
@@ -269,6 +421,12 @@ lxc.net.0.hwaddr = 10:66:6a:$(hexdump -n 3 -e '/1 ":%02x"' /dev/urandom 2>/dev/n
 NET_MACVLAN
         fi
 
+        if [ -n "$STATIC_IP" ]; then
+            sed -i '/lxc\.net\.0\.ipv4\./d' "$CT_CONF"
+            echo "lxc.net.0.ipv4.address = ${STATIC_IP}" >> "$CT_CONF"
+            [ -n "$STATIC_GW" ] && echo "lxc.net.0.ipv4.gateway = ${STATIC_GW}" >> "$CT_CONF"
+        fi
+
         if [ -n "$MEM_LIMIT" ]; then
             sed -i '/lxc\.cgroup2\.memory\.max/d' "$CT_CONF"
             echo "lxc.cgroup2.memory.max = ${MEM_LIMIT}" >> "$CT_CONF"
@@ -280,6 +438,9 @@ NET_MACVLAN
             echo "lxc.start.delay = 3" >> "$CT_CONF"
         fi
     fi
+
+    # Автонастройка сетевых сервисов внутри гостевого rootfs
+    lxc_autoseed_container_network "$CT_NAME" "${STATIC_DNS:-10.0.3.1}"
 
     ui_step_progress 3 3 "Запуск контейнера ${CT_NAME}..."
     lxc-start -n "$CT_NAME" 2>/dev/null || true
@@ -305,6 +466,7 @@ lxc_control() {
     case "$ACTION" in
         start)
             ui_info_msg "Запуск контейнера ${NAME}..."
+            lxc_autoseed_container_network "$NAME"
             lxc-start -n "$NAME" && ui_ok_msg "Контейнер ${NAME} запущен." || ui_warn_msg "Ошибка запуска ${NAME}."
             ;;
         stop)
@@ -313,9 +475,21 @@ lxc_control() {
             ;;
         restart)
             ui_info_msg "Перезапуск контейнера ${NAME}..."
+            lxc_autoseed_container_network "$NAME"
             lxc-stop -n "$NAME" -t 5 2>/dev/null || true
             sleep 1
             lxc-start -n "$NAME" && ui_ok_msg "Контейнер ${NAME} перезапущен." || ui_warn_msg "Ошибка перезапуска."
+            ;;
+        fix-net|net-fix)
+            ui_info_msg "Автоисправление сетевой конфигурации для '${NAME}'..."
+            lxc_autoseed_container_network "$NAME"
+            if lxc-info -n "$NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
+                lxc-attach -n "$NAME" -- ip link set eth0 up 2>/dev/null || true
+                lxc-attach -n "$NAME" -- systemctl enable --now systemd-networkd 2>/dev/null || \
+                lxc-attach -n "$NAME" -- dhclient eth0 2>/dev/null || \
+                lxc-attach -n "$NAME" -- udhcpc -i eth0 2>/dev/null || true
+            fi
+            ui_ok_msg "Сетевая конфигурация для '${NAME}' успешно применена."
             ;;
         attach)
             ui_info_msg "Вход в интерактивную сессию контейнера ${NAME} (выход: exit)..."
@@ -487,10 +661,11 @@ lxc_interactive_menu() {
         echo "  5) 💻 Войти в терминал контейнера (lxc-attach)"
         echo "  6) 📸 Управление снимками (Снапшоты: создать / список / откат)"
         echo "  7) ⚙  Переключить автозапуск при старте сервера"
-        echo "  8) 🗑  Удалить контейнер"
+        echo "  8) 🔧 Автоисправление сети контейнера (DHCP / DNS)"
+        echo "  9) 🗑  Удалить контейнер"
         echo "  0) ⬅  Назад в главное меню"
         echo ""
-        printf "Выберите действие [0-8]: "
+        printf "Выберите действие [0-9]: "
         read -r M_ACT
         case "$M_ACT" in
             1) lxc_create_wizard ;;
@@ -521,7 +696,12 @@ lxc_interactive_menu() {
                 read -r A_CT
                 [ -n "$A_CT" ] && lxc_control "autostart" "$A_CT"
                 ;;
-            8) lxc_control "delete" ;;
+            8)
+                echo "Введите имя контейнера для автоисправления сети:"
+                read -r N_CT
+                [ -n "$N_CT" ] && lxc_control "fix-net" "$N_CT"
+                ;;
+            9) lxc_control "delete" ;;
             0|q|Q) break ;;
         esac
         echo ""

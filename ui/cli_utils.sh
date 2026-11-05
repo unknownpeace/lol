@@ -281,6 +281,7 @@ print_gateway_cli_help() {
     ui_box_row "${C_CYN}gw lxc attach <имя>${C_RES}         — Открыть сессию терминала root внутри контейнера (lxc-attach)"
     ui_box_row "${C_CYN}gw lxc snap <имя> [create|list|restore|delete]${C_RES} — Управление мгновенными снимками (снапшотами)"
     ui_box_row "${C_CYN}gw lxc autostart <имя> [on|off]${C_RES} — Настройка автозапуска контейнера при включении сервера"
+    ui_box_row "${C_CYN}gw lxc fix-net <имя>${C_RES}         — Автоисправление сети контейнера (DHCP/resolv.conf)"
     ui_box_row "${C_CYN}gw lxc menu${C_RES}                 — Интерактивное TUI-меню LXC виртуализации"
     ui_box_sep "🏠 МОДУЛИ HOMELAB И ЕДИНЫЙ БЭКАП"
     ui_box_row "${C_CYN}gw homelab${C_RES}                  — Открыть интерактивное меню управления домашним сервером (Пункт 13)"

@@ -197,8 +197,11 @@ gateway_cli_dispatch() {
                 check_and_heal_lxc_doctor
                 ui_ok_msg "Диагностика и автоисцеление LXC завершены."
                 ;;
+            fix-net|net-fix)
+                lxc_control "fix-net" "${3:-}"
+                ;;
             *)
-                echo "Использование: gw lxc [list|create|start|stop|restart|attach|snap|autostart|rm|menu]"
+                echo "Использование: gw lxc [list|create|start|stop|restart|attach|snap|autostart|fix-net|rm|menu]"
                 ;;
         esac
         ;;
