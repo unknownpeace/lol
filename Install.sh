@@ -8149,12 +8149,14 @@ run_homelab_self_test() {
         elif [ "$M_ID" = "caddy" ]; then
             ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ HTTPS :443 / PKI :80"
         elif [ "$M_ID" = "vaultwarden" ]; then
-            HTTP_CODE=$(curl -k -o /dev/null -sS --connect-timeout 2 -m 3 -w '%{http_code}' "http://127.0.0.1:${M_PORT}/api/config" 2>/dev/null || echo "000")
+            HTTP_CODE=$(curl -k -o /dev/null -sS --connect-timeout 2 -m 4 -w '%{http_code}' "http://127.0.0.1:${M_PORT}/api/config" 2>/dev/null || true)
+            [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ] && HTTP_CODE="000"
             WV_ST="WebVault:OK"
             detect_vaultwarden_web_dir >/dev/null 2>&1 || WV_ST="WebVault:FAIL"
             ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ 127.0.0.1:${M_PORT} (HTTP ${HTTP_CODE}, ${WV_ST}) ▸ ${C_CYN}https://${M_DOM}${C_RES}"
         else
-            HTTP_CODE=$(curl -k -o /dev/null -sS --connect-timeout 2 -m 3 -w '%{http_code}' "http://127.0.0.1:${M_PORT}" 2>/dev/null || echo "000")
+            HTTP_CODE=$(curl -k -o /dev/null -sS --connect-timeout 2 -m 4 -w '%{http_code}' "http://127.0.0.1:${M_PORT}" 2>/dev/null || true)
+            [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ] && HTTP_CODE="000"
             ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ 127.0.0.1:${M_PORT} (HTTP ${HTTP_CODE}) ▸ ${C_CYN}https://${M_DOM}${C_RES}"
         fi
     done < "$HOMELAB_STATE"
