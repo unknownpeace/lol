@@ -20,20 +20,20 @@
 ### Вариант 1 (Рекомендуемый): Установка через Git (Модульная версия с автообновлением)
 ```sh
 apk add --no-cache git
-git clone https://forgejo.lan/neko/Gateway.git /opt/gateway
+git clone -b experimental https://github.com/unknownpeace/lol.git /opt/gateway
 cd /opt/gateway
 ./setup.sh
 ```
 > 🔄 **Обновление в будущем:** в любой момент выполняйте `gw update` (или `gw update check` для просмотра новых коммитов).
 
-### Вариант 2: Автономный установщик в одну строчку через `wget`
+### Вариант 2: Автономный установщик в одну строчку через `curl`
 ```sh
-wget -O /tmp/install.sh "https://forgejo.lan/neko/Gateway/raw/branch/main/Install.sh" && chmod +x /tmp/install.sh && /tmp/install.sh
+curl -fsSL --curves X25519:P-256 "https://raw.githubusercontent.com/unknownpeace/lol/experimental/Install.sh" -o /tmp/Install.sh && chmod +x /tmp/Install.sh && /tmp/Install.sh
 ```
 
-### Вариант 3: Через `curl` (с защитой от фрагментации TLS 1.3 на ТСПУ)
+### Вариант 3: Автономный установщик в одну строчку через `wget`
 ```sh
-curl -fsSL --curves X25519:P-256 "https://raw.githubusercontent.com/unknownpeace/lol/refs/heads/main/setup_gateway.sh" -o /tmp/setup_gateway.sh && chmod +x /tmp/setup_gateway.sh && /tmp/setup_gateway.sh
+wget -O /tmp/Install.sh "https://raw.githubusercontent.com/unknownpeace/lol/experimental/Install.sh" && chmod +x /tmp/Install.sh && /tmp/Install.sh
 ```
 
 ### Вариант 4: Тихая установка без единого вопроса (Zero-Touch Answers)
