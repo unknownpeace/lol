@@ -207,6 +207,30 @@ depend() {
 INIT_AGH_ALP
     chmod +x /etc/init.d/adguardhome
 
+    if [ -f "${GATEWAY_DIR}/modules/tools/api_server.py" ]; then
+        cat << 'INIT_API_ALP' > /etc/init.d/gateway-api
+#!/sbin/openrc-run
+name="gateway-api"
+description="Universal Gateway REST and SSE Dashboard API"
+supervisor="supervise-daemon"
+command="/usr/bin/python3"
+command_args="/opt/gateway/modules/tools/api_server.py"
+output_log="/var/log/gateway-api.log"
+error_log="/var/log/gateway-api.log"
+rc_oom_score_adj="200"
+respawn_delay=2
+respawn_max=10
+
+depend() {
+    need net
+    after caddy
+}
+INIT_API_ALP
+        chmod +x /etc/init.d/gateway-api
+        service_ctl gateway-api enable >/dev/null 2>&1 || true
+        service_ctl gateway-api restart >/dev/null 2>&1 || true
+    fi
+
     service_ctl sing-box enable
     service_ctl sing-box restart
     sleep 2

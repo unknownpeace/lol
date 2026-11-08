@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Universal Gateway & Homelab Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220%22%20%220%22%20100%20100%22><text y=%22.9em%22 font-size=%2290%22>🚀</text></svg>">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 500: '#06b6d4', 600: '#0891b2' },
+            dark: { 900: '#090d16', 800: '#0f172a', 700: '#1e293b', 600: '#334155' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background-color: #090d16; color: #f1f5f9; font-family: system-ui, -apple-system, sans-serif; }
+    .glass { background: rgba(15, 23, 42, 0.75); backdrop-filter: blur(12px); border: 1px solid rgba(51, 65, 85, 0.6); }
+    .terminal-scroll::-webkit-scrollbar { width: 6px; }
+    .terminal-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+  </style>
+</head>
+<body class="min-h-screen p-3 md:p-6 flex flex-col items-center">
+
+  <div class="w-full max-w-6xl space-y-6">
+
+    <!-- HEADER BAR -->
+    <header class="glass rounded-2xl p-4 md:p-6 flex flex-col md:flex-row justify-between items-center gap-4 shadow-xl">
+      <div class="flex items-center gap-4">
+        <div class="w-12 h-12 rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center text-2xl shadow-lg shadow-cyan-500/20">
+          🚀
+        </div>
+        <div>
+          <h1 class="text-xl md:text-2xl font-bold tracking-tight bg-gradient-to-r from-cyan-400 to-blue-400 bg-clip-text text-transparent">
+            Universal Sidecar Gateway & Homelab
+          </h1>
+          <p class="text-xs md:text-sm text-slate-400 flex items-center gap-2 mt-0.5">
+            <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+            Шлюз активен • IP: <span id="val-lan-ip" class="font-mono text-cyan-300">192.168.1.82</span> • 2026 Modular Edition
+          </p>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <button onclick="openTokenModal()" id="btn-auth-status" class="px-4 py-2 text-xs font-semibold rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 transition flex items-center gap-2">
+          🔑 <span id="txt-auth-status">Войти</span>
+        </button>
+        <button onclick="fetchStatus(true)" title="Обновить статус" class="p-2.5 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300 transition">
+          🔄
+        </button>
+      </div>
+    </header>
+
+    <!-- METRICS GRID -->
+    <section class="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
+      <div class="glass rounded-2xl p-4 flex flex-col justify-between">
+        <span class="text-xs text-slate-400 font-medium">ОЗУ (RAM)</span>
+        <div class="my-2">
+          <div class="text-xl md:text-2xl font-bold text-slate-100 font-mono" id="val-ram-used">-- MB</div>
+          <div class="w-full bg-slate-800 rounded-full h-1.5 mt-2 overflow-hidden">
+            <div id="bar-ram" class="bg-cyan-500 h-1.5 rounded-full transition-all duration-500" style="width: 0%"></div>
+          </div>
+        </div>
+        <span class="text-[11px] text-slate-500" id="val-ram-total">Всего: -- MB</span>
+      </div>
+
+      <div class="glass rounded-2xl p-4 flex flex-col justify-between">
+        <span class="text-xs text-slate-400 font-medium">Процессор (Load)</span>
+        <div class="my-2">
+          <div class="text-xl md:text-2xl font-bold text-slate-100 font-mono" id="val-cpu-load">--</div>
+          <div class="text-xs text-emerald-400 mt-1" id="val-cpu-temp">Темп: Норма</div>
+        </div>
+        <span class="text-[11px] text-slate-500" id="val-uptime">Аптайм: --</span>
+      </div>
+
+      <div class="glass rounded-2xl p-4 flex flex-col justify-between">
+        <span class="text-xs text-slate-400 font-medium">Активная нода Sing-Box</span>
+        <div class="my-2 truncate">
+          <div class="text-sm md:text-base font-bold text-cyan-300 truncate" id="val-active-node">Подключение...</div>
+          <div class="text-xs text-slate-400 mt-1 flex items-center gap-1.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+            Туннель активен
+          </div>
+        </div>
+        <span class="text-[11px] text-slate-500" id="val-slot-info">Слот 1: Активен</span>
+      </div>
+
+      <div class="glass rounded-2xl p-4 flex flex-col justify-between">
+        <span class="text-xs text-slate-400 font-medium">Хранилище /srv</span>
+        <div class="my-2">
+          <div class="text-xl md:text-2xl font-bold text-slate-100 font-mono" id="val-disk-free">-- GB</div>
+          <div class="w-full bg-slate-800 rounded-full h-1.5 mt-2 overflow-hidden">
+            <div id="bar-disk" class="bg-blue-500 h-1.5 rounded-full transition-all duration-500" style="width: 0%"></div>
+          </div>
+        </div>
+        <span class="text-[11px] text-slate-500" id="val-disk-total">Всего: -- GB</span>
+      </div>
+    </section>
+
+    <!-- HOMELAB SERVICES DIRECTORY -->
+    <section class="glass rounded-2xl p-5 md:p-6 shadow-xl">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-bold text-slate-200 flex items-center gap-2">
+          🏠 Сервисы Homelab & Порталы
+        </h2>
+        <span class="text-xs text-slate-400">Доступ через единый HTTPS (Caddy)</span>
+      </div>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5">
+        <!-- Zashboard -->
+        <a href="https://zashboard.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-cyan-500/50 transition group flex flex-col justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl">⚡</span>
+            <div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-cyan-400 transition">Zashboard</div>
+              <div class="text-[11px] text-slate-400">Sing-Box ядро и пинг нод</div>
+            </div>
+          </div>
+          <span class="text-[10px] text-cyan-400/80 font-mono mt-3">https://zashboard.lan ↗</span>
+        </a>
+
+        <!-- AdGuard Home -->
+        <a href="https://adguard.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-emerald-500/50 transition group flex flex-col justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl">🛡️</span>
+            <div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-emerald-400 transition">AdGuard Home</div>
+              <div class="text-[11px] text-slate-400">DNS-фильтрация :53</div>
+            </div>
+          </div>
+          <span class="text-[10px] text-emerald-400/80 font-mono mt-3">https://adguard.lan ↗</span>
+        </a>
+
+        <!-- Vaultwarden -->
+        <a href="https://vaultwarden.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-blue-500/50 transition group flex flex-col justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl">🔑</span>
+            <div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-blue-400 transition">Vaultwarden</div>
+              <div class="text-[11px] text-slate-400">Менеджер паролей</div>
+            </div>
+          </div>
+          <span class="text-[10px] text-blue-400/80 font-mono mt-3">https://vaultwarden.lan ↗</span>
+        </a>
+
+        <!-- MeTube -->
+        <a href="https://downloads.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-red-500/50 transition group flex flex-col justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl">🎬</span>
+            <div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-red-400 transition">MeTube</div>
+              <div class="text-[11px] text-slate-400">Загрузчик видео/аудио</div>
+            </div>
+          </div>
+          <span class="text-[10px] text-red-400/80 font-mono mt-3">https://downloads.lan ↗</span>
+        </a>
+
+        <!-- Transmission -->
+        <a href="https://torrents.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-amber-500/50 transition group flex flex-col justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl">🧲</span>
+            <div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-amber-400 transition">Transmission</div>
+              <div class="text-[11px] text-slate-400">Торрент-клиент RPC</div>
+            </div>
+          </div>
+          <span class="text-[10px] text-amber-400/80 font-mono mt-3">https://torrents.lan ↗</span>
+        </a>
+
+        <!-- Forgejo -->
+        <a href="https://forgejo.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-orange-500/50 transition group flex flex-col justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl">🐙</span>
+            <div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-orange-400 transition">Forgejo Git</div>
+              <div class="text-[11px] text-slate-400">Локальный Git-сервер</div>
+            </div>
+          </div>
+          <span class="text-[10px] text-orange-400/80 font-mono mt-3">https://forgejo.lan ↗</span>
+        </a>
+
+        <!-- VS Code Server -->
+        <a href="https://code.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-indigo-500/50 transition group flex flex-col justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl">💻</span>
+            <div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-indigo-400 transition">VS Code Web</div>
+              <div class="text-[11px] text-slate-400">IDE прямо в браузере</div>
+            </div>
+          </div>
+          <span class="text-[10px] text-indigo-400/80 font-mono mt-3">https://code.lan ↗</span>
+        </a>
+
+        <!-- Samba SMB3 -->
+        <div onclick="copySambaPath()" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-purple-500/50 transition group flex flex-col justify-between cursor-pointer">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl">📁</span>
+            <div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-purple-400 transition">Samba SMB3</div>
+              <div class="text-[11px] text-slate-400">Сетевой диск Windows</div>
+            </div>
+          </div>
+          <span class="text-[10px] text-purple-400/80 font-mono mt-3 flex items-center justify-between">
+            <span id="txt-samba-path">\\192.168.1.82\storage</span>
+            <span>📋 Копировать</span>
+          </span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ROUTING & PROXY CONTROLS -->
+    <section class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <!-- Add Subscription / Node -->
+      <div class="glass rounded-2xl p-5 shadow-xl flex flex-col justify-between space-y-4">
+        <div>
+          <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
+            🌐 Добавить подписку или URI-ключ
+          </h3>
+          <p class="text-xs text-slate-400 mt-1">
+            Вставьте ссылку на подписку (Слот 1) или одиночный ключ <code>vless://</code>, <code>hy2://</code>, <code>warp</code>.
+          </p>
+        </div>
+        <form onsubmit="handleAddProxy(event)" class="space-y-3">
+          <input type="text" id="input-proxy-url" required placeholder="https://sub.domain/api/v1/... или vless://..." class="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
+          <div class="flex justify-end gap-2">
+            <button type="submit" id="btn-add-proxy" class="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition">
+              Добавить в Sing-Box
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <!-- Add Domain Rule -->
+      <div class="glass rounded-2xl p-5 shadow-xl flex flex-col justify-between space-y-4">
+        <div>
+          <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
+            🎯 Перенаправление домена
+          </h3>
+          <p class="text-xs text-slate-400 mt-1">
+            Принудительно направить сайт через умный туннель или напрямую через шлюз провайдера.
+          </p>
+        </div>
+        <form onsubmit="handleAddDomain(event)" class="space-y-3">
+          <input type="text" id="input-domain-name" required placeholder="example.com или https://site.ru" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
+          <div class="flex justify-end gap-2">
+            <button type="button" onclick="submitDomain('direct')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-emerald-400 font-semibold text-xs transition">
+              ● Напрямую (DIRECT)
+            </button>
+            <button type="button" onclick="submitDomain('proxy')" class="px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition">
+              ⚡ В Прокси (PROXY)
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- SYSTEM OPS & LOG STREAM MODAL/PANEL -->
+    <section class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
+          🩺 Системные действия и аудит (One-Click)
+        </h3>
+        <span class="text-xs text-slate-400">Выполняются в фоновом режиме на сервере</span>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <button onclick="runCommandStream('doctor')" class="p-3 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center justify-center gap-2 transition">
+          🩺 Запустить Doctor
+        </button>
+        <button onclick="runCommandStream('test')" class="p-3 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center justify-center gap-2 transition">
+          ⚡ Тест отклика (gw test)
+        </button>
+        <button onclick="runCommandStream('restart')" class="p-3 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center justify-center gap-2 transition">
+          🔄 Перезапуск ядра
+        </button>
+        <button onclick="triggerSafeReboot()" class="p-3 rounded-xl bg-red-950/40 hover:bg-red-900/60 border border-red-800/50 text-red-200 text-xs font-semibold flex items-center justify-center gap-2 transition">
+          🛑 Safe-Reboot
+        </button>
+      </div>
+
+      <!-- Live Terminal Console -->
+      <div id="terminal-box" class="hidden mt-4 rounded-xl bg-black/80 border border-slate-800 p-4 font-mono text-xs text-emerald-400 max-h-72 overflow-y-auto terminal-scroll">
+        <div class="flex justify-between items-center text-slate-500 border-b border-slate-800 pb-2 mb-2">
+          <span id="terminal-title">Журнал выполнения...</span>
+          <button onclick="closeTerminal()" class="text-slate-400 hover:text-white">✕ Закрыть</button>
+        </div>
+        <pre id="terminal-output" class="whitespace-pre-wrap leading-relaxed"></pre>
+      </div>
+    </section>
+
+    <!-- PKI & TRUST CENTER (Original ca.lan function preserved) -->
+    <section class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <div>
+          <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
+            🔒 Центр сертификации (Local Root CA)
+          </h3>
+          <p class="text-xs text-slate-400 mt-0.5">
+            Установите сертификат, чтобы браузеры и телефоны доверяли локальным доменам <code>https://*.lan</code> без предупреждений.
+          </p>
+        </div>
+        <div class="flex gap-2">
+          <a href="/homelab-root-ca.crt" download class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 transition">
+            📥 Для Windows / Linux (.crt)
+          </a>
+          <a href="/homelab-root-ca.cer" download class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 transition">
+            📱 Для Android (.cer)
+          </a>
+        </div>
+      </div>
+      <div class="bg-black/40 rounded-xl p-3 border border-slate-800 font-mono text-xs text-cyan-300 flex items-center justify-between">
+        <span class="truncate pr-2">Invoke-WebRequest -Uri "http://ca.lan/homelab-root-ca.crt" -OutFile "$env:TEMP\homelab-ca.crt"; Import-Certificate -FilePath "$env:TEMP\homelab-ca.crt" -CertStoreLocation Cert:\LocalMachine\Root</span>
+        <button onclick="copyPowerShellCmd()" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] text-white shrink-0">Копировать</button>
+      </div>
+    </section>
+
+    <!-- FOOTER -->
+    <footer class="text-center text-xs text-slate-500 pt-4 pb-8">
+      Universal Sidecar Gateway & Homelab Suite (2026 Edition) • Alpine Linux 3.24+ • Zero Docker Overhead
+    </footer>
+
+  </div>
+
+  <!-- AUTH TOKEN MODAL -->
+  <div id="modal-auth" class="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 hidden z-50">
+    <div class="glass max-w-sm w-full rounded-2xl p-6 space-y-4 border border-slate-700 shadow-2xl">
+      <h3 class="text-lg font-bold text-slate-200">🔑 Вход в панель управления</h3>
+      <p class="text-xs text-slate-400">Введите единый пароль администратора шлюза (ADMIN_PASS).</p>
+      <input type="password" id="input-token" placeholder="Пароль администратора..." class="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
+      <div class="flex justify-end gap-2">
+        <button onclick="closeTokenModal()" class="px-4 py-2 text-xs font-semibold rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700">Отмена</button>
+        <button onclick="saveToken()" class="px-4 py-2 text-xs font-semibold rounded-xl bg-cyan-600 text-white hover:bg-cyan-500">Войти</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let AUTH_TOKEN = localStorage.getItem('gw_auth_token') || '21863002';
+
+    function openTokenModal() {
+      document.getElementById('modal-auth').classList.remove('hidden');
+      document.getElementById('input-token').value = AUTH_TOKEN;
+      document.getElementById('input-token').focus();
+    }
+
+    function closeTokenModal() {
+      document.getElementById('modal-auth').classList.add('hidden');
+    }
+
+    async function saveToken() {
+      const val = document.getElementById('input-token').value.trim();
+      if (!val) return;
+      AUTH_TOKEN = val;
+      localStorage.setItem('gw_auth_token', val);
+      closeTokenModal();
+      await fetchStatus(true);
+    }
+
+    async function fetchStatus(notify = false) {
+      try {
+        const resp = await fetch('/api/status', {
+          headers: { 'X-Gateway-Token': AUTH_TOKEN }
+        });
+        if (resp.status === 401) {
+          document.getElementById('txt-auth-status').innerText = 'Не авторизован';
+          document.getElementById('btn-auth-status').classList.add('border-red-500/50', 'text-red-400');
+          if (notify) openTokenModal();
+          return;
+        }
+        const data = await resp.json();
+        document.getElementById('txt-auth-status').innerText = 'Авторизован ✓';
+        document.getElementById('btn-auth-status').classList.remove('border-red-500/50', 'text-red-400');
+
+        // RAM
+        document.getElementById('val-ram-used').innerText = `${data.ram.used_mb} MB`;
+        document.getElementById('val-ram-total').innerText = `Всего: ${data.ram.total_mb} MB (${data.ram.pct}%)`;
+        document.getElementById('bar-ram').style.width = `${data.ram.pct}%`;
+
+        // CPU & Temp
+        document.getElementById('val-cpu-load').innerText = `${data.cpu.load1} (1м)`;
+        document.getElementById('val-cpu-temp').innerText = data.cpu.temp ? `Темп: ${data.cpu.temp}°C` : 'Темп: Норма';
+        const upH = Math.floor(data.uptime / 3600);
+        const upM = Math.floor((data.uptime % 3600) / 60);
+        document.getElementById('val-uptime').innerText = `Аптайм: ${upH}ч ${upM}м`;
+
+        // Sing-box
+        document.getElementById('val-active-node').innerText = data.active_node || 'Автовыбор';
+        document.getElementById('val-slot-info').innerText = data.slots.slot1_sub.active ? 'Слот 1: Активен (Саб)' : (data.slots.slot3_warp.active ? 'Слот 3: WARP 2.0' : 'Прямой выход');
+
+        // Disk
+        document.getElementById('val-disk-free').innerText = `${data.storage.free_gb} GB`;
+        document.getElementById('val-disk-total').innerText = `Всего: ${data.storage.total_gb} GB (${data.storage.pct}% заполнено)`;
+        document.getElementById('bar-disk').style.width = `${data.storage.pct}%`;
+
+      } catch (err) {
+        console.error('Fetch status error:', err);
+      }
+    }
+
+    async function handleAddProxy(e) {
+      e.preventDefault();
+      const input = document.getElementById('input-proxy-url');
+      const url = input.value.trim();
+      if (!url) return;
+      const btn = document.getElementById('btn-add-proxy');
+      btn.disabled = true;
+      btn.innerText = 'Добавление...';
+      try {
+        const resp = await fetch('/api/proxy/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Gateway-Token': AUTH_TOKEN },
+          body: JSON.stringify({ url })
+        });
+        const res = await resp.json();
+        alert(res.status === 'ok' ? 'Успешно добавлено!' : 'Ошибка: ' + res.output);
+        input.value = '';
+        fetchStatus();
+      } catch (err) {
+        alert('Ошибка связи с сервером: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = 'Добавить в Sing-Box';
+      }
+    }
+
+    async function submitDomain(mode) {
+      const input = document.getElementById('input-domain-name');
+      const domain = input.value.trim();
+      if (!domain) {
+        alert('Пожалуйста, введите домен или URL');
+        return;
+      }
+      try {
+        const resp = await fetch('/api/domain/rule', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Gateway-Token': AUTH_TOKEN },
+          body: JSON.stringify({ domain, mode })
+        });
+        const res = await resp.json();
+        alert(res.status === 'ok' ? `Домен ${domain} успешно направлен (${mode})!` : 'Ошибка: ' + res.output);
+        input.value = '';
+      } catch (err) {
+        alert('Ошибка связи с сервером: ' + err.message);
+      }
+    }
+
+    function runCommandStream(cmd) {
+      const box = document.getElementById('terminal-box');
+      const out = document.getElementById('terminal-output');
+      const title = document.getElementById('terminal-title');
+      box.classList.remove('hidden');
+      out.innerText = `[Команда: gw ${cmd} запущена...]\n`;
+      title.innerText = `Выполнение: gw ${cmd}`;
+
+      fetch('/api/action/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Gateway-Token': AUTH_TOKEN },
+        body: JSON.stringify({ cmd })
+      }).then(response => {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        function read() {
+          reader.read().then(({ done, value }) => {
+            if (done) {
+              out.innerText += '\n[Выполнение завершено]';
+              box.scrollTop = box.scrollHeight;
+              fetchStatus();
+              return;
+            }
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop();
+            for (const chunk of lines) {
+              if (chunk.startsWith('data: ')) {
+                try {
+                  const payload = JSON.parse(chunk.slice(6));
+                  if (payload.line !== undefined) {
+                    out.innerText += payload.line + '\n';
+                    box.scrollTop = box.scrollHeight;
+                  }
+                } catch (e) {}
+              }
+            }
+            read();
+          });
+        }
+        read();
+      }).catch(err => {
+        out.innerText += '\n[Ошибка выполнения: ' + err.message + ']';
+      });
+    }
+
+    function closeTerminal() {
+      document.getElementById('terminal-box').classList.add('hidden');
+    }
+
+    function copySambaPath() {
+      const p = document.getElementById('txt-samba-path').innerText;
+      navigator.clipboard.writeText(p).then(() => alert('Путь скопирован в буфер: ' + p));
+    }
+
+    function copyPowerShellCmd() {
+      const cmd = `Invoke-WebRequest -Uri "http://ca.lan/homelab-root-ca.crt" -OutFile "$env:TEMP\\homelab-ca.crt"; Import-Certificate -FilePath "$env:TEMP\\homelab-ca.crt" -CertStoreLocation Cert:\\LocalMachine\\Root`;
+      navigator.clipboard.writeText(cmd).then(() => alert('PowerShell команда скопирована в буфер!'));
+    }
+
+    async function triggerSafeReboot() {
+      if (!confirm('Вы уверены, что хотите выполнить безопасную перезагрузку шлюза (Safe-Reboot)?')) return;
+      try {
+        await fetch('/api/system/safe-reboot', {
+          method: 'POST',
+          headers: { 'X-Gateway-Token': AUTH_TOKEN }
+        });
+        alert('Шлюз перезагружается. Страница станет доступна через ~30-45 секунд.');
+      } catch (e) {}
+    }
+
+    // Auto-init and background refresh
+    fetchStatus();
+    setInterval(fetchStatus, 5000);
+  </script>
+</body>
+</html>

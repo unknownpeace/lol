@@ -52,7 +52,10 @@ build_pki_portal() {
         update-ca-certificates >/dev/null 2>&1 || true
     fi
 
-    cat << HTML_EOF > "${PKI_PORTAL_DIR}/index.html"
+    if [ -f "${GATEWAY_DIR}/ui/dashboard.html" ]; then
+        cp -f "${GATEWAY_DIR}/ui/dashboard.html" "${PKI_PORTAL_DIR}/index.html"
+    else
+        cat << HTML_EOF > "${PKI_PORTAL_DIR}/index.html"
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -78,41 +81,10 @@ build_pki_portal() {
       <a class="btn" href="/homelab-root-ca.cer" download>📱 Скачать для Android / iOS (.cer)</a>
     </p>
   </div>
-
-  <div class="card">
-    <h2>🪟 Windows 11 / 10 (Автоматически через PowerShell от Администратора)</h2>
-    <pre>Invoke-WebRequest -Uri "http://ca.lan/homelab-root-ca.crt" -OutFile "\$env:TEMP\homelab-ca.crt"; Import-Certificate -FilePath "\$env:TEMP\homelab-ca.crt" -CertStoreLocation Cert:\LocalMachine\Root</pre>
-  </div>
-
-  <div class="card">
-    <h2>🐧 Linux (Debian / Ubuntu / Mint / Arch / Fedora)</h2>
-    <pre>sudo curl -fsSL http://ca.lan/homelab-root-ca.crt -o /usr/local/share/ca-certificates/homelab-ca.crt &amp;&amp; sudo update-ca-certificates</pre>
-  </div>
-
-  <div class="card">
-    <h2>🤖 Android (Установка вручную)</h2>
-    <ol>
-      <li>Нажмите кнопку <b>«Скачать для Android (.cer)»</b> выше.</li>
-      <li>Откройте <b>Настройки &rarr; Безопасность и конфиденциальность &rarr; Другие настройки безопасности &rarr; Шифрование и учетные данные</b>.</li>
-      <li>Выберите <b>Установка сертификата &rarr; Сертификат CA &rarr; Все равно установить</b> и укажите скачанный файл <code>homelab-root-ca.cer</code>.</li>
-    </ol>
-  </div>
-
-  <div class="card">
-    <h2>🏠 Все сервисы вашего домашнего сервера</h2>
-    <ul>
-      <li><a href="https://${DOM_ZASHBOARD}/ui/">https://${DOM_ZASHBOARD}</a> (или <a href="https://${DOM_SINGBOX}/ui/">https://${DOM_SINGBOX}</a>) — Панель Sing-Box (Zashboard)</li>
-      <li><a href="https://${DOM_ADGUARD}">https://${DOM_ADGUARD}</a> — Панель AdGuard Home</li>
-      <li><a href="https://${DOM_VAULTWARDEN}">https://${DOM_VAULTWARDEN}</a> — Vaultwarden (Пароли)</li>
-      <li><a href="https://${DOM_YTDLP}">https://${DOM_YTDLP}</a> — MeTube (Загрузчик видео/аудио)</li>
-      <li><a href="https://${DOM_TORRENT}">https://${DOM_TORRENT}</a> — Transmission (Торренты)</li>
-      <li><a href="https://${DOM_FORGEJO}">https://${DOM_FORGEJO}</a> — Forgejo (Git-сервер)</li>
-      <li><a href="https://${DOM_CODE}">https://${DOM_CODE}</a> — Server-Code (VS Code в браузере)</li>
-    </ul>
-  </div>
 </body>
 </html>
 HTML_EOF
+    fi
     chmod 644 "${PKI_PORTAL_DIR}/index.html" 2>/dev/null || true
     chown -R caddy:caddy "$PKI_PORTAL_DIR" 2>/dev/null || true
     return 0
@@ -166,6 +138,14 @@ https://zashboard.${SSL_DOMAIN}, https://singbox.${SSL_DOMAIN} {
 http://${DOM_CA}, http://${CUR_LIP_CDY}, http://*.lan {
     @pki_portal host ${DOM_CA} ${CUR_LIP_CDY}
     handle @pki_portal {
+        @api path /api/*
+        handle @api {
+            reverse_proxy 127.0.0.1:8080 {
+                transport http {
+                    response_header_timeout 300s
+                }
+            }
+        }
         root * ${PKI_PORTAL_DIR}
         header /homelab-root-ca.cer Content-Type "application/x-x509-ca-cert"
         header /homelab-root-ca.crt Content-Type "application/x-x509-ca-cert"
@@ -178,10 +158,20 @@ http://${DOM_CA}, http://${CUR_LIP_CDY}, http://*.lan {
 
 https://${DOM_CA} {
     tls internal
-    root * ${PKI_PORTAL_DIR}
-    header /homelab-root-ca.cer Content-Type "application/x-x509-ca-cert"
-    header /homelab-root-ca.crt Content-Type "application/x-x509-ca-cert"
-    file_server
+    @api path /api/*
+    handle @api {
+        reverse_proxy 127.0.0.1:8080 {
+            transport http {
+                response_header_timeout 300s
+            }
+        }
+    }
+    handle {
+        root * ${PKI_PORTAL_DIR}
+        header /homelab-root-ca.cer Content-Type "application/x-x509-ca-cert"
+        header /homelab-root-ca.crt Content-Type "application/x-x509-ca-cert"
+        file_server
+    }
 }
 
 https://${DOM_ADGUARD} {
