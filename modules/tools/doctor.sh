@@ -361,7 +361,7 @@ print_gateway_header() {
     fi
 
     ui_box_top "⚡ ПРИБОРНАЯ ПАНЕЛЬ ТЕЛЕМЕТРИИ ШЛЮЗА И HOMELAB (${OS_NAME})"
-    ui_box_row "Сеть LAN:     ${C_BLD}${LAN_IF_NOW}: ${LAN_IP_NOW}${C_RES} ▸ Роутер: ${C_CYN}${GW_IP}${C_RES} │ Умный DHCP: ${DHCP_TXT}"
+    ui_box_row "Сеть LAN:     ${C_BLD}${LAN_IF_NOW}: ${LAN_IP_NOW}${C_RES} ▸ Роутер: ${C_CYN}${GW_IP}${C_RES} │ DHCP (AGH): ${DHCP_TXT}"
     ui_box_row "Загрузка ОЗУ: ${RAM_BAR} (${RAM_USED}/${TOTAL_RAM_MB} МБ, лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
     ui_box_row "Накопитель:   ${DISK_BAR} (${DISK_FREE_TXT}) ▸ ${C_CYN}${DISK_BADGE}${C_RES}"
     ui_box_sep "СТАТУС ЯДЕР И СЛУЖБ"

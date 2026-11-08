@@ -203,7 +203,7 @@ show_menu() {
         ui_box_row "${C_CYN}9)${C_RES}  🔐 Сервисный режим, смена пароля и ${C_GRN}☁️ Единый бэкап в Telegram${C_RES}"
         ui_box_row "${C_CYN}10)${C_RES} ⏰ Автообновление (04:00), Авто-Доктор (Watchdog) и Telegram"
         ui_box_row "${C_CYN}11)${C_RES} 🛡️  Аппаратный Kill-Switch (защита от утечек при падении Sing-Box)"
-        ui_box_row "${C_CYN}12)${C_RES} 🖧  Сетевые настройки: IP сервера / роутера + Умный DHCP Sidecar"
+        ui_box_row "${C_CYN}12)${C_RES} 🖧  Сетевые настройки: IP сервера / роутера + DHCP AdGuard Home"
         ui_box_row "${C_CYN}13)${C_RES} ${C_GRN}🏠 Управление домашним сервером (Homelab & Media Stack + Диски LUKS2)${C_RES}"
         ui_box_row "${C_CYN}14)${C_RES} ${C_MAG}📦 Управление контейнерами LXC (Alpine, Debian, Ubuntu, Снапшоты)${C_RES}"
         ui_box_row "${C_CYN}15)${C_RES} ${C_YEL}🩺 Авто-Доктор одной кнопкой (gateway doctor — починка сети, БД и диска)${C_RES}"
@@ -784,20 +784,21 @@ show_menu() {
                     CUR_LAN_NOW=$(get_current_lan_ip)
                     load_gateway_env
                     clear
-                    ui_banner "NETWORK & SMART DHCP // СЕТЕВЫЕ НАСТРОЙКИ SIDECAR"
-                    ui_box_top "🖧 СЕТЕВЫЕ НАСТРОЙКИ СЕРВЕРА И УМНЫЙ DHCP SIDECAR"
+                    ui_banner "NETWORK & DHCP // СЕТЕВЫЕ НАСТРОЙКИ СЕРВЕРА"
+                    ui_box_top "🖧 СЕТЕВЫЕ НАСТРОЙКИ СЕРВЕРА И DHCP"
                     ui_box_row "• Текущий IP сервера (${OS_NAME}): ${C_BLD}${CUR_LAN_NOW}${C_RES} ($(get_lan_ifname), /24)"
                     ui_box_row "• Текущий IP основного роутера:   ${C_CYN}${GW_IP}${C_RES}"
-                    ui_box_row "• Умный DHCP-сервер на шлюзе:     $(is_dhcp_server_enabled && echo "${C_GRN}● ВКЛЮЧЕН${C_RES}" || echo "${C_DIM}○ ВЫКЛЮЧЕН${C_RES}")"
-                    ui_box_sep "ДЕЙСТВИЯ [0-5]"
+                    ui_box_row "• DHCP-сервер на шлюзе (AdGuard): $(is_dhcp_server_enabled && echo "${C_GRN}● ВКЛЮЧЕН${C_RES}" || echo "${C_DIM}○ ВЫКЛЮЧЕН${C_RES}")"
+                    ui_box_sep "ДЕЙСТВИЯ [0-6]"
                     ui_box_row "1) Сменить IP-адрес самого сервера (${OS_NAME})"
                     ui_box_row "2) Сменить IP-адрес основного роутера"
                     ui_box_row "3) Сменить оба адреса сразу"
-                    ui_box_row "4) ВКЛЮЧИТЬ Умный DHCP-сервер на шлюзе"
-                    ui_box_row "5) ВЫКЛЮЧИТЬ DHCP-сервер на шлюзе"
+                    ui_box_row "4) Включить DHCP-сервер AdGuard Home (с защитой от конфликта)"
+                    ui_box_row "5) Выключить DHCP-сервер на шлюзе (режим Sidecar)"
+                    ui_box_row "6) Сканировать сеть на наличие активного стороннего DHCP (роутера)"
                     ui_box_row "0) Назад"
                     ui_box_bottom
-                    printf "Выбор [0-5]: "
+                    printf "Выбор [0-6]: "
                     read -r NET_ACT < /dev/tty || true
                     case "$NET_ACT" in
                         ""|0) break ;;
@@ -832,8 +833,72 @@ show_menu() {
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
                             ;;
-                        4) configure_smart_dhcp "on"; sleep 1 ;;
-                        5) configure_smart_dhcp "off"; sleep 1 ;;
+                        4)
+                            clear
+                            ui_banner "DHCP // АКТИВАЦИЯ DHCP ADGUARD HOME"
+                            ui_box_top "📋 ПОДКЛЮЧЕНИЕ DHCP ADGUARD HOME"
+                            ui_box_row "${C_BLD}Как это работает:${C_RES}"
+                            ui_box_row "1. Шлюз будет раздавать IP, DNS (${CUR_LAN_NOW}) и шлюз клиентам."
+                            ui_box_row "2. В веб-панели AdGuard Home появятся имена и статистика клиентов."
+                            ui_box_row "3. Перед включением система проверит сеть на отсутствие стороннего DHCP."
+                            ui_box_sep "⚠️ ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ"
+                            ui_box_row "${C_YEL}Отключите DHCP-сервер в настройках вашего роутера!${C_RES}"
+                            ui_box_row "Если в сети останется DHCP роутера, шлюз откажется включать свой."
+                            ui_box_sep "ДЕЙСТВИЕ"
+                            ui_box_row "• Пул адресов:    ${CUR_LAN_NOW%.*}.100 - ${CUR_LAN_NOW%.*}.239"
+                            ui_box_row "• Шлюз и DNS:     ${C_CYN}${CUR_LAN_NOW}${C_RES}"
+                            ui_box_bottom
+                            printf "\nВключить DHCP-сервер AdGuard Home прямо сейчас? [y/N]: "
+                            read -r CONF_DHCP < /dev/tty || true
+                            case "$CONF_DHCP" in
+                                [yY]|[yY][eE][sS]|1)
+                                    configure_smart_dhcp "on"
+                                    ;;
+                                *)
+                                    echo "Отмена включения DHCP."
+                                    ;;
+                            esac
+                            printf "\nНажмите Enter для возврата в меню..."
+                            read -r _ < /dev/tty || true
+                            ;;
+                        5)
+                            clear
+                            ui_banner "DHCP // ОТКЛЮЧЕНИЕ DHCP"
+                            ui_box_top "ℹ️ ВОЗВРАТ В КЛАССИЧЕСКИЙ РЕЖИМ SIDECAR"
+                            ui_box_row "При отключении DHCP шлюз перестанет выдавать IP клиентам."
+                            ui_box_row "${C_YEL}Не забудьте снова включить DHCP на основном роутере!${C_RES}"
+                            ui_box_bottom
+                            printf "\nВыключить DHCP-сервер на шлюзе? [y/N]: "
+                            read -r OFF_DHCP < /dev/tty || true
+                            case "$OFF_DHCP" in
+                                [yY]|[yY][eE][sS]|1)
+                                    configure_smart_dhcp "off"
+                                    ;;
+                                *)
+                                    echo "Отмена."
+                                    ;;
+                            esac
+                            printf "\nНажмите Enter для возврата в меню..."
+                            read -r _ < /dev/tty || true
+                            ;;
+                        6)
+                            clear
+                            ui_banner "DHCP SCANNER // ПОИСК СТОРОННЕГО DHCP-СЕРВЕРА"
+                            echo "Отправка зонда DHCP DISCOVER в интерфейс $(get_lan_ifname)..."
+                            if detect_external_dhcp_server; then
+                                ui_box_top "⚠️ В СЕТИ ОБНАРУЖЕН СТОРОННИЙ DHCP-СЕРВЕР"
+                                ui_box_row "DHCP на роутере провайдера всё ещё АКТИВЕН."
+                                ui_box_row "Перед включением DHCP на шлюзе отключите его на роутере!"
+                                ui_box_bottom
+                            else
+                                ui_box_top "✓ СТОРОННИЙ DHCP-СЕРВЕР НЕ ОБНАРУЖЕН"
+                                ui_box_row "Сеть свободна: на основном роутере DHCP отключен."
+                                ui_box_row "Вы можете безопасно включить DHCP на шлюзе."
+                                ui_box_bottom
+                            fi
+                            printf "\nНажмите Enter для возврата в меню..."
+                            read -r _ < /dev/tty || true
+                            ;;
                     esac
                 done
                 ;;

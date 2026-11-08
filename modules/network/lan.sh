@@ -22,7 +22,31 @@ discover_lan_devices() {
     touch "$LAN_SCAN_CACHE"
 
     LEASE_F=""
-    [ -f /var/lib/misc/dnsmasq.leases ] && LEASE_F="/var/lib/misc/dnsmasq.leases"
+    if [ -f "$AGH_LEASES_JSON" ]; then
+        # Конвертируем AdGuard Home leases.json во временный формат ip mac hostname
+        LEASE_F="/tmp/agh_leases.tmp"
+        if command -v jq >/dev/null 2>&1; then
+            jq -r '.leases[]? | [0, .mac, .ip, (.hostname // "*")] | @tsv' "$AGH_LEASES_JSON" > "$LEASE_F" 2>/dev/null || true
+        elif command -v python3 >/dev/null 2>&1; then
+            python3 -c "
+import json
+try:
+    with open('${AGH_LEASES_JSON}') as f:
+        data = json.load(f)
+    with open('${LEASE_F}', 'w') as out:
+        for item in data.get('leases', []):
+            ip = item.get('ip', '')
+            mac = item.get('mac', '')
+            host = item.get('hostname', '*') or '*'
+            if ip and mac:
+                out.write(f'0 {mac} {ip} {host}\n')
+except Exception:
+    pass
+" 2>/dev/null || true
+        fi
+    elif [ -f /var/lib/misc/dnsmasq.leases ]; then
+        LEASE_F="/var/lib/misc/dnsmasq.leases"
+    fi
 
     echo " ${C_CYN}--- Обнаруженные устройства в локальной сети (ARP + DHCP) ---${C_RES}"
     # shellcheck disable=SC2086

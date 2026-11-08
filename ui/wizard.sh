@@ -581,6 +581,31 @@ nameserver 77.88.8.8"
         fi
     fi
 
+    # ЭТАП 6.7: Опциональное включение DHCP-сервера AdGuard Home в локальной сети
+    if ! is_dhcp_server_enabled; then
+        if ! detect_external_dhcp_server "$LAN_IF_INIT"; then
+            if [ "$IS_UNATTENDED" = "yes" ]; then
+                ui_info_msg "DHCP оставлен выключенным (классический режим Sidecar)."
+            else
+                ui_box_top "🖧 DHCP-СЕРВЕР ADGUARD HOME В ЛОКАЛЬНОЙ СЕТИ"
+                ui_box_row "В локальной сети (${LAN_IF_INIT}) сторонний DHCP-сервер не обнаружен."
+                ui_box_row "Вы можете включить раздачу IP-адресов через AdGuard Home прямо сейчас."
+                ui_box_row "Все устройства автоматически получат интернет и защиту через шлюз."
+                ui_box_bottom
+                printf "\nВключить встроенный DHCP-сервер AdGuard Home сейчас? [y/N]: "
+                read -r AUTO_DHCP_PROMPT < /dev/tty || true
+                case "$AUTO_DHCP_PROMPT" in
+                    [yY]|[yY][eE][sS]|1)
+                        configure_smart_dhcp "on" || true
+                        ;;
+                    *)
+                        ui_info_msg "DHCP оставлен выключенным (классический режим Sidecar)."
+                        ;;
+                esac
+            fi
+        fi
+    fi
+
     # ЭТАП 7: Итоговый Self-Test 2.0
     reload_singbox_api
     run_self_test

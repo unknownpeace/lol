@@ -47,8 +47,13 @@ is_killswitch_enabled() {
     [ -f "$ALPINE_NFT_CONF" ] && grep -q "#KILLSWITCH_ACTIVE" "$ALPINE_NFT_CONF" 2>/dev/null
 }
 
-# Проверка состояния Умного DHCP-сервера на самом шлюзе Alpine Linux
+# Проверка состояния DHCP-сервера на шлюзе (AdGuard Home или legacy dnsmasq)
 is_dhcp_server_enabled() {
+    if [ -f "$AGH_CONF" ]; then
+        if awk '/^dhcp:/{in_dhcp=1; next} in_dhcp && /^[a-zA-Z0-9_]+:/{in_dhcp=0} in_dhcp && /^[[:space:]]*enabled:[[:space:]]*true/{found=1} END{exit !found}' "$AGH_CONF" 2>/dev/null; then
+            return 0
+        fi
+    fi
     [ -f "$ALPINE_DHCP_CONF" ] && pgrep dnsmasq >/dev/null 2>&1
 }
 

@@ -129,7 +129,7 @@ FORCE_GRP
       {
         "tag": "dns_proxy",
         "type": "https",
-        "server": "1.1.1.1",
+        "server": "8.8.8.8",
         "server_port": 443,
         "path": "/dns-query",
         "detour": "⚡ Авто (Самый быстрый)"

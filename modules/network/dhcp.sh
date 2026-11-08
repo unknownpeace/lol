@@ -1,3 +1,14 @@
+# Зондирование сети на наличие активного стороннего DHCP-сервера (роутера)
+detect_external_dhcp_server() {
+    T_IF="${1:-$(get_lan_ifname)}"
+    # Быстрый опрос сети через встроенный udhcpc (таймаут 2 сек, без изменения IP)
+    DHCP_OUT=$(udhcpc -i "$T_IF" -n -q -t 1 -T 2 -s /bin/true 2>&1 || true)
+    if echo "$DHCP_OUT" | grep -qi "lease of\|obtained\|offered"; then
+        return 0 # Найден сторонний DHCP
+    fi
+    return 1 # Сторонний DHCP не обнаружен
+}
+
 configure_smart_dhcp() {
     DHCP_MODE="${1:-off}"
     CUR_LAN_IP=$(get_current_lan_ip)
@@ -5,6 +16,74 @@ configure_smart_dhcp() {
     LAN_SUB="${CUR_LAN_IP%.*}"
 
     if [ "$DHCP_MODE" = "on" ]; then
+        # Защитная проверка: если в сети уже есть активный DHCP-сервер, запрещаем включение
+        if detect_external_dhcp_server "$LAN_IF"; then
+            echo "${C_RED}[X] Ошибка: В локальной сети (${LAN_IF}) обнаружен активный сторонний DHCP-сервер (роутер)!${C_RES}"
+            echo "    Включение DHCP на AdGuard Home отменено во избежание конфликта адресов."
+            echo "    Сначала отключите DHCP-сервер в настройках вашего роутера."
+            return 1
+        fi
+
+        if [ -f "$AGH_CONF" ]; then
+            echo "Настройка встроенного DHCPv4 в AdGuard Home..."
+            rc-service adguardhome stop >/dev/null 2>&1 || true
+            sleep 1
+
+            awk -v iface="${LAN_IF}" -v gw="${CUR_LAN_IP}" -v r_start="${LAN_SUB}.100" -v r_end="${LAN_SUB}.239" '
+            BEGIN { in_dhcp = 0 }
+            /^dhcp:/ {
+                in_dhcp = 1
+                print "dhcp:"
+                print "  enabled: true"
+                print "  interface_name: " iface
+                print "  local_domain_name: lan"
+                print "  dhcpv4:"
+                print "    gateway_ip: " gw
+                print "    subnet_mask: 255.255.255.0"
+                print "    range_start: " r_start
+                print "    range_end: " r_end
+                print "    lease_duration: 86400"
+                print "    icmp_timeout_msec: 1000"
+                print "    options: []"
+                print "  dhcpv6:"
+                print "    range_start: \"\""
+                print "    lease_duration: 86400"
+                print "    ra_slaac_only: false"
+                print "    ra_allow_slaac: false"
+                next
+            }
+            in_dhcp {
+                if ($0 ~ /^[a-zA-Z0-9_]+:/) {
+                    in_dhcp = 0
+                    print $0
+                }
+                next
+            }
+            !in_dhcp {
+                print $0
+            }
+            ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$" 2>/dev/null || true
+
+            if [ -s "${AGH_CONF}.tmp.$$" ]; then
+                mv -f "${AGH_CONF}.tmp.$$" "$AGH_CONF"
+            else
+                rm -f "${AGH_CONF}.tmp.$$" 2>/dev/null || true
+            fi
+
+            rc-service adguardhome start >/dev/null 2>&1 || true
+
+            # Удаляем legacy dnsmasq если остался
+            if [ -f "$ALPINE_DHCP_CONF" ]; then
+                rm -f "$ALPINE_DHCP_CONF" 2>/dev/null || true
+                service_ctl dnsmasq stop || true
+                service_ctl dnsmasq disable || true
+            fi
+
+            echo "${C_GRN}[✓] DHCP-сервер AdGuard Home ВКЛЮЧЕН (Шлюз: ${CUR_LAN_IP}, DNS: ${CUR_LAN_IP}, пул ${LAN_SUB}.100-.239).${C_RES}"
+            return 0
+        fi
+
+        # Фоллбэк на dnsmasq если AGH еще не установлен
         if ! command -v dnsmasq >/dev/null 2>&1; then
             echo "Установка пакета dnsmasq для DHCP-сервера..."
             apk update >/dev/null 2>&1 || true
@@ -22,12 +101,17 @@ dhcp-option=6,${CUR_LAN_IP}
 ALP_DHCP
         service_ctl dnsmasq enable
         service_ctl dnsmasq restart
-        echo "${C_GRN}[✓] Умный DHCP-сервер на Alpine ВКЛЮЧЕН (Шлюз и DNS: ${CUR_LAN_IP}, пул .100-.239).${C_RES}"
-        echo "    Не забудьте отключить DHCP-сервер на основном роутере провайдера!"
+        echo "${C_GRN}[✓] DHCP-сервер на Alpine ВКЛЮЧЕН (Шлюз и DNS: ${CUR_LAN_IP}, пул .100-.239).${C_RES}"
     else
+        if [ -f "$AGH_CONF" ]; then
+            rc-service adguardhome stop >/dev/null 2>&1 || true
+            sleep 1
+            sed -i '/^dhcp:/,/^[a-zA-Z0-9_]\+:/s/enabled: true/enabled: false/' "$AGH_CONF" 2>/dev/null || true
+            rc-service adguardhome start >/dev/null 2>&1 || true
+        fi
         rm -f "$ALPINE_DHCP_CONF" 2>/dev/null || true
-        service_ctl dnsmasq stop
-        service_ctl dnsmasq disable
+        service_ctl dnsmasq stop || true
+        service_ctl dnsmasq disable || true
         echo "${C_GRN}[✓] DHCP-сервер на Alpine ВЫКЛЮЧЕН (классический режим Sidecar).${C_RES}"
     fi
     return 0

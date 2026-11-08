@@ -73,6 +73,7 @@ UI_TAR_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.t
 AGH_CONF="/etc/AdGuardHome/AdGuardHome.yaml"
 ALPINE_NFT_CONF="/etc/nftables.nft"
 ALPINE_DHCP_CONF="/etc/dnsmasq.d/gateway-dhcp.conf"
+AGH_LEASES_JSON="/etc/AdGuardHome/data/leases.json"
 
 # Глобальные пути и переменные подсистемы Homelab
 HOMELAB_DIR="${SB_DIR}/homelab"

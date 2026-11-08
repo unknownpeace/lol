@@ -69,6 +69,7 @@ delete table inet gateway_fw
 table inet gateway_fw {
     chain input_protect {
         type filter hook input priority filter - 5; policy accept;
+        udp dport 67 accept
         iifname "lo" accept
         ct state established,related accept
         meta l4proto { tcp, udp } th dport 853 reject
