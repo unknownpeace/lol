@@ -460,6 +460,64 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
             res = subprocess.run([GATEWAY_BIN, "lxc", cmd_action, name], capture_output=True, text=True)
             return self.send_json(200, {"status": "ok" if res.returncode == 0 else "error", "output": res.stdout + res.stderr})
 
+        # 7.1 LXC create container (non-interactive via SSE stream or background subprocess)
+        if path == "/api/lxc/create":
+            name = payload.get("name", "").strip()
+            distro = payload.get("distro", "alpine").strip().lower()
+            release = payload.get("release", "3.24").strip()
+            if not name:
+                return self.send_json(400, {"status": "error", "message": "Имя контейнера обязательно"})
+            
+            # Sanitize name
+            clean_name = "".join(c for c in name if c.isalnum() or c in "-_")
+            if not clean_name:
+                return self.send_json(400, {"status": "error", "message": "Недопустимое имя контейнера"})
+
+            # Pre-set valid distros
+            dist_map = {
+                "alpine": ("alpine", "3.24"),
+                "debian": ("debian", "bookworm"),
+                "ubuntu": ("ubuntu", "noble")
+            }
+            d_name, d_rel = dist_map.get(distro, ("alpine", "3.24"))
+            if release and distro not in dist_map:
+                d_rel = release
+
+            # Stream the creation via SSE
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            arch = "amd64" if os.uname().machine == "x86_64" else "arm64"
+            cmd = ["lxc-create", "-t", "download", "-n", clean_name, "--", "-d", d_name, "-r", d_rel, "-a", arch]
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            try:
+                for line in proc.stdout:
+                    sse_chunk = f"data: {json.dumps({'line': line.rstrip()})}\n\n"
+                    self.wfile.write(sse_chunk.encode("utf-8"))
+                    self.wfile.flush()
+                proc.wait()
+                if proc.returncode == 0:
+                    # Auto start container
+                    subprocess.run(["lxc-start", "-n", clean_name], capture_output=True)
+                    self.wfile.write(f"data: {json.dumps({'line': f'[✔] Контейнер {clean_name} успешно создан и запущен!'})}\n\n".encode("utf-8"))
+                done_chunk = f"data: {json.dumps({'done': True, 'code': proc.returncode})}\n\n"
+                self.wfile.write(done_chunk.encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                proc.kill()
+            return
+
         # 8. Setup DuckDNS SSL
         if path == "/api/ssl/duckdns":
             domain = payload.get("domain", "").strip()
