@@ -1,11 +1,10 @@
 # 🚀 Universal Sidecar Gateway & Homelab (2026.11 Edition): Sing-Box Extended + AdGuard Home + Zashboard + Homelab Stack
 
-[](https://github.com/unknownpeace/lol)
-[](https://github.com/unknownpeace/lol)
-[](https://github.com/shtorm-7/sing-box-extended/releases)
-[](https://github.com/AdguardTeam/AdGuardHome/releases)
-[](https://github.com/Zephyruso/zashboard/releases)
-[](https://github.com/dani-garcia/vaultwarden)
+[![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-blue?logo=github)](https://github.com/unknownpeace/lol)
+[![Sing-Box Extended](https://img.shields.io/badge/Sing--Box_Extended-v1.14.3-purple)](https://github.com/shtorm-7/sing-box-extended)
+[![AdGuard Home](https://img.shields.io/badge/AdGuard_Home-v0.107.56-green)](https://github.com/AdguardTeam/AdGuardHome)
+[![Zashboard](https://img.shields.io/badge/Zashboard-Dashboard-orange)](https://github.com/Zephyruso/zashboard)
+[![Vaultwarden](https://img.shields.io/badge/Vaultwarden-Bitwarden-blue)](https://github.com/dani-garcia/vaultwarden)
 
 Полностью автоматизированный, отказоустойчивый комплекс установки и управления **Sidecar-шлюзом, модульным домашним сервером (Homelab & Media Stack) и легковесной виртуализацией LXC** для **однорукого роутера / LXC-контейнера / мини-ПК / ARM64-платы**, спроектированный специально под реалии работы ТСПУ и НСДИ в России по состоянию на **ноябрь 2026 года**.
 
