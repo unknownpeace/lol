@@ -6,7 +6,7 @@
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-blue?logo=github)](https://github.com/unknownpeace/lol)
 [![Sing-Box Extended](https://img.shields.io/badge/Sing--Box_Extended-v1.14.3-purple)](https://github.com/shtorm-7/sing-box-extended)
-[![AdGuard Home](https://img.shields.io/badge/AdGuard_Home-v0.107.56-green)](https://github.com/AdguardTeam/AdGuardHome)
+[![AdGuard Home](https://img.shields.io/badge/AdGuard_Home-v0.107.60-green)](https://github.com/AdguardTeam/AdGuardHome)
 [![Zashboard](https://img.shields.io/badge/Zashboard-Dashboard-orange)](https://github.com/Zephyruso/zashboard)
 [![Vaultwarden](https://img.shields.io/badge/Vaultwarden-Bitwarden-blue)](https://github.com/dani-garcia/vaultwarden)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -61,12 +61,12 @@ gw        # или 'gateway'
 
 ```text
 /opt/gateway/
+├── gateway.answers.example     # Шаблон для автоматической тихой установки
 ├── gateway.sh                  # Главная точка входа и диспетчер модулей
 ├── setup.sh                    # Быстрая регистрация команд gw/gateway, автодополнение, баннер MOTD
 ├── config/                     # Шаблоны конфигураций
 │   ├── gateway.env.example     # Сеть, маршрутизация и внешние провайдеры
-│   ├── homelab.env.example     # Пути хранилища, доступы Samba, диски
-│   └── gateway_answers.env     # Шаблон для автоматической тихой установки
+│   └── homelab.env.example     # Пути хранилища, доступы Samba, диски
 ├── lib/                        # Базовые библиотеки ядра
 │   ├── constants.sh            # Глобальные пути и переменные окружения
 │   ├── ui.sh                   # Рендеринг TUI-интерфейса, цвета, индикаторы
@@ -75,7 +75,7 @@ gw        # или 'gateway'
 │   ├── env_store.sh            # Безопасное сохранение .env файлов
 │   └── metrics.sh              # Телеметрия, контроль памяти и защита при сбое питания
 ├── modules/                    # Изолированные сервисные модули
-│   ├── network/                # nftables, TProxy, Smart DHCP (dnsmasq), сканер сети
+│   ├── network/                # nftables, TProxy, Smart DHCP (AdGuard Home), сканер сети
 │   ├── singbox/                # Генератор config.json, группы селекторов, диагностика
 │   ├── adguard/                # AdGuard Home rewrites (*.lan) и интеграция DNS
 │   ├── storage/                # LUKS2 шифрование, оптимизация ФС, безопасный монтирование

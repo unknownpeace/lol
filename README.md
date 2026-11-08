@@ -6,7 +6,7 @@
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-blue?logo=github)](https://github.com/unknownpeace/lol)
 [![Sing-Box Extended](https://img.shields.io/badge/Sing--Box_Extended-v1.14.3-purple)](https://github.com/shtorm-7/sing-box-extended)
-[![AdGuard Home](https://img.shields.io/badge/AdGuard_Home-v0.107.56-green)](https://github.com/AdguardTeam/AdGuardHome)
+[![AdGuard Home](https://img.shields.io/badge/AdGuard_Home-v0.107.60-green)](https://github.com/AdguardTeam/AdGuardHome)
 [![Zashboard](https://img.shields.io/badge/Zashboard-Dashboard-orange)](https://github.com/Zephyruso/zashboard)
 [![Vaultwarden](https://img.shields.io/badge/Vaultwarden-Bitwarden-blue)](https://github.com/dani-garcia/vaultwarden)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -61,12 +61,12 @@ gw        # or 'gateway'
 
 ```text
 /opt/gateway/
+├── gateway.answers.example     # Template for Zero-Touch unattended installs
 ├── gateway.sh                  # Main entrypoint and module loader
 ├── setup.sh                    # Command registration (gw/gateway), bash completions, MOTD
 ├── config/                     # Configuration templates
 │   ├── gateway.env.example     # Network, routing, and provider variables
-│   ├── homelab.env.example     # Storage root, Samba credentials, disk settings
-│   └── gateway_answers.env     # Template for Zero-Touch unattended installs
+│   └── homelab.env.example     # Storage root, Samba credentials, disk settings
 ├── lib/                        # Core runtime libraries
 │   ├── constants.sh            # Global paths and defaults
 │   ├── ui.sh                   # Modern TUI rendering, colors, and progress widgets
@@ -75,7 +75,7 @@ gw        # or 'gateway'
 │   ├── env_store.sh            # Safe .env persistence
 │   └── metrics.sh              # Telemetry, memory limits, and power-loss recovery
 ├── modules/                    # Isolated service controllers
-│   ├── network/                # nftables rules, TProxy, Smart DHCP (dnsmasq), LAN scanning
+│   ├── network/                # nftables rules, TProxy, Smart DHCP (AdGuard Home), LAN scanning
 │   ├── singbox/                # Core generator, subscriptions, routing groups, diagnostics
 │   ├── adguard/                # AdGuard Home rewrites (*.lan) and upstream DNS integration
 │   ├── storage/                # LUKS2 crypto-volumes, filesystem optimization, safe mount/umount

@@ -28,7 +28,6 @@ fi
 
 # 2. Выставление прав на исполнение
 chmod +x "${GATEWAY_DIR}/gateway.sh"
-[ -d "${GATEWAY_DIR}/scripts" ] && chmod +x "${GATEWAY_DIR}/scripts/"*.sh 2>/dev/null || true
 
 # 3. Регистрация глобальных команд gateway и gw через прямые symlinks
 mkdir -p /usr/bin

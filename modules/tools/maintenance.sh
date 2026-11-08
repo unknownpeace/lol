@@ -128,7 +128,6 @@ self_update_gateway() {
             ui_warn_box "Не удалось подключиться к Git-репозиторию." "Продолжаем обновление локальных бинарников и ядер."
         fi
         chmod +x "${GATEWAY_DIR}/gateway.sh" "${GATEWAY_DIR}/setup.sh" 2>/dev/null || true
-        [ -d "${GATEWAY_DIR}/scripts" ] && chmod +x "${GATEWAY_DIR}/scripts/"*.sh 2>/dev/null || true
         ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gateway 2>/dev/null || true
         ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gw 2>/dev/null || true
         rm -f /tmp/gateway_update_check.cache 2>/dev/null || true

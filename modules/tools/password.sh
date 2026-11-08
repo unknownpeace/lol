@@ -83,5 +83,3 @@ change_unified_password() {
     echo "${C_GRN}[✓] Единый пароль успешно синхронизирован (Sing-Box, AdGuard Home, Samba, Vaultwarden, Caddy)!${C_RES}"
     return 0
 }
-
-# Управление Умным DHCP-сервером на Alpine Linux (dnsmasq на порту 5353)
