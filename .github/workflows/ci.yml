@@ -1,0 +1,30 @@
+name: CI / Shell Syntax & Code Quality
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Shell Syntax (POSIX sh -n)
+        run: |
+          echo "Checking syntax across all shell scripts..."
+          find . -type f -name "*.sh" -not -path "*/.git/*" -print0 | while IFS= read -r -d '' script; do
+            sh -n "$script" || { echo "::error file=$script::Syntax error in $script"; exit 1; }
+          done
+          echo "All shell scripts passed syntax validation."
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          severity: error
+          ignore_paths: >-
+            .git
