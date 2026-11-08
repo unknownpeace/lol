@@ -114,89 +114,110 @@
         <span class="text-xs text-slate-400">Единый защищенный доступ</span>
       </div>
 
-      <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5">
+      <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5" id="services-grid">
         <!-- Zashboard -->
-        <a href="https://zashboard.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-cyan-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-zashboard" href="https://zashboard.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-cyan-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">⚡</span>
             <div>
-              <div class="text-sm font-semibold text-slate-200 group-hover:text-cyan-400 transition">Zashboard</div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-cyan-400 transition flex items-center gap-1.5">
+                <span>Zashboard</span>
+                <span id="dot-service-singbox" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              </div>
               <div class="text-[11px] text-slate-400">Пульт нод Sing-Box</div>
             </div>
           </div>
-          <span class="text-[10px] text-cyan-400/80 font-mono mt-3">https://zashboard.lan ↗</span>
+          <span id="card-url-zashboard" class="text-[10px] text-cyan-400/80 font-mono mt-3">https://zashboard.lan ↗</span>
         </a>
 
         <!-- AdGuard Home -->
-        <a href="https://adguard.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-emerald-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-adguard" href="https://adguard.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-emerald-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">🛡️</span>
             <div>
-              <div class="text-sm font-semibold text-slate-200 group-hover:text-emerald-400 transition">AdGuard Home</div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-emerald-400 transition flex items-center gap-1.5">
+                <span>AdGuard Home</span>
+                <span id="dot-service-adguardhome" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              </div>
               <div class="text-[11px] text-slate-400">DNS & Блокировщик</div>
             </div>
           </div>
-          <span class="text-[10px] text-emerald-400/80 font-mono mt-3">https://adguard.lan ↗</span>
+          <span id="card-url-adguard" class="text-[10px] text-emerald-400/80 font-mono mt-3">https://adguard.lan ↗</span>
         </a>
 
         <!-- Vaultwarden -->
-        <a href="https://vaultwarden.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-blue-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-vaultwarden" href="https://vaultwarden.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-blue-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">🔐</span>
             <div>
-              <div class="text-sm font-semibold text-slate-200 group-hover:text-blue-400 transition">Vaultwarden</div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-blue-400 transition flex items-center gap-1.5">
+                <span>Vaultwarden</span>
+                <span id="dot-service-vaultwarden" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              </div>
               <div class="text-[11px] text-slate-400">Менеджер паролей</div>
             </div>
           </div>
-          <span class="text-[10px] text-blue-400/80 font-mono mt-3">https://vaultwarden.lan ↗</span>
+          <span id="card-url-vaultwarden" class="text-[10px] text-blue-400/80 font-mono mt-3">https://vaultwarden.lan ↗</span>
         </a>
 
         <!-- MeTube -->
-        <a href="https://downloads.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-rose-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-metube" href="https://downloads.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-rose-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">📥</span>
             <div>
-              <div class="text-sm font-semibold text-slate-200 group-hover:text-rose-400 transition">MeTube</div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-rose-400 transition flex items-center gap-1.5">
+                <span>MeTube</span>
+                <span id="dot-service-metube" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              </div>
               <div class="text-[11px] text-slate-400">Загрузка видео и аудио</div>
             </div>
           </div>
-          <span class="text-[10px] text-rose-400/80 font-mono mt-3">https://downloads.lan ↗</span>
+          <span id="card-url-metube" class="text-[10px] text-rose-400/80 font-mono mt-3">https://downloads.lan ↗</span>
         </a>
 
         <!-- Transmission -->
-        <a href="https://torrents.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-amber-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-transmission" href="https://torrents.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-amber-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">🧲</span>
             <div>
-              <div class="text-sm font-semibold text-slate-200 group-hover:text-amber-400 transition">Transmission</div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-amber-400 transition flex items-center gap-1.5">
+                <span>Transmission</span>
+                <span id="dot-service-transmission" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              </div>
               <div class="text-[11px] text-slate-400">Торрент-клиент Web</div>
             </div>
           </div>
-          <span class="text-[10px] text-amber-400/80 font-mono mt-3">https://torrents.lan ↗</span>
+          <span id="card-url-transmission" class="text-[10px] text-amber-400/80 font-mono mt-3">https://torrents.lan ↗</span>
         </a>
 
         <!-- Forgejo -->
-        <a href="https://forgejo.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-orange-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-forgejo" href="https://forgejo.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-orange-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">🐙</span>
             <div>
-              <div class="text-sm font-semibold text-slate-200 group-hover:text-orange-400 transition">Forgejo Git</div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-orange-400 transition flex items-center gap-1.5">
+                <span>Forgejo Git</span>
+                <span id="dot-service-forgejo" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              </div>
               <div class="text-[11px] text-slate-400">Локальный Git-сервер</div>
             </div>
           </div>
-          <span class="text-[10px] text-orange-400/80 font-mono mt-3">https://forgejo.lan ↗</span>
+          <span id="card-url-forgejo" class="text-[10px] text-orange-400/80 font-mono mt-3">https://forgejo.lan ↗</span>
         </a>
 
         <!-- VS Code Server -->
-        <a href="https://code.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-indigo-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-code" href="https://code.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-indigo-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">💻</span>
             <div>
-              <div class="text-sm font-semibold text-slate-200 group-hover:text-indigo-400 transition">VS Code Web</div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-indigo-400 transition flex items-center gap-1.5">
+                <span>VS Code Web</span>
+                <span id="dot-service-code" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              </div>
               <div class="text-[11px] text-slate-400">IDE прямо в браузере</div>
             </div>
           </div>
-          <span class="text-[10px] text-indigo-400/80 font-mono mt-3">https://code.lan ↗</span>
+          <span id="card-url-code" class="text-[10px] text-indigo-400/80 font-mono mt-3">https://code.lan ↗</span>
         </a>
 
         <!-- Samba SMB3 -->
@@ -204,7 +225,10 @@
           <div class="flex items-center gap-3">
             <span class="text-2xl">📁</span>
             <div>
-              <div class="text-sm font-semibold text-slate-200 group-hover:text-purple-400 transition">Samba SMB3</div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-purple-400 transition flex items-center gap-1.5">
+                <span>Samba SMB3</span>
+                <span id="dot-service-samba" class="w-2 h-2 rounded-full bg-emerald-400"></span>
+              </div>
               <div class="text-[11px] text-slate-400">Сетевой диск Windows</div>
             </div>
           </div>
@@ -378,28 +402,43 @@
     </section>
 
     <!-- PKI & TRUST CENTER -->
-    <section class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
-      <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
-        <div>
-          <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
-            🏛️ Центр доверия сертификатов
-          </h3>
-          <p class="text-xs text-slate-400 mt-0.5">
-            Установите сертификат для бесшовного доверия доменам <code>https://*.lan</code> на смартфонах и ПК.
-          </p>
+    <section id="section-pki-center" class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
+      <div id="pki-letsencrypt-active" class="hidden flex items-center justify-between p-3 rounded-xl bg-emerald-950/40 border border-emerald-800/40 text-xs">
+        <div class="flex items-center gap-2.5">
+          <span class="text-xl">✅</span>
+          <div>
+            <div class="font-bold text-emerald-300">Глобально доверенный SSL Let's Encrypt активен</div>
+            <div class="text-slate-400">Все сервисы работают с «зелёным замком» на смартфонах и ПК. Установка локальных CA не требуется.</div>
+          </div>
         </div>
-        <div class="flex gap-2">
-          <a href="/homelab-root-ca.crt" download class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 transition">
-            📥 Для Windows / Linux (.crt)
-          </a>
-          <a href="/homelab-root-ca.cer" download class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 transition">
-            📱 Для Android (.cer)
-          </a>
-        </div>
+        <button onclick="togglePkiManual()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] shrink-0">
+          Резервные файлы CA ▾
+        </button>
       </div>
-      <div class="bg-black/40 rounded-xl p-3 border border-slate-800 font-mono text-xs text-cyan-300 flex items-center justify-between">
-        <span class="truncate pr-2">Invoke-WebRequest -Uri "http://ca.lan/homelab-root-ca.crt" -OutFile "$env:TEMP\homelab-ca.crt"; Import-Certificate -FilePath "$env:TEMP\homelab-ca.crt" -CertStoreLocation Cert:\LocalMachine\Root</span>
-        <button onclick="copyPowerShellCmd()" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] text-white shrink-0">Копировать</button>
+
+      <div id="pki-manual-block" class="space-y-4">
+        <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div>
+            <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
+              🏛️ Центр доверия сертификатов
+            </h3>
+            <p class="text-xs text-slate-400 mt-0.5">
+              Установите сертификат для бесшовного доверия доменам <code>https://*.lan</code> на смартфонах и ПК при оффлайн-работе.
+            </p>
+          </div>
+          <div class="flex gap-2">
+            <a href="/homelab-root-ca.crt" download class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 transition">
+              📥 Для Windows / Linux (.crt)
+            </a>
+            <a href="/homelab-root-ca.cer" download class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 transition">
+              📱 Для Android (.cer)
+            </a>
+          </div>
+        </div>
+        <div class="bg-black/40 rounded-xl p-3 border border-slate-800 font-mono text-xs text-cyan-300 flex items-center justify-between">
+          <span class="truncate pr-2">Invoke-WebRequest -Uri "http://ca.lan/homelab-root-ca.crt" -OutFile "$env:TEMP\homelab-ca.crt"; Import-Certificate -FilePath "$env:TEMP\homelab-ca.crt" -CertStoreLocation Cert:\LocalMachine\Root</span>
+          <button onclick="copyPowerShellCmd()" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[11px] text-white shrink-0">Копировать</button>
+        </div>
       </div>
     </section>
 
@@ -537,6 +576,53 @@
               </div>
             </div>
           `).join('');
+        }
+
+        // Dynamic Services links & status dots
+        const isLE = (data.ssl.type === 'letsencrypt' && data.ssl.domain);
+        const baseDom = isLE ? data.ssl.domain : 'lan';
+        const sMap = [
+          { id: 'zashboard', sub: 'zashboard', sKey: 'sing-box' },
+          { id: 'adguard', sub: 'adguard', sKey: 'adguardhome' },
+          { id: 'vaultwarden', sub: 'vaultwarden', sKey: 'vaultwarden' },
+          { id: 'metube', sub: 'downloads', sKey: 'metube' },
+          { id: 'transmission', sub: 'torrents', sKey: 'transmission-daemon' },
+          { id: 'forgejo', sub: 'forgejo', sKey: 'forgejo' },
+          { id: 'code', sub: 'code', sKey: 'code-server' },
+        ];
+
+        sMap.forEach(s => {
+          const lEl = document.getElementById(`card-link-${s.id}`);
+          const uEl = document.getElementById(`card-url-${s.id}`);
+          const dEl = document.getElementById(`dot-service-${s.id}`) || document.getElementById(`dot-service-${s.sKey}`);
+          if (lEl && uEl) {
+            const finalUrl = `https://${s.sub}.${baseDom}`;
+            lEl.href = finalUrl;
+            uEl.innerText = `${finalUrl} ↗`;
+          }
+          if (dEl && data.services) {
+            const isRun = (data.services[s.sKey] === 'running' || data.services[s.id] === 'running');
+            dEl.className = `w-2 h-2 rounded-full ${isRun ? 'bg-emerald-400' : 'bg-slate-500'}`;
+            dEl.title = isRun ? 'Служба активна' : 'Служба остановлена';
+          }
+        });
+
+        // Samba dot
+        const dSamba = document.getElementById('dot-service-samba');
+        if (dSamba && data.services) {
+          const isRun = (data.services['samba'] === 'running');
+          dSamba.className = `w-2 h-2 rounded-full ${isRun ? 'bg-emerald-400' : 'bg-slate-500'}`;
+        }
+
+        // PKI Adaptive Center
+        const pkiLE = document.getElementById('pki-letsencrypt-active');
+        const pkiManual = document.getElementById('pki-manual-block');
+        if (isLE) {
+          pkiLE.classList.remove('hidden');
+          pkiManual.classList.add('hidden');
+        } else {
+          pkiLE.classList.add('hidden');
+          pkiManual.classList.remove('hidden');
         }
 
         // SSL Card
@@ -738,6 +824,11 @@
       }).catch(err => {
         out.innerText += '\n[Ошибка выполнения: ' + err.message + ']';
       });
+    }
+
+    function togglePkiManual() {
+      const pkiManual = document.getElementById('pki-manual-block');
+      pkiManual.classList.toggle('hidden');
     }
 
     function closeTerminal() {

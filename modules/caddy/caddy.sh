@@ -97,8 +97,28 @@ sync_caddy_main_config() {
     chmod 755 /etc/caddy "$CADDY_CONFD" 2>/dev/null || true
     CUR_LIP_CDY=$(get_current_lan_ip)
     LE_MAIN_BLOCKS=""
+    LAN_SERVICES_BLOCKS=""
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        LE_MAIN_BLOCKS="https://adguard.${SSL_DOMAIN} {
+        # Публичный доверенный режим Let's Encrypt (без самоподписных *.lan)
+        LE_MAIN_BLOCKS="https://ca.${SSL_DOMAIN} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    @api path /api/*
+    handle @api {
+        reverse_proxy 127.0.0.1:8080 {
+            transport http {
+                response_header_timeout 300s
+            }
+        }
+    }
+    handle {
+        root * ${PKI_PORTAL_DIR}
+        header /homelab-root-ca.cer Content-Type \"application/x-x509-ca-cert\"
+        header /homelab-root-ca.crt Content-Type \"application/x-x509-ca-cert\"
+        file_server
+    }
+}
+
+https://adguard.${SSL_DOMAIN} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
     encode zstd gzip
     reverse_proxy 127.0.0.1:3000 {
@@ -109,6 +129,45 @@ sync_caddy_main_config() {
 
 https://zashboard.${SSL_DOMAIN}, https://singbox.${SSL_DOMAIN} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    encode zstd gzip
+    @root_ui path /
+    redir @root_ui /ui/ 302
+    reverse_proxy 127.0.0.1:9090 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}"
+    else
+        # Локальный оффлайн режим Local PKI (*.lan)
+        LAN_SERVICES_BLOCKS="https://${DOM_CA} {
+    tls internal
+    @api path /api/*
+    handle @api {
+        reverse_proxy 127.0.0.1:8080 {
+            transport http {
+                response_header_timeout 300s
+            }
+        }
+    }
+    handle {
+        root * ${PKI_PORTAL_DIR}
+        header /homelab-root-ca.cer Content-Type \"application/x-x509-ca-cert\"
+        header /homelab-root-ca.crt Content-Type \"application/x-x509-ca-cert\"
+        file_server
+    }
+}
+
+https://${DOM_ADGUARD} {
+    tls internal
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+
+https://${DOM_ZASHBOARD}, https://${DOM_SINGBOX} {
+    tls internal
     encode zstd gzip
     @root_ui path /
     redir @root_ui /ui/ 302
@@ -156,44 +215,7 @@ http://${DOM_CA}, http://${CUR_LIP_CDY}, http://*.lan {
     }
 }
 
-https://${DOM_CA} {
-    tls internal
-    @api path /api/*
-    handle @api {
-        reverse_proxy 127.0.0.1:8080 {
-            transport http {
-                response_header_timeout 300s
-            }
-        }
-    }
-    handle {
-        root * ${PKI_PORTAL_DIR}
-        header /homelab-root-ca.cer Content-Type "application/x-x509-ca-cert"
-        header /homelab-root-ca.crt Content-Type "application/x-x509-ca-cert"
-        file_server
-    }
-}
-
-https://${DOM_ADGUARD} {
-    tls internal
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:3000 {
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-    }
-}
-
-https://${DOM_ZASHBOARD}, https://${DOM_SINGBOX} {
-    tls internal
-    encode zstd gzip
-    @root_ui path /
-    redir @root_ui /ui/ 302
-    reverse_proxy 127.0.0.1:9090 {
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-    }
-}
-
+${LAN_SERVICES_BLOCKS}
 ${LE_MAIN_BLOCKS}
 
 import ${CADDY_CONFD}/*.caddy
@@ -318,8 +340,13 @@ ${AUTH_BLOCK}
         fi
     fi
 
-    if [ "$SITE_MOD" = "vaultwarden" ]; then
-        # Чистый эталонный профиль проксирования для Vaultwarden
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        # При активном Let's Encrypt самоподписные *.lan отключаются
+        cat << LE_ONLY_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
+${LE_SITE_BLOCK}
+LE_ONLY_EOF
+    elif [ "$SITE_MOD" = "vaultwarden" ]; then
+        # Чистый эталонный профиль проксирования для Vaultwarden (Local PKI)
         cat << VW_SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
 ${LAN_DOM_HEADER} {
     tls internal
@@ -342,7 +369,6 @@ ${LAN_DOM_HEADER} {
         header_up X-Forwarded-Proto https
     }
 }
-${LE_SITE_BLOCK}
 VW_SITE_EOF
     else
         cat << SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
@@ -355,7 +381,6 @@ ${AUTH_BLOCK}
         header_up X-Real-IP {remote_host}
     }
 }
-${LE_SITE_BLOCK}
 SITE_EOF
     fi
     chmod 644 "${CADDY_CONFD}/${SITE_MOD}.caddy" 2>/dev/null || true
