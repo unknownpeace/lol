@@ -58,6 +58,9 @@ gateway_cli_dispatch() {
                 shift 2
                 cli_proxy_add "$*"
                 ;;
+            del|rm|remove|delete)
+                cli_proxy_del "${3:-}"
+                ;;
             list|status)
                 print_proxy_slots_report
                 list_my_nodes
@@ -75,12 +78,15 @@ gateway_cli_dispatch() {
             proxy)
                 cli_domain_rule_add "proxy" "${3:-}"
                 ;;
+            del|rm|remove|delete)
+                cli_domain_rule_del "${3:-}"
+                ;;
             test|check|inspect)
                 inspect_domain_route "${3:-}"
                 ;;
             *)
-                ui_warn_box "Укажите действие для домена: direct или proxy." \
-                            "Пример: gateway domain direct https://kinopoisk.ru  ИЛИ  gateway domain proxy https://openai.com"
+                ui_warn_box "Укажите действие для домена: direct, proxy или del." \
+                            "Пример: gateway domain direct kinopoisk.ru  ИЛИ  gateway domain del openai.com"
                 ;;
         esac
         ;;

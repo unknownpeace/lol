@@ -47,6 +47,9 @@
         </div>
       </div>
       <div class="flex items-center gap-3">
+        <a href="/api/backup/download" title="Скачать свежий бэкап" class="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-200 transition flex items-center gap-1.5">
+          📦 Бэкап (.tar.gz)
+        </a>
         <button onclick="openTokenModal()" id="btn-auth-status" class="px-4 py-2 text-xs font-semibold rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 transition flex items-center gap-2">
           🔑 <span id="txt-auth-status">Войти</span>
         </button>
@@ -108,7 +111,7 @@
         <h2 class="text-lg font-bold text-slate-200 flex items-center gap-2">
           🏠 Сервисы Homelab & Порталы
         </h2>
-        <span class="text-xs text-slate-400">Доступ через единый HTTPS (Caddy)</span>
+        <span class="text-xs text-slate-400">Единый защищенный доступ</span>
       </div>
 
       <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5">
@@ -118,7 +121,7 @@
             <span class="text-2xl">⚡</span>
             <div>
               <div class="text-sm font-semibold text-slate-200 group-hover:text-cyan-400 transition">Zashboard</div>
-              <div class="text-[11px] text-slate-400">Sing-Box ядро и пинг нод</div>
+              <div class="text-[11px] text-slate-400">Пульт нод Sing-Box</div>
             </div>
           </div>
           <span class="text-[10px] text-cyan-400/80 font-mono mt-3">https://zashboard.lan ↗</span>
@@ -130,7 +133,7 @@
             <span class="text-2xl">🛡️</span>
             <div>
               <div class="text-sm font-semibold text-slate-200 group-hover:text-emerald-400 transition">AdGuard Home</div>
-              <div class="text-[11px] text-slate-400">DNS-фильтрация :53</div>
+              <div class="text-[11px] text-slate-400">DNS & Блокировщик</div>
             </div>
           </div>
           <span class="text-[10px] text-emerald-400/80 font-mono mt-3">https://adguard.lan ↗</span>
@@ -139,7 +142,7 @@
         <!-- Vaultwarden -->
         <a href="https://vaultwarden.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-blue-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
-            <span class="text-2xl">🔑</span>
+            <span class="text-2xl">🔐</span>
             <div>
               <div class="text-sm font-semibold text-slate-200 group-hover:text-blue-400 transition">Vaultwarden</div>
               <div class="text-[11px] text-slate-400">Менеджер паролей</div>
@@ -149,15 +152,15 @@
         </a>
 
         <!-- MeTube -->
-        <a href="https://downloads.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-red-500/50 transition group flex flex-col justify-between">
+        <a href="https://downloads.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-rose-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
-            <span class="text-2xl">🎬</span>
+            <span class="text-2xl">📥</span>
             <div>
-              <div class="text-sm font-semibold text-slate-200 group-hover:text-red-400 transition">MeTube</div>
-              <div class="text-[11px] text-slate-400">Загрузчик видео/аудио</div>
+              <div class="text-sm font-semibold text-slate-200 group-hover:text-rose-400 transition">MeTube</div>
+              <div class="text-[11px] text-slate-400">Загрузка видео и аудио</div>
             </div>
           </div>
-          <span class="text-[10px] text-red-400/80 font-mono mt-3">https://downloads.lan ↗</span>
+          <span class="text-[10px] text-rose-400/80 font-mono mt-3">https://downloads.lan ↗</span>
         </a>
 
         <!-- Transmission -->
@@ -166,7 +169,7 @@
             <span class="text-2xl">🧲</span>
             <div>
               <div class="text-sm font-semibold text-slate-200 group-hover:text-amber-400 transition">Transmission</div>
-              <div class="text-[11px] text-slate-400">Торрент-клиент RPC</div>
+              <div class="text-[11px] text-slate-400">Торрент-клиент Web</div>
             </div>
           </div>
           <span class="text-[10px] text-amber-400/80 font-mono mt-3">https://torrents.lan ↗</span>
@@ -213,59 +216,140 @@
       </div>
     </section>
 
-    <!-- ROUTING & PROXY CONTROLS -->
-    <section class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <!-- Add Subscription / Node -->
-      <div class="glass rounded-2xl p-5 shadow-xl flex flex-col justify-between space-y-4">
+    <!-- LXC CONTAINERS MANAGEMENT -->
+    <section class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
+      <div class="flex items-center justify-between">
         <div>
-          <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
-            🌐 Добавить подписку или URI-ключ
-          </h3>
-          <p class="text-xs text-slate-400 mt-1">
-            Вставьте ссылку на подписку (Слот 1) или одиночный ключ <code>vless://</code>, <code>hy2://</code>, <code>warp</code>.
-          </p>
+          <h2 class="text-lg font-bold text-slate-200 flex items-center gap-2">
+            📦 Контейнеры LXC (Alpine / Debian / Ubuntu)
+          </h2>
+          <p class="text-xs text-slate-400">Изолированные легковесные окружения Linux без оверхеда Docker</p>
         </div>
-        <form onsubmit="handleAddProxy(event)" class="space-y-3">
-          <input type="text" id="input-proxy-url" required placeholder="https://sub.domain/api/v1/... или vless://..." class="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
-          <div class="flex justify-end gap-2">
-            <button type="submit" id="btn-add-proxy" class="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition">
-              Добавить в Sing-Box
-            </button>
-          </div>
-        </form>
+        <button onclick="runCommandStream('lxc_doctor')" class="px-3 py-1.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 transition">
+          🩺 Проверить LXC
+        </button>
       </div>
 
-      <!-- Add Domain Rule -->
-      <div class="glass rounded-2xl p-5 shadow-xl flex flex-col justify-between space-y-4">
-        <div>
-          <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
-            🎯 Перенаправление домена
-          </h3>
-          <p class="text-xs text-slate-400 mt-1">
-            Принудительно направить сайт через умный туннель или напрямую через шлюз провайдера.
-          </p>
+      <div id="lxc-container-list" class="space-y-2">
+        <div class="text-xs text-slate-500 italic p-3 text-center bg-slate-900/40 rounded-xl border border-slate-800">
+          Контейнеры не запущены или отсутствуют. Вы можете создать контейнер через SSH: <code>gw lxc create</code>.
         </div>
-        <form onsubmit="handleAddDomain(event)" class="space-y-3">
-          <input type="text" id="input-domain-name" required placeholder="example.com или https://site.ru" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
-          <div class="flex justify-end gap-2">
-            <button type="button" onclick="submitDomain('direct')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-emerald-400 font-semibold text-xs transition">
-              ● Напрямую (DIRECT)
-            </button>
-            <button type="button" onclick="submitDomain('proxy')" class="px-3.5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition">
-              ⚡ В Прокси (PROXY)
-            </button>
-          </div>
-        </form>
       </div>
     </section>
 
-    <!-- SYSTEM OPS & LOG STREAM MODAL/PANEL -->
+    <!-- PROXY & SLOTS MANAGEMENT -->
+    <section class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
+            🌐 Управление источниками прокси (3 независимых слота)
+          </h3>
+          <p class="text-xs text-slate-400">Контролируйте активные подписки, личные ключи и Amnezia WARP</p>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="deleteProxy('sub')" class="px-3 py-1.5 rounded-xl border border-rose-800/60 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 text-xs font-semibold transition">
+            🗑️ Очистить подписку
+          </button>
+          <button onclick="toggleWarp()" id="btn-toggle-warp" class="px-3 py-1.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition">
+            ☁️ WARP
+          </button>
+        </div>
+      </div>
+
+      <!-- Add Proxy Form -->
+      <form onsubmit="handleAddProxy(event)" class="flex flex-col sm:flex-row gap-2">
+        <input type="text" id="input-proxy-url" required placeholder="Вставьте ссылку на подписку (http...) или ключ (vless://, hy2://, ss://)" class="flex-1 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
+        <button type="submit" id="btn-add-proxy" class="px-4 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition shrink-0">
+          ➕ Добавить в Sing-Box
+        </button>
+      </form>
+
+      <!-- Active Keys in Slot 2 -->
+      <div class="space-y-2 pt-2">
+        <div class="text-xs font-semibold text-slate-400 flex items-center justify-between">
+          <span>Личные ключи (Слот 2: my_nodes.yaml):</span>
+          <span id="badge-keys-count" class="text-cyan-400 font-mono">0 ключей</span>
+        </div>
+        <div id="keys-list" class="space-y-1.5 max-h-48 overflow-y-auto terminal-scroll">
+          <div class="text-xs text-slate-500 italic p-2 bg-slate-900/40 rounded-lg">Список личных ключей пуст.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- DOMAIN ROUTING RULES -->
+    <section class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
+      <div>
+        <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
+          🎯 Маршрутизация доменов (Direct & Proxy)
+        </h3>
+        <p class="text-xs text-slate-400 mt-0.5">Добавляйте или удаляйте сайты одним кликом. Изменения применяются мгновенно.</p>
+      </div>
+
+      <form onsubmit="handleAddDomain(event)" class="flex flex-col sm:flex-row gap-2">
+        <input type="text" id="input-domain-name" required placeholder="example.com или https://site.ru" class="flex-1 px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
+        <div class="flex gap-2">
+          <button type="button" onclick="submitDomain('direct')" class="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-emerald-400 font-semibold text-xs transition">
+            ● Напрямую
+          </button>
+          <button type="button" onclick="submitDomain('proxy')" class="px-3.5 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition">
+            ⚡ В Прокси
+          </button>
+        </div>
+      </form>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+        <!-- Direct Domains -->
+        <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800">
+          <div class="text-xs font-semibold text-emerald-400 mb-2 flex items-center justify-between">
+            <span>● Напрямую (DIRECT)</span>
+            <span id="badge-direct-count" class="text-slate-500 font-mono">0</span>
+          </div>
+          <div id="list-direct-domains" class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto terminal-scroll"></div>
+        </div>
+
+        <!-- Proxy Domains -->
+        <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800">
+          <div class="text-xs font-semibold text-cyan-400 mb-2 flex items-center justify-between">
+            <span>⚡ В Прокси (PROXY)</span>
+            <span id="badge-proxy-count" class="text-slate-500 font-mono">0</span>
+          </div>
+          <div id="list-proxy-domains" class="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto terminal-scroll"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SSL & DUCKDNS MANAGEMENT -->
+    <section class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
+      <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
+        <div>
+          <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
+            🔒 Управление SSL / TLS (Let's Encrypt vs Local CA)
+          </h3>
+          <p class="text-xs text-slate-400 mt-0.5">
+            Текущий режим: <span id="val-ssl-mode" class="font-bold text-cyan-300">Let's Encrypt Wildcard</span> • Домен: <span id="val-ssl-domain" class="font-mono text-slate-300">*.inadzumka.duckdns.org</span>
+          </p>
+          <p class="text-[11px] text-emerald-400 mt-0.5" id="val-ssl-expire">
+            Действителен: 89 дней осталось (эмитент: YE2)
+          </p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button onclick="runCommandStream('ssl_renew')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 transition">
+            🔄 Продлить Let's Encrypt
+          </button>
+          <button onclick="runCommandStream('ssl_local')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-amber-300 transition">
+            🏠 Откат на Local CA (*.lan)
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- SYSTEM OPS & LOG STREAM PANEL -->
     <section class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
       <div class="flex items-center justify-between">
         <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
-          🩺 Системные действия и аудит (One-Click)
+          🩺 Системные действия и аудит
         </h3>
-        <span class="text-xs text-slate-400">Выполняются в фоновом режиме на сервере</span>
+        <span class="text-xs text-slate-400">Фоновое выполнение на сервере</span>
       </div>
 
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -293,15 +377,15 @@
       </div>
     </section>
 
-    <!-- PKI & TRUST CENTER (Original ca.lan function preserved) -->
+    <!-- PKI & TRUST CENTER -->
     <section class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
       <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div>
           <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
-            🔒 Центр сертификации (Local Root CA)
+            🏛️ Центр доверия сертификатов
           </h3>
           <p class="text-xs text-slate-400 mt-0.5">
-            Установите сертификат, чтобы браузеры и телефоны доверяли локальным доменам <code>https://*.lan</code> без предупреждений.
+            Установите сертификат для бесшовного доверия доменам <code>https://*.lan</code> на смартфонах и ПК.
           </p>
         </div>
         <div class="flex gap-2">
@@ -359,6 +443,7 @@
       localStorage.setItem('gw_auth_token', val);
       closeTokenModal();
       await fetchStatus(true);
+      await fetchDomains();
     }
 
     async function fetchStatus(notify = false) {
@@ -388,18 +473,122 @@
         const upM = Math.floor((data.uptime % 3600) / 60);
         document.getElementById('val-uptime').innerText = `Аптайм: ${upH}ч ${upM}м`;
 
-        // Sing-box
+        // Sing-box & Slots
         document.getElementById('val-active-node').innerText = data.active_node || 'Автовыбор';
         document.getElementById('val-slot-info').innerText = data.slots.slot1_sub.active ? 'Слот 1: Активен (Саб)' : (data.slots.slot3_warp.active ? 'Слот 3: WARP 2.0' : 'Прямой выход');
 
-        // Disk
+        // WARP button state
+        const btnWarp = document.getElementById('btn-toggle-warp');
+        if (data.slots.slot3_warp.active) {
+          btnWarp.innerText = '☁️ Отключить WARP';
+          btnWarp.classList.add('text-cyan-400', 'border-cyan-500/50');
+        } else {
+          btnWarp.innerText = '☁️ Включить WARP';
+          btnWarp.classList.remove('text-cyan-400', 'border-cyan-500/50');
+        }
+
+        // Keys list (Slot 2)
+        const keysBadge = document.getElementById('badge-keys-count');
+        const keysList = document.getElementById('keys-list');
+        keysBadge.innerText = `${data.slots.slot2_keys.count} ключей`;
+        if (data.slots.slot2_keys.nodes.length === 0) {
+          keysList.innerHTML = '<div class="text-xs text-slate-500 italic p-2 bg-slate-900/40 rounded-lg">Список личных ключей пуст.</div>';
+        } else {
+          keysList.innerHTML = data.slots.slot2_keys.nodes.map(n => `
+            <div class="flex items-center justify-between p-2 rounded-lg bg-slate-900/50 border border-slate-800 text-xs">
+              <div class="truncate pr-2">
+                <span class="text-cyan-400 font-mono font-semibold">[${n.index}]</span>
+                <span class="text-slate-400 uppercase font-mono ml-1">${n.proto}</span>
+                <span class="text-slate-200 ml-2 font-medium">${n.tag}</span>
+              </div>
+              <button onclick="deleteProxy('${n.index}')" class="px-2 py-0.5 rounded bg-rose-950/60 hover:bg-rose-900 text-rose-300 text-[11px] font-semibold shrink-0">
+                ✕
+              </button>
+            </div>
+          `).join('');
+        }
+
+        // Disk & Storage
         document.getElementById('val-disk-free').innerText = `${data.storage.free_gb} GB`;
         document.getElementById('val-disk-total').innerText = `Всего: ${data.storage.total_gb} GB (${data.storage.pct}% заполнено)`;
         document.getElementById('bar-disk').style.width = `${data.storage.pct}%`;
 
+        // LXC Containers
+        const lxcContainer = document.getElementById('lxc-container-list');
+        if (!data.lxc || data.lxc.length === 0) {
+          lxcContainer.innerHTML = '<div class="text-xs text-slate-500 italic p-3 text-center bg-slate-900/40 rounded-xl border border-slate-800">Контейнеры не запущены или отсутствуют. Вы можете создать контейнер через SSH: <code>gw lxc create</code>.</div>';
+        } else {
+          lxcContainer.innerHTML = data.lxc.map(c => `
+            <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col sm:flex-row justify-between sm:items-center gap-2 text-xs">
+              <div class="flex items-center gap-2.5">
+                <span class="w-2.5 h-2.5 rounded-full ${c.state === 'RUNNING' ? 'bg-emerald-400' : 'bg-slate-500'}"></span>
+                <span class="font-bold text-slate-200 text-sm font-mono">${c.name}</span>
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold ${c.state === 'RUNNING' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/50' : 'bg-slate-800 text-slate-400'}">${c.state}</span>
+                <span class="text-slate-400 font-mono">${c.ip !== '-' ? c.ip : ''}</span>
+              </div>
+              <div class="flex items-center gap-1.5 self-end sm:self-auto">
+                ${c.state === 'RUNNING' ? `
+                  <button onclick="controlLxc('${c.name}', 'restart')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200">🔄 Restart</button>
+                  <button onclick="controlLxc('${c.name}', 'stop')" class="px-2.5 py-1 rounded-lg bg-amber-950/50 hover:bg-amber-900/60 text-amber-300">⏹️ Stop</button>
+                ` : `
+                  <button onclick="controlLxc('${c.name}', 'start')" class="px-2.5 py-1 rounded-lg bg-emerald-950/50 hover:bg-emerald-900/60 text-emerald-300">▶️ Start</button>
+                `}
+                <button onclick="controlLxc('${c.name}', 'delete')" class="px-2.5 py-1 rounded-lg bg-rose-950/50 hover:bg-rose-900/60 text-rose-300">🗑️</button>
+              </div>
+            </div>
+          `).join('');
+        }
+
+        // SSL Card
+        document.getElementById('val-ssl-mode').innerText = data.ssl.type === 'letsencrypt' ? "Let's Encrypt Wildcard" : "Local CA (*.lan)";
+        document.getElementById('val-ssl-domain').innerText = `*.${data.ssl.domain}`;
+        if (data.ssl.days_left !== null) {
+          document.getElementById('val-ssl-expire').innerText = `Действителен: ${data.ssl.days_left} дней осталось (эмитент: ${data.ssl.issuer})`;
+        } else {
+          document.getElementById('val-ssl-expire').innerText = `Локальный корневой сертификат (Alpine Homelab CA)`;
+        }
+
       } catch (err) {
         console.error('Fetch status error:', err);
       }
+    }
+
+    async function fetchDomains() {
+      try {
+        const resp = await fetch('/api/domains', {
+          headers: { 'X-Gateway-Token': AUTH_TOKEN }
+        });
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        // Direct list
+        const dList = document.getElementById('list-direct-domains');
+        document.getElementById('badge-direct-count').innerText = data.direct.length;
+        if (data.direct.length === 0) {
+          dList.innerHTML = '<span class="text-xs text-slate-500 italic">Список пуст</span>';
+        } else {
+          dList.innerHTML = data.direct.map(d => `
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-950/40 border border-emerald-800/40 text-emerald-300 text-xs font-mono">
+              ${d}
+              <button onclick="deleteDomain('${d}')" class="text-emerald-400 hover:text-white font-bold ml-1">✕</button>
+            </span>
+          `).join('');
+        }
+
+        // Proxy list
+        const pList = document.getElementById('list-proxy-domains');
+        document.getElementById('badge-proxy-count').innerText = data.proxy.length;
+        if (data.proxy.length === 0) {
+          pList.innerHTML = '<span class="text-xs text-slate-500 italic">Список пуст</span>';
+        } else {
+          pList.innerHTML = data.proxy.map(d => `
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-cyan-950/40 border border-cyan-800/40 text-cyan-300 text-xs font-mono">
+              ${d}
+              <button onclick="deleteDomain('${d}')" class="text-cyan-400 hover:text-white font-bold ml-1">✕</button>
+            </span>
+          `).join('');
+        }
+      } catch (e) {}
     }
 
     async function handleAddProxy(e) {
@@ -424,8 +613,30 @@
         alert('Ошибка связи с сервером: ' + err.message);
       } finally {
         btn.disabled = false;
-        btn.innerText = 'Добавить в Sing-Box';
+        btn.innerText = '➕ Добавить в Sing-Box';
       }
+    }
+
+    async function deleteProxy(target) {
+      if (!confirm(`Удалить выбранный прокси/подписку [${target}]?`)) return;
+      try {
+        const resp = await fetch('/api/proxy/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Gateway-Token': AUTH_TOKEN },
+          body: JSON.stringify({ target })
+        });
+        const res = await resp.json();
+        alert(res.status === 'ok' ? 'Удалено!' : 'Ошибка: ' + res.output);
+        fetchStatus();
+      } catch (e) {
+        alert('Ошибка: ' + e.message);
+      }
+    }
+
+    async function toggleWarp() {
+      const btn = document.getElementById('btn-toggle-warp');
+      const isDisable = btn.innerText.includes('Отключить');
+      runCommandStream(isDisable ? 'warp_disable' : 'warp_enable');
     }
 
     async function submitDomain(mode) {
@@ -444,8 +655,39 @@
         const res = await resp.json();
         alert(res.status === 'ok' ? `Домен ${domain} успешно направлен (${mode})!` : 'Ошибка: ' + res.output);
         input.value = '';
+        fetchDomains();
       } catch (err) {
         alert('Ошибка связи с сервером: ' + err.message);
+      }
+    }
+
+    async function deleteDomain(domain) {
+      if (!confirm(`Удалить домен ${domain} из правил маршрутизации?`)) return;
+      try {
+        const resp = await fetch('/api/domain/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Gateway-Token': AUTH_TOKEN },
+          body: JSON.stringify({ domain })
+        });
+        const res = await resp.json();
+        fetchDomains();
+      } catch (e) {
+        alert('Ошибка: ' + e.message);
+      }
+    }
+
+    async function controlLxc(name, action) {
+      if (action === 'delete' && !confirm(`Вы точно хотите безвозвратно удалить контейнер ${name}?`)) return;
+      try {
+        const resp = await fetch('/api/lxc/control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Gateway-Token': AUTH_TOKEN },
+          body: JSON.stringify({ name, action })
+        });
+        const res = await resp.json();
+        fetchStatus();
+      } catch (e) {
+        alert('Ошибка: ' + e.message);
       }
     }
 
@@ -472,6 +714,7 @@
               out.innerText += '\n[Выполнение завершено]';
               box.scrollTop = box.scrollHeight;
               fetchStatus();
+              fetchDomains();
               return;
             }
             buffer += decoder.decode(value, { stream: true });
@@ -524,6 +767,7 @@
 
     // Auto-init and background refresh
     fetchStatus();
+    fetchDomains();
     setInterval(fetchStatus, 5000);
   </script>
 </body>
