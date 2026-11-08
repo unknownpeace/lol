@@ -193,7 +193,7 @@ gateway_cli_dispatch() {
                 lxc_control "autostart" "${3:-}" "${4:-}"
                 ;;
             rm|del|delete|destroy)
-                lxc_control "delete" "${3:-}"
+                lxc_control "delete" "${3:-}" "${4:-yes}"
                 ;;
             menu)
                 lxc_interactive_menu

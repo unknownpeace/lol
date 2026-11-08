@@ -25,6 +25,29 @@
     .terminal-scroll::-webkit-scrollbar { width: 6px; }
     .terminal-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
   </style>
+  <script>
+    (function() {
+      // Instant synchronous pre-render setup to prevent ANY flickering of .lan domains
+      const savedDomain = localStorage.getItem('gw_ssl_domain') || 'inadzumka.duckdns.org';
+      const savedType = localStorage.getItem('gw_ssl_type') || 'letsencrypt';
+      const host = window.location.hostname;
+      let isLE = (savedType === 'letsencrypt');
+      let domain = savedDomain;
+
+      if (host && !host.endsWith('.lan') && !host.match(/^\d+\.\d+\.\d+\.\d+$/)) {
+        isLE = true;
+        const parts = host.split('.');
+        if (parts.length > 2) {
+          domain = parts.slice(1).join('.');
+        } else {
+          domain = host;
+        }
+      }
+
+      window.__INIT_SSL_LE = isLE;
+      window.__INIT_SSL_DOMAIN = domain;
+    })();
+  </script>
 </head>
 <body class="min-h-screen p-3 md:p-6 flex flex-col items-center">
 
@@ -116,7 +139,7 @@
 
       <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3.5" id="services-grid">
         <!-- Zashboard -->
-        <a id="card-link-zashboard" href="https://zashboard.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-cyan-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-zashboard" href="#" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-cyan-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">⚡</span>
             <div>
@@ -127,11 +150,11 @@
               <div class="text-[11px] text-slate-400">Пульт нод Sing-Box</div>
             </div>
           </div>
-          <span id="card-url-zashboard" class="text-[10px] text-cyan-400/80 font-mono mt-3">https://zashboard.lan ↗</span>
+          <span id="card-url-zashboard" class="text-[10px] text-cyan-400/80 font-mono mt-3">https://zashboard.inadzumka.duckdns.org ↗</span>
         </a>
 
         <!-- AdGuard Home -->
-        <a id="card-link-adguard" href="https://adguard.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-emerald-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-adguard" href="#" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-emerald-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">🛡️</span>
             <div>
@@ -142,11 +165,11 @@
               <div class="text-[11px] text-slate-400">DNS & Блокировщик</div>
             </div>
           </div>
-          <span id="card-url-adguard" class="text-[10px] text-emerald-400/80 font-mono mt-3">https://adguard.lan ↗</span>
+          <span id="card-url-adguard" class="text-[10px] text-emerald-400/80 font-mono mt-3">https://adguard.inadzumka.duckdns.org ↗</span>
         </a>
 
         <!-- Vaultwarden -->
-        <a id="card-link-vaultwarden" href="https://vaultwarden.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-blue-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-vaultwarden" href="#" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-blue-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">🔐</span>
             <div>
@@ -157,11 +180,11 @@
               <div class="text-[11px] text-slate-400">Менеджер паролей</div>
             </div>
           </div>
-          <span id="card-url-vaultwarden" class="text-[10px] text-blue-400/80 font-mono mt-3">https://vaultwarden.lan ↗</span>
+          <span id="card-url-vaultwarden" class="text-[10px] text-blue-400/80 font-mono mt-3">https://vaultwarden.inadzumka.duckdns.org ↗</span>
         </a>
 
         <!-- MeTube -->
-        <a id="card-link-metube" href="https://downloads.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-rose-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-metube" href="#" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-rose-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">📥</span>
             <div>
@@ -172,11 +195,11 @@
               <div class="text-[11px] text-slate-400">Загрузка видео и аудио</div>
             </div>
           </div>
-          <span id="card-url-metube" class="text-[10px] text-rose-400/80 font-mono mt-3">https://downloads.lan ↗</span>
+          <span id="card-url-metube" class="text-[10px] text-rose-400/80 font-mono mt-3">https://downloads.inadzumka.duckdns.org ↗</span>
         </a>
 
         <!-- Transmission -->
-        <a id="card-link-transmission" href="https://torrents.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-amber-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-transmission" href="#" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-amber-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">🧲</span>
             <div>
@@ -187,11 +210,11 @@
               <div class="text-[11px] text-slate-400">Торрент-клиент Web</div>
             </div>
           </div>
-          <span id="card-url-transmission" class="text-[10px] text-amber-400/80 font-mono mt-3">https://torrents.lan ↗</span>
+          <span id="card-url-transmission" class="text-[10px] text-amber-400/80 font-mono mt-3">https://torrents.inadzumka.duckdns.org ↗</span>
         </a>
 
         <!-- Forgejo -->
-        <a id="card-link-forgejo" href="https://forgejo.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-orange-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-forgejo" href="#" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-orange-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">🐙</span>
             <div>
@@ -202,11 +225,11 @@
               <div class="text-[11px] text-slate-400">Локальный Git-сервер</div>
             </div>
           </div>
-          <span id="card-url-forgejo" class="text-[10px] text-orange-400/80 font-mono mt-3">https://forgejo.lan ↗</span>
+          <span id="card-url-forgejo" class="text-[10px] text-orange-400/80 font-mono mt-3">https://forgejo.inadzumka.duckdns.org ↗</span>
         </a>
 
         <!-- VS Code Server -->
-        <a id="card-link-code" href="https://code.lan" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-indigo-500/50 transition group flex flex-col justify-between">
+        <a id="card-link-code" href="#" target="_blank" class="p-3.5 rounded-xl border border-slate-700/60 bg-slate-800/40 hover:bg-slate-800 hover:border-indigo-500/50 transition group flex flex-col justify-between">
           <div class="flex items-center gap-3">
             <span class="text-2xl">💻</span>
             <div>
@@ -217,7 +240,7 @@
               <div class="text-[11px] text-slate-400">IDE прямо в браузере</div>
             </div>
           </div>
-          <span id="card-url-code" class="text-[10px] text-indigo-400/80 font-mono mt-3">https://code.lan ↗</span>
+          <span id="card-url-code" class="text-[10px] text-indigo-400/80 font-mono mt-3">https://code.inadzumka.duckdns.org ↗</span>
         </a>
 
         <!-- Samba SMB3 -->
@@ -238,6 +261,31 @@
           </span>
         </div>
       </div>
+      <!-- SYNC_SERVICES_SCRIPT -->
+      <script>
+        (function() {
+          const isLE = window.__INIT_SSL_LE;
+          const baseDom = isLE && window.__INIT_SSL_DOMAIN ? window.__INIT_SSL_DOMAIN : 'lan';
+          const sMap = [
+            { id: 'zashboard', sub: 'zashboard' },
+            { id: 'adguard', sub: 'adguard' },
+            { id: 'vaultwarden', sub: 'vaultwarden' },
+            { id: 'metube', sub: 'downloads' },
+            { id: 'transmission', sub: 'torrents' },
+            { id: 'forgejo', sub: 'forgejo' },
+            { id: 'code', sub: 'code' },
+          ];
+          sMap.forEach(s => {
+            const lEl = document.getElementById('card-link-' + s.id);
+            const uEl = document.getElementById('card-url-' + s.id);
+            if (lEl && uEl) {
+              const finalUrl = 'https://' + s.sub + '.' + baseDom;
+              lEl.href = finalUrl;
+              uEl.innerText = finalUrl + ' ↗';
+            }
+          });
+        })();
+      </script>
     </section>
 
     <!-- LXC CONTAINERS MANAGEMENT -->
@@ -408,7 +456,7 @@
 
     <!-- PKI & TRUST CENTER -->
     <section id="section-pki-center" class="glass rounded-2xl p-5 md:p-6 shadow-xl space-y-4">
-      <div id="pki-letsencrypt-active" class="hidden flex items-center justify-between p-3 rounded-xl bg-emerald-950/40 border border-emerald-800/40 text-xs">
+      <div id="pki-letsencrypt-active" class="flex items-center justify-between p-3 rounded-xl bg-emerald-950/40 border border-emerald-800/40 text-xs">
         <div class="flex items-center gap-2.5">
           <span class="text-xl">✅</span>
           <div>
@@ -421,7 +469,7 @@
         </button>
       </div>
 
-      <div id="pki-manual-block" class="space-y-4">
+      <div id="pki-manual-block" class="space-y-4 hidden">
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div>
             <h3 class="text-base font-bold text-slate-200 flex items-center gap-2">
@@ -493,6 +541,25 @@
             <option value="ubuntu:noble">Ubuntu 24.04 LTS Noble (Широкая экосистема)</option>
           </select>
         </div>
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1.5">Сетевое подключение:</label>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label class="flex items-start gap-2 p-2.5 rounded-xl bg-slate-900 border border-slate-700 cursor-pointer hover:border-cyan-500/50 transition">
+              <input type="radio" name="lxc-net-mode" value="macvlan" class="mt-0.5 text-cyan-500 focus:ring-0">
+              <div class="text-[11px]">
+                <div class="font-bold text-slate-200">🏠 Домашняя сеть (LAN)</div>
+                <div class="text-slate-400">Свой IP от роутера (192.168.1.X). Прямой доступ со всех ПК и телефонов без изоляции.</div>
+              </div>
+            </label>
+            <label class="flex items-start gap-2 p-2.5 rounded-xl bg-slate-900 border border-slate-700 cursor-pointer hover:border-cyan-500/50 transition">
+              <input type="radio" name="lxc-net-mode" value="nat" checked class="mt-0.5 text-cyan-500 focus:ring-0">
+              <div class="text-[11px]">
+                <div class="font-bold text-slate-200">🛡️ Изолированный NAT</div>
+                <div class="text-slate-400">Подсеть 10.0.3.X. Фильтрация через AdGuard DNS и защита трафика через Sing-Box.</div>
+              </div>
+            </label>
+          </div>
+        </div>
         <div class="p-3 bg-slate-900/60 rounded-xl border border-slate-800/80 space-y-1.5 text-[11px] text-slate-400">
           <div class="flex items-center gap-1.5 text-cyan-400 font-medium">
             <span>⚡</span>
@@ -512,6 +579,113 @@
           </button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- LXC_CONSOLE_AND_NET_MODALS -->
+  <!-- LXC WEB CONSOLE MODAL -->
+  <div id="modal-lxc-console" class="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-3 md:p-6 hidden z-50">
+    <div class="glass max-w-4xl w-full rounded-2xl p-4 md:p-6 space-y-3 border border-slate-700 shadow-2xl flex flex-col h-[85vh]">
+      <div class="flex justify-between items-center border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2">
+          <span class="text-xl">💻</span>
+          <div>
+            <h3 class="text-base font-bold text-slate-100 flex items-center gap-2">
+              <span>LXC Консоль:</span>
+              <span id="console-ct-name" class="font-mono text-cyan-400">Kali</span>
+            </h3>
+            <p class="text-[11px] text-slate-400">Прямое подключение к контейнеру (lxc-attach execution engine)</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="clearConsoleOutput()" class="px-2.5 py-1 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300">Очистить</button>
+          <button onclick="closeLxcConsole()" class="text-slate-400 hover:text-white text-lg px-2">✕</button>
+        </div>
+      </div>
+
+      <!-- Quick Command Buttons -->
+      <div class="flex items-center gap-1.5 flex-wrap text-[11px]">
+        <span class="text-slate-500 font-medium mr-1">Быстрые команды:</span>
+        <button onclick="execQuickCmd('ip a')" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 font-mono">ip a</button>
+        <button onclick="execQuickCmd('ps aux')" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 font-mono">ps aux</button>
+        <button onclick="execQuickCmd('cat /etc/os-release')" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 font-mono">os-release</button>
+        <button onclick="execQuickCmd('df -h')" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 font-mono">df -h</button>
+        <button onclick="execQuickCmd('apt update 2>/dev/null || apk update 2>/dev/null || echo ok')" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-mono">обновить пакеты</button>
+        <button onclick="execQuickCmd('apt install -y openssh-server 2>/dev/null || apk add openssh 2>/dev/null; /etc/init.d/ssh start 2>/dev/null || systemctl start ssh 2>/dev/null || true')" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-emerald-300 font-mono">установить SSH</button>
+      </div>
+
+      <!-- Terminal Output Screen -->
+      <div id="console-output-box" class="flex-1 bg-black/90 rounded-xl p-3.5 border border-slate-800 font-mono text-xs text-slate-200 overflow-y-auto terminal-scroll whitespace-pre-wrap leading-relaxed select-text">
+      </div>
+
+      <!-- Command Input Prompt -->
+      <form onsubmit="handleConsoleSubmit(event)" class="flex gap-2 pt-1">
+        <div class="relative flex-1 flex items-center">
+          <span class="absolute left-3 text-cyan-400 font-mono text-sm font-bold">$</span>
+          <input type="text" id="console-input-cmd" autocomplete="off" placeholder="Введите команду внутри контейнера (например: ip a, apt update)..." class="w-full pl-7 pr-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm font-mono text-slate-200 focus:outline-none focus:border-cyan-500">
+        </div>
+        <button type="submit" id="btn-console-exec" class="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold text-xs transition shrink-0">
+          Выполнить (↵)
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- LXC NETWORK & CONNECT MODAL -->
+  <div id="modal-lxc-net" class="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 hidden z-50">
+    <div class="glass max-w-lg w-full rounded-2xl p-6 space-y-4 border border-slate-700 shadow-2xl">
+      <div class="flex justify-between items-center border-b border-slate-800 pb-3">
+        <div class="flex items-center gap-2">
+          <span class="text-xl">🌐</span>
+          <div>
+            <h3 class="text-base font-bold text-slate-100 flex items-center gap-2">
+              <span>Сеть контейнера:</span>
+              <span id="net-modal-ct-name" class="font-mono text-cyan-400">Kali</span>
+            </h3>
+            <p class="text-[11px] text-slate-400">Способы прямого подключения из локальной сети</p>
+          </div>
+        </div>
+        <button onclick="closeLxcNetModal()" class="text-slate-400 hover:text-white">✕</button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div class="p-3 bg-slate-900/60 rounded-xl border border-slate-800 flex justify-between items-center">
+          <div>
+            <span class="text-slate-400">Текущий IP адрес:</span>
+            <div id="net-modal-ip" class="font-mono text-base font-bold text-cyan-300">10.0.3.71</div>
+          </div>
+          <div>
+            <span class="text-slate-400">Режим подключения:</span>
+            <div id="net-modal-mode" class="font-medium text-emerald-400">🛡️ Изолированный NAT (lxcbr0)</div>
+          </div>
+        </div>
+
+        <div class="space-y-2">
+          <div class="font-semibold text-slate-300">💻 1. Прямой доступ со всех ПК и ноутбуков в сети:</div>
+          <p class="text-[11px] text-slate-400">Выполните команду в PowerShell от Администратора, чтобы ПК напрямую открывал веб-порты и пинговал подсеть контейнеров 10.0.3.X:</p>
+          <div class="bg-black/60 rounded-xl p-2.5 border border-slate-800 font-mono text-[11px] text-cyan-300 flex items-center justify-between">
+            <span class="truncate pr-2">route -p add 10.0.3.0 mask 255.255.255.0 192.168.1.82</span>
+            <button onclick="copyRouteCmd()" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-white shrink-0">Копировать</button>
+          </div>
+        </div>
+
+        <div class="space-y-2">
+          <div class="font-semibold text-slate-300">🔑 2. SSH-подключение через шлюз (Jump Host):</div>
+          <div class="bg-black/60 rounded-xl p-2.5 border border-slate-800 font-mono text-[11px] text-amber-300 flex items-center justify-between">
+            <span id="net-modal-ssh-cmd" class="truncate pr-2">ssh -J root@192.168.1.82 root@10.0.3.71</span>
+            <button onclick="copySshJumpCmd()" class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-white shrink-0">Копировать</button>
+          </div>
+        </div>
+
+        <div class="pt-2 border-t border-slate-800 flex items-center justify-between gap-2">
+          <button onclick="toggleNetModeAction()" id="btn-toggle-net-mode" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 transition">
+            🔄 Переключить на Macvlan (LAN Direct)
+          </button>
+          <button onclick="fixNetAction()" class="px-3.5 py-2 rounded-xl bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/40 text-xs font-semibold text-cyan-300 transition">
+            🔧 Исправить DHCP / DNS
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -608,27 +782,51 @@
         // LXC Containers
         const lxcContainer = document.getElementById('lxc-container-list');
         if (!data.lxc || data.lxc.length === 0) {
-          lxcContainer.innerHTML = '<div class="text-xs text-slate-500 italic p-3 text-center bg-slate-900/40 rounded-xl border border-slate-800">Контейнеры не запущены или отсутствуют. Вы можете создать контейнер через SSH: <code>gw lxc create</code>.</div>';
+          lxcContainer.innerHTML = '<div class="text-xs text-slate-500 italic p-3 text-center bg-slate-900/40 rounded-xl border border-slate-800">Контейнеры не запущены или отсутствуют. Нажмите кнопку «Создать контейнер» выше.</div>';
         } else {
-          lxcContainer.innerHTML = data.lxc.map(c => `
-            <div class="p-3 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col sm:flex-row justify-between sm:items-center gap-2 text-xs">
-              <div class="flex items-center gap-2.5">
-                <span class="w-2.5 h-2.5 rounded-full ${c.state === 'RUNNING' ? 'bg-emerald-400' : 'bg-slate-500'}"></span>
+          window.__LXC_CACHE = data.lxc;
+          lxcContainer.innerHTML = data.lxc.map(c => {
+            const isRun = c.state === 'RUNNING';
+            const netLabel = c.net_mode === 'macvlan' ? '🏠 LAN (Macvlan)' : '🛡️ NAT (lxcbr0)';
+            return `
+            <div class="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col md:flex-row justify-between md:items-center gap-2.5 text-xs">
+              <div class="flex items-center gap-2.5 flex-wrap">
+                <span class="w-2.5 h-2.5 rounded-full ${isRun ? 'bg-emerald-400' : 'bg-slate-500'}"></span>
                 <span class="font-bold text-slate-200 text-sm font-mono">${c.name}</span>
-                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold ${c.state === 'RUNNING' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/50' : 'bg-slate-800 text-slate-400'}">${c.state}</span>
-                <span class="text-slate-400 font-mono">${c.ip !== '-' ? c.ip : ''}</span>
+                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold ${isRun ? 'bg-emerald-950 text-emerald-300 border border-emerald-800/50' : 'bg-slate-800 text-slate-400'}">${c.state}</span>
+                <span class="text-cyan-400 font-mono font-medium">${c.ip !== '-' ? c.ip : 'нет IP'}</span>
+                <span class="px-2 py-0.5 rounded-md bg-slate-800/80 text-[10px] text-slate-400 font-mono">${netLabel}</span>
+                ${c.ram && c.ram !== '-' ? `<span class="text-slate-500 text-[11px]">RAM: ${c.ram}</span>` : ''}
               </div>
-              <div class="flex items-center gap-1.5 self-end sm:self-auto">
-                ${c.state === 'RUNNING' ? `
-                  <button onclick="controlLxc('${c.name}', 'restart')" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200">🔄 Restart</button>
-                  <button onclick="controlLxc('${c.name}', 'stop')" class="px-2.5 py-1 rounded-lg bg-amber-950/50 hover:bg-amber-900/60 text-amber-300">⏹️ Stop</button>
+              <div class="flex items-center gap-1.5 self-end md:self-auto flex-wrap">
+                ${isRun ? `
+                  <button onclick="openLxcConsole('${c.name}')" class="px-2.5 py-1.5 rounded-lg bg-cyan-600/30 hover:bg-cyan-600/50 border border-cyan-500/30 text-cyan-200 font-semibold flex items-center gap-1 transition">
+                    <span>💻</span><span>Консоль</span>
+                  </button>
+                  <button onclick="openLxcNetModal('${c.name}', '${c.ip}', '${c.net_mode || 'nat'}')" class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition">
+                    🌐 Сеть
+                  </button>
+                  <button onclick="controlLxc('${c.name}', 'restart')" class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 transition">
+                    🔄 Перезапуск
+                  </button>
+                  <button onclick="controlLxc('${c.name}', 'stop')" class="px-2 py-1.5 rounded-lg bg-amber-950/50 hover:bg-amber-900/60 text-amber-300 transition">
+                    ⏹️ Стоп
+                  </button>
                 ` : `
-                  <button onclick="controlLxc('${c.name}', 'start')" class="px-2.5 py-1 rounded-lg bg-emerald-950/50 hover:bg-emerald-900/60 text-emerald-300">▶️ Start</button>
+                  <button onclick="openLxcNetModal('${c.name}', '${c.ip}', '${c.net_mode || 'nat'}')" class="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition">
+                    🌐 Сеть
+                  </button>
+                  <button onclick="controlLxc('${c.name}', 'start')" class="px-2.5 py-1.5 rounded-lg bg-emerald-950/50 hover:bg-emerald-900/60 text-emerald-300 font-semibold transition">
+                    ▶️ Запуск
+                  </button>
                 `}
-                <button onclick="controlLxc('${c.name}', 'delete')" class="px-2.5 py-1 rounded-lg bg-rose-950/50 hover:bg-rose-900/60 text-rose-300">🗑️</button>
+                <button onclick="controlLxc('${c.name}', 'delete')" class="px-2 py-1.5 rounded-lg bg-rose-950/50 hover:bg-rose-900/60 text-rose-300 transition" title="Удалить контейнер">
+                  🗑️
+                </button>
               </div>
             </div>
-          `).join('');
+            `;
+          }).join('');
         }
 
         // Dynamic Services links & status dots
@@ -678,7 +876,11 @@
           pkiManual.classList.remove('hidden');
         }
 
-        // SSL Card
+        // SSL Card & LocalStorage persistence
+        if (data.ssl && data.ssl.domain) {
+          localStorage.setItem('gw_ssl_domain', data.ssl.domain);
+          localStorage.setItem('gw_ssl_type', data.ssl.type);
+        }
         document.getElementById('val-ssl-mode').innerText = data.ssl.type === 'letsencrypt' ? "Let's Encrypt Wildcard" : "Local CA (*.lan)";
         document.getElementById('val-ssl-domain').innerText = `*.${data.ssl.domain}`;
         if (data.ssl.days_left !== null) {
@@ -900,6 +1102,8 @@
       e.preventDefault();
       const name = document.getElementById('input-lxc-name').value.trim();
       const val = document.getElementById('select-lxc-distro').value;
+      const netModeEl = document.querySelector('input[name="lxc-net-mode"]:checked');
+      const net_mode = netModeEl ? netModeEl.value : 'nat';
       if (!name) return;
 
       const [distro, release] = val.split(':');
@@ -916,7 +1120,7 @@
         const resp = await fetch('/api/lxc/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Gateway-Token': AUTH_TOKEN },
-          body: JSON.stringify({ name, distro, release })
+          body: JSON.stringify({ name, distro, release, net_mode })
         });
         const reader = resp.body.getReader();
         const decoder = new TextDecoder('utf-8');
@@ -953,14 +1157,25 @@
       }
     }
 
-    async function controlLxc(name, action) {
+    async function controlLxc(name, action, extra = {}) {
       if (action === 'delete' && !confirm(`Вы точно хотите безвозвратно удалить контейнер ${name}?`)) return;
       try {
         const resp = await fetch('/api/lxc/control', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Gateway-Token': AUTH_TOKEN },
-          body: JSON.stringify({ name, action })
+          body: JSON.stringify({ name, action, ...extra })
         });
+        const res = await resp.json();
+        if (res.status === 'ok') {
+          fetchStatus();
+        } else {
+          alert('Ошибка: ' + (res.message || res.output || 'Не удалось выполнить действие'));
+        }
+        return res;
+      } catch (e) {
+        alert('Ошибка связи с сервером: ' + e.message);
+      }
+    }
         const res = await resp.json();
         fetchStatus();
       } catch (e) {
@@ -1051,6 +1266,153 @@
     fetchStatus();
     fetchDomains();
     setInterval(fetchStatus, 5000);
+  
+    // LXC_CONSOLE_AND_NETWORK_HANDLERS
+    let currentConsoleContainer = null;
+
+    function openLxcConsole(name) {
+      currentConsoleContainer = name;
+      document.getElementById('console-ct-name').innerText = name;
+      const box = document.getElementById('console-output-box');
+      box.innerText = `[LXC Консоль: Подключение к контейнеру "${name}" через lxc-attach...]
+[Введите команду в поле ниже (например: ip a, uname -a, ps aux, cat /etc/os-release)]
+
+`;
+      document.getElementById('modal-lxc-console').classList.remove('hidden');
+      document.getElementById('console-input-cmd').focus();
+      execLxcCommand(name, 'uname -a');
+    }
+
+    function closeLxcConsole() {
+      document.getElementById('modal-lxc-console').classList.add('hidden');
+      currentConsoleContainer = null;
+    }
+
+    function clearConsoleOutput() {
+      const box = document.getElementById('console-output-box');
+      if (box) box.innerText = '';
+    }
+
+    function execQuickCmd(cmd) {
+      if (!currentConsoleContainer) return;
+      document.getElementById('console-input-cmd').value = cmd;
+      execLxcCommand(currentConsoleContainer, cmd);
+    }
+
+    function handleConsoleSubmit(e) {
+      e.preventDefault();
+      const input = document.getElementById('console-input-cmd');
+      const cmd = input.value.trim();
+      if (!cmd || !currentConsoleContainer) return;
+      input.value = '';
+      execLxcCommand(currentConsoleContainer, cmd);
+    }
+
+    async function execLxcCommand(name, cmd) {
+      const box = document.getElementById('console-output-box');
+      const btn = document.getElementById('btn-console-exec');
+      box.innerText += `
+$ ${cmd}
+`;
+      box.scrollTop = box.scrollHeight;
+      btn.disabled = true;
+
+      try {
+        const resp = await fetch('/api/lxc/exec', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Gateway-Token': AUTH_TOKEN },
+          body: JSON.stringify({ name, cmd })
+        });
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        function read() {
+          reader.read().then(({ done, value }) => {
+            if (done) {
+              btn.disabled = false;
+              box.scrollTop = box.scrollHeight;
+              return;
+            }
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop();
+            for (const chunk of lines) {
+              if (chunk.startsWith('data: ')) {
+                try {
+                  const payload = JSON.parse(chunk.slice(6));
+                  if (payload.line !== undefined) {
+                    box.innerText += payload.line + '\n';
+                    box.scrollTop = box.scrollHeight;
+                  }
+                  if (payload.done) {
+                    btn.disabled = false;
+                  }
+                } catch (e) {}
+              }
+            }
+            read();
+          });
+        }
+        read();
+      } catch (err) {
+        box.innerText += `[Ошибка выполнения: ${err.message}]
+`;
+        btn.disabled = false;
+        box.scrollTop = box.scrollHeight;
+      }
+    }
+
+    let currentNetContainer = null;
+    let currentNetMode = null;
+
+    function openLxcNetModal(name, ip, mode) {
+      currentNetContainer = name;
+      currentNetMode = mode || 'nat';
+      document.getElementById('net-modal-ct-name').innerText = name;
+      document.getElementById('net-modal-ip').innerText = ip !== '-' ? ip : 'Ожидает IP (запустите или выполните fix-net)';
+      document.getElementById('net-modal-mode').innerText = (mode === 'macvlan') ? '🏠 Домашняя сеть (Macvlan)' : '🛡️ Изолированный NAT (lxcbr0)';
+      document.getElementById('net-modal-ssh-cmd').innerText = `ssh -J root@192.168.1.82 root@${ip !== '-' ? ip : '10.0.3.X'}`;
+      
+      const toggleBtn = document.getElementById('btn-toggle-net-mode');
+      if (mode === 'macvlan') {
+        toggleBtn.innerText = '🛡️ Переключить на NAT (lxcbr0)';
+      } else {
+        toggleBtn.innerText = '🏠 Переключить на Macvlan (LAN Direct)';
+      }
+      document.getElementById('modal-lxc-net').classList.remove('hidden');
+    }
+
+    function closeLxcNetModal() {
+      document.getElementById('modal-lxc-net').classList.add('hidden');
+      currentNetContainer = null;
+    }
+
+    function copyRouteCmd() {
+      const cmd = 'route -p add 10.0.3.0 mask 255.255.255.0 192.168.1.82';
+      navigator.clipboard.writeText(cmd).then(() => alert('Команда для Windows PowerShell скопирована в буфер!
+Выполните от имени Администратора:\n' + cmd));
+    }
+
+    function copySshJumpCmd() {
+      const cmd = document.getElementById('net-modal-ssh-cmd').innerText;
+      navigator.clipboard.writeText(cmd).then(() => alert('Команда SSH скопирована: ' + cmd));
+    }
+
+    async function toggleNetModeAction() {
+      if (!currentNetContainer) return;
+      const targetMode = currentNetMode === 'macvlan' ? 'nat' : 'macvlan';
+      if (!confirm(`Переключить контейнер ${currentNetContainer} в режим "${targetMode}"? (Контейнер будет перезапущен)`)) return;
+      closeLxcNetModal();
+      await controlLxc(currentNetContainer, 'set_net_mode', { mode: targetMode });
+    }
+
+    async function fixNetAction() {
+      if (!currentNetContainer) return;
+      closeLxcNetModal();
+      await controlLxc(currentNetContainer, 'fix_net');
+    }
+  
   </script>
 </body>
 </html>

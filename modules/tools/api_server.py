@@ -144,8 +144,128 @@ def get_lxc_templates():
     return templates
 
 
+def autoseed_container_network(name, dns="10.0.3.1"):
+    """Configures network interfaces and DNS inside container rootfs so DHCP works immediately."""
+    base_paths = ["/var/lib/lxc", "/srv/storage/lxc"]
+    rootfs = None
+    for p in base_paths:
+        cand = os.path.join(p, name, "rootfs")
+        if os.path.isdir(cand):
+            rootfs = cand
+            break
+    if not rootfs:
+        return
+
+    # 1. /etc/network/interfaces (Alpine, Debian, Ubuntu, Kali)
+    net_dir = os.path.join(rootfs, "etc", "network")
+    if os.path.isdir(net_dir):
+        ifaces = os.path.join(net_dir, "interfaces")
+        content = ""
+        if os.path.exists(ifaces):
+            try:
+                with open(ifaces, "r", encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                pass
+        if "eth0" not in content:
+            try:
+                with open(ifaces, "a", encoding="utf-8") as f:
+                    f.write("\nauto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n")
+            except Exception:
+                pass
+
+    # 2. systemd-networkd (Debian, Ubuntu, Arch, Fedora, Kali)
+    systemd_dir = os.path.join(rootfs, "etc", "systemd")
+    if os.path.isdir(systemd_dir):
+        net_conf_dir = os.path.join(systemd_dir, "network")
+        os.makedirs(net_conf_dir, exist_ok=True)
+        conf_file = os.path.join(net_conf_dir, "80-container-eth0.network")
+        try:
+            with open(conf_file, "w", encoding="utf-8") as f:
+                f.write("[Match]\nName=eth0\n\n[Network]\nDHCP=yes\n")
+        except Exception:
+            pass
+        wants_dir = os.path.join(systemd_dir, "system", "multi-user.target.wants")
+        os.makedirs(wants_dir, exist_ok=True)
+        for srv in ["systemd-networkd.service", "systemd-resolved.service"]:
+            for prefix in ["/lib/systemd/system", "/usr/lib/systemd/system"]:
+                target = prefix + "/" + srv
+                link = os.path.join(wants_dir, srv)
+                if os.path.exists(os.path.join(rootfs, target.lstrip("/"))) and not os.path.exists(link):
+                    try:
+                        os.symlink(target, link)
+                    except Exception:
+                        pass
+
+    # 3. /etc/resolv.conf
+    resolv_file = os.path.join(rootfs, "etc", "resolv.conf")
+    if not os.path.islink(resolv_file):
+        try:
+            with open(resolv_file, "w", encoding="utf-8") as f:
+                f.write(f"nameserver {dns}\nnameserver 1.1.1.1\n")
+        except Exception:
+            pass
+
+
+def set_container_net_mode(name, mode="macvlan"):
+    """Sets network mode to 'macvlan' (LAN direct) or 'nat' (lxcbr0)."""
+    base_paths = ["/var/lib/lxc", "/srv/storage/lxc"]
+    conf_path = None
+    for p in base_paths:
+        cand = os.path.join(p, name, "config")
+        if os.path.isfile(cand):
+            conf_path = cand
+            break
+    if not conf_path:
+        return False, "Конфигурация контейнера не найдена"
+
+    try:
+        with open(conf_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        new_lines = [l for l in lines if not l.strip().startswith("lxc.net.0.")]
+
+        lan_if = "eth0"
+        try:
+            with open("/proc/net/route", "r") as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[1] == "00000000":
+                        lan_if = parts[0]
+                        break
+        except Exception:
+            pass
+
+        import random
+        hw_suffix = ":".join(f"{random.randint(0, 255):02x}" for _ in range(3))
+        hwaddr = f"10:66:6a:{hw_suffix}"
+
+        if mode == "macvlan":
+            new_lines.append("\n# Network: Macvlan (LAN Direct)\n")
+            new_lines.append("lxc.net.0.type = macvlan\n")
+            new_lines.append("lxc.net.0.macvlan.mode = bridge\n")
+            new_lines.append(f"lxc.net.0.link = {lan_if}\n")
+            new_lines.append("lxc.net.0.flags = up\n")
+            new_lines.append(f"lxc.net.0.hwaddr = {hwaddr}\n")
+        else:
+            new_lines.append("\n# Network: NAT (lxcbr0)\n")
+            new_lines.append("lxc.net.0.type = veth\n")
+            new_lines.append("lxc.net.0.link = lxcbr0\n")
+            new_lines.append("lxc.net.0.flags = up\n")
+            new_lines.append(f"lxc.net.0.hwaddr = {hwaddr}\n")
+
+        with open(conf_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+
+        dns = "10.0.3.1" if mode == "nat" else "192.168.1.82"
+        autoseed_container_network(name, dns)
+        return True, f"Режим сети успешно изменен на {mode}"
+    except Exception as e:
+        return False, str(e)
+
+
 def get_lxc_containers():
-    """Lists LXC containers on Alpine host via lxc-info."""
+    """Lists LXC containers on Alpine host via lxc-info with network mode detection."""
     containers = []
     try:
         res = subprocess.run(["lxc-ls", "-1"], capture_output=True, text=True)
@@ -154,17 +274,35 @@ def get_lxc_containers():
             for name in names:
                 info_res = subprocess.run(["lxc-info", "-n", name], capture_output=True, text=True)
                 state = "STOPPED"
-                ip = "-"
+                ips = []
                 ram = "-"
                 for line in info_res.stdout.splitlines():
                     line = line.strip()
                     if line.startswith("State:"):
                         state = line.split(":", 1)[1].strip()
                     elif line.startswith("IP:"):
-                        ip = line.split(":", 1)[1].strip()
+                        val = line.split(":", 1)[1].strip()
+                        if val and val != "-":
+                            ips.append(val)
                     elif line.startswith("Memory use:"):
                         ram = line.split(":", 1)[1].strip()
-                containers.append({"name": name, "state": state, "ip": ip, "ram": ram})
+
+                ip = ", ".join(ips) if ips else "-"
+
+                # Detect network mode from config
+                net_mode = "nat"
+                for base in ["/var/lib/lxc", "/srv/storage/lxc"]:
+                    cf = os.path.join(base, name, "config")
+                    if os.path.isfile(cf):
+                        try:
+                            with open(cf, "r", encoding="utf-8") as f:
+                                if "lxc.net.0.type = macvlan" in f.read():
+                                    net_mode = "macvlan"
+                        except Exception:
+                            pass
+                        break
+
+                containers.append({"name": name, "state": state, "ip": ip, "ram": ram, "net_mode": net_mode})
     except Exception:
         pass
     return containers
@@ -413,7 +551,7 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         body_bytes = self.rfile.read(content_length) if content_length > 0 else b"{}"
         try:
-            payload = json.loads(body_bytes.decode("utf-8")) if body_bytes else {}
+            payload = json.loads(body_bytes.decode("utf-8-sig")) if body_bytes else {}
         except Exception:
             payload = {}
 
@@ -512,20 +650,57 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
         if path == "/api/lxc/control":
             name = payload.get("name", "").strip()
             action = payload.get("action", "start")
-            if not name or action not in ["start", "stop", "restart", "delete"]:
+            clean_name = "".join(c for c in name if c.isalnum() or c in "-_")
+            if not clean_name or action not in ["start", "stop", "restart", "delete", "fix_net", "set_net_mode"]:
                 return self.send_json(400, {"status": "error", "message": "Неверные параметры LXC"})
-            cmd_action = "rm" if action == "delete" else action
-            res = subprocess.run([GATEWAY_BIN, "lxc", cmd_action, name], capture_output=True, text=True)
-            return self.send_json(200, {"status": "ok" if res.returncode == 0 else "error", "output": res.stdout + res.stderr})
 
-        # 7.1 LXC create container (non-interactive via SSE stream or background subprocess)
+            if action == "delete":
+                subprocess.run(["lxc-stop", "-n", clean_name, "-k"], capture_output=True)
+                res = subprocess.run(["lxc-destroy", "-n", clean_name, "-s", "-f"], capture_output=True, text=True)
+                return self.send_json(200, {"status": "ok" if res.returncode == 0 else "error", "output": res.stdout + res.stderr})
+
+            if action == "start":
+                autoseed_container_network(clean_name)
+                res = subprocess.run(["lxc-start", "-n", clean_name], capture_output=True, text=True)
+                return self.send_json(200, {"status": "ok" if res.returncode == 0 else "error", "output": res.stdout + res.stderr})
+
+            if action == "stop":
+                res = subprocess.run(["lxc-stop", "-n", clean_name, "-t", "5"], capture_output=True, text=True)
+                return self.send_json(200, {"status": "ok" if res.returncode == 0 else "error", "output": res.stdout + res.stderr})
+
+            if action == "restart":
+                subprocess.run(["lxc-stop", "-n", clean_name, "-t", "5"], capture_output=True)
+                time.sleep(1)
+                autoseed_container_network(clean_name)
+                res = subprocess.run(["lxc-start", "-n", clean_name], capture_output=True, text=True)
+                return self.send_json(200, {"status": "ok" if res.returncode == 0 else "error", "output": res.stdout + res.stderr})
+
+            if action == "fix_net":
+                autoseed_container_network(clean_name)
+                res = subprocess.run(["lxc-attach", "-n", clean_name, "--", "sh", "-c", "ip link set eth0 up 2>/dev/null; dhclient eth0 2>/dev/null || udhcpc -i eth0 2>/dev/null || true"], capture_output=True, text=True)
+                return self.send_json(200, {"status": "ok" if res.returncode == 0 else "error", "output": res.stdout + res.stderr})
+
+            if action == "set_net_mode":
+                mode = payload.get("mode", "nat")
+                was_running = False
+                info = subprocess.run(["lxc-info", "-n", clean_name], capture_output=True, text=True)
+                if "State:          RUNNING" in info.stdout or "State:   RUNNING" in info.stdout:
+                    was_running = True
+                    subprocess.run(["lxc-stop", "-n", clean_name, "-t", "5"], capture_output=True)
+                ok, msg = set_container_net_mode(clean_name, mode)
+                if was_running:
+                    subprocess.run(["lxc-start", "-n", clean_name], capture_output=True)
+                return self.send_json(200 if ok else 400, {"status": "ok" if ok else "error", "message": msg})
+
+        # 7.1 LXC create container (non-interactive via SSE stream)
         if path == "/api/lxc/create":
             name = payload.get("name", "").strip()
             distro = payload.get("distro", "alpine").strip().lower()
             release = payload.get("release", "3.24").strip()
+            net_mode = payload.get("net_mode", "nat").strip().lower()
             if not name:
                 return self.send_json(400, {"status": "error", "message": "Имя контейнера обязательно"})
-            
+
             # Sanitize name
             clean_name = "".join(c for c in name if c.isalnum() or c in "-_")
             if not clean_name:
@@ -559,9 +734,53 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 proc.wait()
                 if proc.returncode == 0:
+                    # Apply selected network mode
+                    if net_mode == "macvlan":
+                        set_container_net_mode(clean_name, "macvlan")
+                    else:
+                        autoseed_container_network(clean_name, "10.0.3.1")
                     # Auto start container
                     subprocess.run(["lxc-start", "-n", clean_name], capture_output=True)
-                    self.wfile.write(f"data: {json.dumps({'line': f'[✔] Контейнер {clean_name} успешно создан и запущен!'})}\n\n".encode("utf-8"))
+                    self.wfile.write(f"data: {json.dumps({'line': f'[✔] Контейнер {clean_name} успешно создан и запущен (сеть: {net_mode})!'})}\n\n".encode("utf-8"))
+                done_chunk = f"data: {json.dumps({'done': True, 'code': proc.returncode})}\n\n"
+                self.wfile.write(done_chunk.encode("utf-8"))
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                proc.kill()
+            return
+
+        # 7.2 LXC execute command inside container (Web Console / Terminal via SSE)
+        if path == "/api/lxc/exec":
+            name = payload.get("name", "").strip()
+            cmd = payload.get("cmd", "").strip()
+            clean_name = "".join(c for c in name if c.isalnum() or c in "-_")
+            if not clean_name:
+                return self.send_json(400, {"status": "error", "message": "Недопустимое имя контейнера"})
+            if not cmd:
+                return self.send_json(400, {"status": "error", "message": "Команда не указана"})
+
+            # Stream the output via SSE
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            full_cmd = ["lxc-attach", "-n", clean_name, "--", "sh", "-c", cmd]
+            proc = subprocess.Popen(
+                full_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            try:
+                for line in proc.stdout:
+                    sse_chunk = f"data: {json.dumps({'line': line.rstrip()})}\n\n"
+                    self.wfile.write(sse_chunk.encode("utf-8"))
+                    self.wfile.flush()
+                proc.wait()
                 done_chunk = f"data: {json.dumps({'done': True, 'code': proc.returncode})}\n\n"
                 self.wfile.write(done_chunk.encode("utf-8"))
                 self.wfile.flush()

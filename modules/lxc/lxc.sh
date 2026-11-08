@@ -498,9 +498,12 @@ lxc_control() {
             ;;
         delete|destroy)
             ui_warn_msg "ВНИМАНИЕ! Контейнер '${NAME}' и все его файлы будут безвозвратно удалены."
-            printf "Вы уверены? (yes/no): "
-            read -r CONFIRM
-            if [ "$CONFIRM" = "yes" ]; then
+            CONFIRM="${3:-}"
+            if [ "$CONFIRM" != "yes" ] && [ "$CONFIRM" != "-y" ] && [ -t 0 ]; then
+                printf "Вы уверены? (yes/no): "
+                read -r CONFIRM
+            fi
+            if [ "$CONFIRM" = "yes" ] || [ "$CONFIRM" = "-y" ]; then
                 lxc-stop -n "$NAME" -k 2>/dev/null || true
                 lxc-destroy -n "$NAME" -s -f && ui_ok_msg "Контейнер ${NAME} успешно удален." || ui_warn_msg "Ошибка удаления."
             else
