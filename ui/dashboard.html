@@ -469,30 +469,47 @@
 
   <!-- CREATE LXC MODAL -->
   <div id="modal-create-lxc" class="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 hidden z-50">
-    <div class="glass max-w-md w-full rounded-2xl p-6 space-y-4 border border-slate-700 shadow-2xl">
+    <div class="glass max-w-lg w-full rounded-2xl p-6 space-y-4 border border-slate-700 shadow-2xl">
       <div class="flex justify-between items-center border-b border-slate-800 pb-3">
-        <h3 class="text-lg font-bold text-slate-200">📦 Создание LXC-контейнера</h3>
-        <button onclick="closeCreateLxcModal()" class="text-slate-400 hover:text-white">✕</button>
+        <div class="flex items-center gap-2">
+          <span class="text-xl">📦</span>
+          <h3 class="text-lg font-bold text-slate-200">Создание LXC-контейнера</h3>
+        </div>
+        <button onclick="closeCreateLxcModal()" class="text-slate-400 hover:text-white transition">✕</button>
       </div>
       <form onsubmit="handleCreateLxc(event)" class="space-y-4">
         <div>
           <label class="block text-xs font-semibold text-slate-300 mb-1.5">Имя контейнера (латиница, цифры, дефис):</label>
-          <input type="text" id="input-lxc-name" required pattern="[a-zA-Z0-9_-]+" placeholder="my-server или bot-node" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
+          <input type="text" id="input-lxc-name" required pattern="[a-zA-Z0-9_-]+" placeholder="например, my-srv, nextcloud, bot" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
         </div>
         <div>
-          <label class="block text-xs font-semibold text-slate-300 mb-1.5">Дистрибутив Linux:</label>
-          <select id="select-lxc-distro" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500">
-            <option value="alpine" selected>Alpine Linux 3.24 (Ультралегкий ~15 МБ, быстрый старт)</option>
-            <option value="debian">Debian 12 Bookworm (Максимальная стабильность, apt)</option>
-            <option value="ubuntu">Ubuntu 24.04 LTS Noble (Широкая поддержка софта)</option>
+          <div class="flex justify-between items-center mb-1.5">
+            <label class="block text-xs font-semibold text-slate-300">Официальный образ дистрибутива (LXC Registry):</label>
+            <span id="lxc-template-count" class="text-[10px] text-cyan-400 font-mono">загрузка каталога...</span>
+          </div>
+          <select id="select-lxc-distro" class="w-full px-3.5 py-2.5 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 max-h-48">
+            <option value="alpine:3.24" selected>Alpine Linux 3.24 (Ультралегкий ~15 МБ, musl)</option>
+            <option value="debian:bookworm">Debian 12 Bookworm (Стабильный glibc, apt)</option>
+            <option value="ubuntu:noble">Ubuntu 24.04 LTS Noble (Широкая экосистема)</option>
           </select>
         </div>
-        <p class="text-[11px] text-slate-400 leading-relaxed">
-          Контейнер автоматически подключится к мосту <code>lxcbr0</code> (10.0.3.X), получит DNS AdGuard Home и защищенный доступ через Sing-Box.
-        </p>
+        <div class="p-3 bg-slate-900/60 rounded-xl border border-slate-800/80 space-y-1.5 text-[11px] text-slate-400">
+          <div class="flex items-center gap-1.5 text-cyan-400 font-medium">
+            <span>⚡</span>
+            <span>Автоматическая интеграция в шлюз:</span>
+          </div>
+          <ul class="list-disc list-inside space-y-0.5 text-slate-400">
+            <li>Сетевой изолированный мост <code class="text-slate-300">lxcbr0</code> (подсеть 10.0.3.0/24)</li>
+            <li>DNS-резолвинг и Ad-blocking через <code class="text-slate-300">AdGuard Home</code></li>
+            <li>Маршрутизация заблокированных ресурсов через <code class="text-slate-300">Sing-Box</code></li>
+          </ul>
+        </div>
         <div class="flex justify-end gap-2 pt-2">
-          <button type="button" onclick="closeCreateLxcModal()" class="px-4 py-2 text-xs font-semibold rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700">Отмена</button>
-          <button type="submit" id="btn-submit-lxc" class="px-4 py-2 text-xs font-semibold rounded-xl bg-cyan-600 text-white hover:bg-cyan-500">Создать и запустить</button>
+          <button type="button" onclick="closeCreateLxcModal()" class="px-4 py-2 text-xs font-semibold rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700 transition">Отмена</button>
+          <button type="submit" id="btn-submit-lxc" class="px-5 py-2 text-xs font-semibold rounded-xl bg-cyan-600 text-white hover:bg-cyan-500 shadow-lg shadow-cyan-600/20 transition flex items-center gap-1.5">
+            <span>🚀</span>
+            <span>Развернуть контейнер</span>
+          </button>
         </div>
       </form>
     </div>
@@ -798,9 +815,81 @@
       }
     }
 
+    let cachedLxcTemplates = null;
+
+    async function loadLxcTemplates() {
+      const select = document.getElementById('select-lxc-distro');
+      const countBadge = document.getElementById('lxc-template-count');
+      if (!select) return;
+
+      if (cachedLxcTemplates && cachedLxcTemplates.length > 0) {
+        populateLxcSelect(cachedLxcTemplates);
+        return;
+      }
+
+      try {
+        if (countBadge) countBadge.innerText = 'получение каталога...';
+        const res = await fetch('/api/lxc/templates', {
+          headers: { 'X-Gateway-Token': AUTH_TOKEN }
+        });
+        const data = await res.json();
+        if (data.templates && data.templates.length > 0) {
+          cachedLxcTemplates = data.templates;
+          populateLxcSelect(data.templates);
+        } else {
+          if (countBadge) countBadge.innerText = 'каталог по умолчанию';
+        }
+      } catch (e) {
+        console.error('Ошибка загрузки шаблонов LXC:', e);
+        if (countBadge) countBadge.innerText = 'офлайн каталог';
+      }
+    }
+
+    function populateLxcSelect(templates) {
+      const select = document.getElementById('select-lxc-distro');
+      const countBadge = document.getElementById('lxc-template-count');
+      if (!select) return;
+
+      // Group templates by distro
+      const groups = {};
+      templates.forEach(t => {
+        const d = t.distro;
+        if (!groups[d]) groups[d] = [];
+        groups[d].push(t);
+      });
+
+      const distros = Object.keys(groups).sort();
+      let html = '';
+
+      // Priority distros first if available
+      const priority = ['alpine', 'debian', 'ubuntu', 'archlinux', 'fedora'];
+      const sortedDistros = [
+        ...priority.filter(p => distros.includes(p)),
+        ...distros.filter(d => !priority.includes(d))
+      ];
+
+      for (const d of sortedDistros) {
+        const list = groups[d];
+        const distroTitle = d.charAt(0).toUpperCase() + d.slice(1);
+        html += `<optgroup label="${distroTitle} (${list.length} версий)">`;
+        for (const item of list) {
+          const val = `${item.distro}:${item.release}`;
+          const isSelected = val === 'alpine:3.24' ? 'selected' : '';
+          html += `<option value="${val}" ${isSelected}>${item.label}</option>`;
+        }
+        html += `</optgroup>`;
+      }
+
+      select.innerHTML = html;
+      if (countBadge) {
+        countBadge.innerText = `${templates.length} образов доступно`;
+      }
+    }
+
     function openCreateLxcModal() {
       document.getElementById('modal-create-lxc').classList.remove('hidden');
       document.getElementById('input-lxc-name').focus();
+      loadLxcTemplates();
     }
 
     function closeCreateLxcModal() {
@@ -810,22 +899,24 @@
     async function handleCreateLxc(e) {
       e.preventDefault();
       const name = document.getElementById('input-lxc-name').value.trim();
-      const distro = document.getElementById('select-lxc-distro').value;
+      const val = document.getElementById('select-lxc-distro').value;
       if (!name) return;
+
+      const [distro, release] = val.split(':');
       closeCreateLxcModal();
 
       const box = document.getElementById('terminal-box');
       const out = document.getElementById('terminal-output');
       const title = document.getElementById('terminal-title');
       box.classList.remove('hidden');
-      out.innerText = `[Создание LXC-контейнера "${name}" (${distro})... Скачивание rootfs...]\n`;
+      out.innerText = `[Создание LXC-контейнера "${name}" (${distro} ${release || 'default'})... Скачивание rootfs...]\n`;
       title.innerText = `LXC: Создание ${name}`;
 
       try {
         const resp = await fetch('/api/lxc/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Gateway-Token': AUTH_TOKEN },
-          body: JSON.stringify({ name, distro })
+          body: JSON.stringify({ name, distro, release })
         });
         const reader = resp.body.getReader();
         const decoder = new TextDecoder('utf-8');

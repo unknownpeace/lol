@@ -89,6 +89,61 @@ def get_custom_nodes():
     return nodes
 
 
+def get_lxc_templates():
+    """Fetches and caches the official full list of templates from images.linuxcontainers.org for the host architecture."""
+    arch = "amd64" if os.uname().machine == "x86_64" else "arm64"
+    cache_file = f"/tmp/lxc_templates_{arch}.json"
+    
+    # Check cache (fresh for 4 hours)
+    if os.path.exists(cache_file):
+        try:
+            mtime = os.path.getmtime(cache_file)
+            if time.time() - mtime < 14400:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+
+    templates = []
+    url = "https://images.linuxcontainers.org/meta/1.0/index-system"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Gateway-LXC-Client/2026"})
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            content = resp.read().decode("utf-8", errors="ignore")
+            seen = set()
+            for line in content.splitlines():
+                parts = line.strip().split(";")
+                if len(parts) >= 4 and parts[2] == arch and parts[3] == "default":
+                    distro, release = parts[0], parts[1]
+                    key = (distro, release)
+                    if key not in seen:
+                        seen.add(key)
+                        templates.append({"distro": distro, "release": release, "label": f"{distro.capitalize()} {release}"})
+    except Exception:
+        pass
+
+    # If remote fetch fails, provide standard fallback catalog
+    if not templates:
+        fallback = [
+            ("alpine", "3.24"), ("alpine", "3.23"), ("alpine", "3.22"), ("alpine", "edge"),
+            ("debian", "bookworm"), ("debian", "trixie"),
+            ("ubuntu", "noble"), ("ubuntu", "jammy"),
+            ("archlinux", "current"), ("fedora", "43"), ("fedora", "44"),
+            ("almalinux", "9"), ("almalinux", "10"), ("rockylinux", "9"), ("rockylinux", "10"),
+            ("opensuse", "tumbleweed"), ("openwrt", "25.12"), ("voidlinux", "current")
+        ]
+        templates = [{"distro": d, "release": r, "label": f"{d.capitalize()} {r}"} for d, r in fallback]
+
+    templates.sort(key=lambda x: (x["distro"], x["release"]))
+    try:
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(templates, f)
+    except Exception:
+        pass
+
+    return templates
+
+
 def get_lxc_containers():
     """Lists LXC containers on Alpine host via lxc-info."""
     containers = []
@@ -325,6 +380,9 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
                     proxy_list = [l.strip() for l in f if l.strip() and not l.startswith("#")]
             return self.send_json(200, {"direct": direct_list, "proxy": proxy_list})
 
+        if path == "/api/lxc/templates":
+            return self.send_json(200, {"templates": get_lxc_templates()})
+
         if path == "/api/backup/download":
             backup_file = "/root/gateway_backup.tar.gz"
             if not os.path.exists(backup_file):
@@ -473,15 +531,8 @@ class GatewayApiHandler(BaseHTTPRequestHandler):
             if not clean_name:
                 return self.send_json(400, {"status": "error", "message": "Недопустимое имя контейнера"})
 
-            # Pre-set valid distros
-            dist_map = {
-                "alpine": ("alpine", "3.24"),
-                "debian": ("debian", "bookworm"),
-                "ubuntu": ("ubuntu", "noble")
-            }
-            d_name, d_rel = dist_map.get(distro, ("alpine", "3.24"))
-            if release and distro not in dist_map:
-                d_rel = release
+            d_name = distro
+            d_rel = release if release else "default"
 
             # Stream the creation via SSE
             self.send_response(200)
