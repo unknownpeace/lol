@@ -1,3 +1,24 @@
+#!/bin/sh
+set -e
+
+# ==============================================================================
+# Модуль Samba (SMB2/3) + WSDD + Avahi
+# Единое сетевое хранилище (Storage, Music, Videos, Downloads)
+# ==============================================================================
+
+if [ -z "${GATEWAY_DIR:-}" ]; then
+    GATEWAY_DIR="$(cd -P "$(dirname "$0")/../.." && pwd)"
+    . "${GATEWAY_DIR}/lib/constants.sh"
+    . "${GATEWAY_DIR}/lib/ui.sh"
+    . "${GATEWAY_DIR}/lib/core.sh"
+    . "${GATEWAY_DIR}/lib/env.sh"
+    . "${GATEWAY_DIR}/lib/env_store.sh"
+    . "${GATEWAY_DIR}/modules/network/lan.sh"
+    . "${GATEWAY_DIR}/modules/network/firewall.sh"
+    . "${GATEWAY_DIR}/modules/adguard/adguard.sh"
+    . "${GATEWAY_DIR}/modules/homelab/registry.sh"
+fi
+
 setup_wsdd_and_avahi() {
     LAN_IF=$(get_lan_ifname)
     HN_SHORT=$(hostname -s 2>/dev/null || echo "homelab")
@@ -199,7 +220,7 @@ write_samba_config() {
    dos charset = CP866
 
 [storage]
-   comment = Homelab Unified Storage (Music, Videos, Downloads)
+   comment = Homelab Unified Storage
    path = ${STORAGE_ROOT}
    browseable = yes
    writable = yes
@@ -223,8 +244,56 @@ write_samba_config() {
    hide dot files = yes
 
 [Music]
-   comment = Homelab Music Library (Navidrome & Jellyfin)
+   comment = Homelab Music Library
    path = ${STORAGE_MUSIC}
+   browseable = yes
+   writable = yes
+   read only = no
+   guest ok = no
+   valid users = ${SMB_USER} @${MEDIA_GROUP}
+   write list = ${SMB_USER} @${MEDIA_GROUP}
+   force user = ${SMB_USER}
+   force group = ${MEDIA_GROUP}
+   create mask = 0664
+   force create mode = 0664
+   directory mask = 2775
+   force directory mode = 2775
+   inherit permissions = yes
+   inherit acls = yes
+   map archive = no
+   map hidden = no
+   map system = no
+   store dos attributes = no
+   mangled names = no
+   hide dot files = yes
+
+[Videos]
+   comment = Homelab Videos Library
+   path = ${STORAGE_VIDEOS}
+   browseable = yes
+   writable = yes
+   read only = no
+   guest ok = no
+   valid users = ${SMB_USER} @${MEDIA_GROUP}
+   write list = ${SMB_USER} @${MEDIA_GROUP}
+   force user = ${SMB_USER}
+   force group = ${MEDIA_GROUP}
+   create mask = 0664
+   force create mode = 0664
+   directory mask = 2775
+   force directory mode = 2775
+   inherit permissions = yes
+   inherit acls = yes
+   map archive = no
+   map hidden = no
+   map system = no
+   store dos attributes = no
+   mangled names = no
+   hide dot files = yes
+
+[Downloads]
+   comment = Homelab Downloads & Torrents
+   path = ${STORAGE_DOWNLOADS}
    browseable = yes
    writable = yes
    read only = no
@@ -315,21 +384,23 @@ install_module_samba() {
 
 remove_module_samba() {
     echo "Остановка и отключение Samba, WSDD и Avahi..."
-    service_ctl samba stop
-    service_ctl samba disable
-    service_ctl wsdd stop
-    service_ctl wsdd disable
-    service_ctl avahi-daemon stop
-    service_ctl avahi-daemon disable
+    service_ctl samba stop || true
+    service_ctl samba disable || true
+    service_ctl wsdd stop || true
+    service_ctl wsdd disable || true
+    service_ctl avahi-daemon stop || true
+    service_ctl avahi-daemon disable || true
     set_module_state "samba" "no"
     echo "${C_GRN}[✓] Модуль Samba отключен (все файлы в ${STORAGE_ROOT} сохранены).${C_RES}"
     return 0
 }
 
-# ==============================================================================
-# Прикладные модули Homelab (Vaultwarden, Forgejo, Server-Code, Navidrome,
-# Jellyfin, yt-dlp Web UI, qBittorrent-nox), Архитектура Медиатеки,
-# Единый модуль тестирования прав доступа и Резервное копирование
-# ==============================================================================
-
-# 1. Модуль Vaultwarden (Локальный менеджер паролей Bitwarden)
+if [ "${0##*/}" = "samba.sh" ]; then
+    case "${1:-status}" in
+        install) install_module_samba "${2:-auto}" ;;
+        remove)  remove_module_samba ;;
+        restart) service_ctl samba restart ;;
+        status)  service_ctl samba status ;;
+        *)       echo "Использование: $0 [install|remove|restart|status]" ;;
+    esac
+fi

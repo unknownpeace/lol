@@ -153,7 +153,6 @@ gateway_cli_dispatch() {
             disk|disks|storage) manage_external_disks_menu ;;
             unlock)             unlock_external_storage_cli ;;
             lock|eject)         unmount_external_storage_safe ;;
-            media)              show_media_architecture_advisor ;;
             install)            [ -n "${3:-}" ] && homelab_module_dispatch "$(resolve_homelab_module_id "$3" || printf "%s" "$3")" "install" || prompt_homelab_modules_wizard ;;
             remove)             [ -n "${3:-}" ] && homelab_module_dispatch "$(resolve_homelab_module_id "$3" || printf "%s" "$3")" "remove" ;;
             restart)            [ -n "${3:-}" ] && homelab_module_dispatch "$(resolve_homelab_module_id "$3" || printf "%s" "$3")" "restart" ;;

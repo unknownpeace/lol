@@ -7,7 +7,7 @@ print_homelab_services_table() {
 
     ui_box_top "🏠 МОДУЛИ ДОМАШНЕГО СЕРВЕРА (ALPINE HOMELAB & MEDIA STACK)"
     ui_box_row "Хранилище ${STORAGE_ROOT}: ${DISK_BAR} ▸ ${C_CYN}${DISK_BADGE}${C_RES}"
-    ui_box_sep "СПИСОК МОДУЛЕЙ [1-9]"
+    ui_box_sep "СПИСОК МОДУЛЕЙ [1-7]"
     IDX_M=0
     while IFS='|' read -r M_ID M_EN M_SVC M_PORT M_DOM _M_USR M_TITLE; do
         case "$M_ID" in ''|\#*) continue ;; esac

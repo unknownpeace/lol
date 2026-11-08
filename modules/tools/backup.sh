@@ -13,10 +13,6 @@ create_unified_backup() {
             sqlite3 /var/lib/vaultwarden/db.sqlite3 ".backup '${STAGE_DIR}/sqlite_dumps/vaultwarden.sqlite3'" 2>/dev/null || true
         [ -f /var/lib/forgejo/data/forgejo.db ] && \
             sqlite3 /var/lib/forgejo/data/forgejo.db ".backup '${STAGE_DIR}/sqlite_dumps/forgejo.sqlite3'" 2>/dev/null || true
-        [ -f /var/lib/navidrome/navidrome.db ] && \
-            sqlite3 /var/lib/navidrome/navidrome.db ".backup '${STAGE_DIR}/sqlite_dumps/navidrome.sqlite3'" 2>/dev/null || true
-        [ -f /var/lib/jellyfin/data/jellyfin.db ] && \
-            sqlite3 /var/lib/jellyfin/data/jellyfin.db ".backup '${STAGE_DIR}/sqlite_dumps/jellyfin.sqlite3'" 2>/dev/null || true
     fi
 
     # 2. Сбор всех конфигурационных директорий, секретов и локального CA Caddy
@@ -32,9 +28,8 @@ create_unified_backup() {
     [ -f /etc/conf.d/vaultwarden ] && BACKUP_PATHS="$BACKUP_PATHS /etc/conf.d/vaultwarden"
     [ -d /var/lib/vaultwarden ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/vaultwarden"
     [ -d /etc/forgejo ] && BACKUP_PATHS="$BACKUP_PATHS /etc/forgejo"
-    [ -d /etc/navidrome ] && BACKUP_PATHS="$BACKUP_PATHS /etc/navidrome"
-    [ -d /etc/jellyfin ] && BACKUP_PATHS="$BACKUP_PATHS /etc/jellyfin"
-    [ -d /var/lib/qbittorrent/.config ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/qbittorrent/.config"
+    [ -d /var/lib/transmission/config ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/transmission/config"
+    [ -d /opt/metube ] && BACKUP_PATHS="$BACKUP_PATHS /opt/metube"
     [ "$INCLUDE_MEDIA" = "yes" ] && [ -d "$STORAGE_ROOT" ] && BACKUP_PATHS="$BACKUP_PATHS $STORAGE_ROOT"
 
     umask 077
@@ -100,14 +95,6 @@ restore_unified_backup() {
         if [ -f "${STAGE_RESTORE}/forgejo.sqlite3" ]; then
             rm -f /var/lib/forgejo/data/forgejo.db-wal /var/lib/forgejo/data/forgejo.db-shm 2>/dev/null || true
             cp -f "${STAGE_RESTORE}/forgejo.sqlite3" /var/lib/forgejo/data/forgejo.db 2>/dev/null || true
-        fi
-        if [ -f "${STAGE_RESTORE}/navidrome.sqlite3" ]; then
-            rm -f /var/lib/navidrome/navidrome.db-wal /var/lib/navidrome/navidrome.db-shm 2>/dev/null || true
-            cp -f "${STAGE_RESTORE}/navidrome.sqlite3" /var/lib/navidrome/navidrome.db 2>/dev/null || true
-        fi
-        if [ -f "${STAGE_RESTORE}/jellyfin.sqlite3" ]; then
-            rm -f /var/lib/jellyfin/data/jellyfin.db-wal /var/lib/jellyfin/data/jellyfin.db-shm 2>/dev/null || true
-            cp -f "${STAGE_RESTORE}/jellyfin.sqlite3" /var/lib/jellyfin/data/jellyfin.db 2>/dev/null || true
         fi
         rm -rf "/var/lib/gateway_backup_stage" 2>/dev/null || true
     fi

@@ -50,16 +50,14 @@ ENABLE_AUTOUPDATE="no"
 #   3 или vaultwarden — Менеджер паролей Bitwarden (https://vaultwarden.lan)
 #   4 или forgejo     — Локальный Git-сервер (https://forgejo.lan)
 #   5 или code        — VS Code в браузере (Server-Code) (https://code.lan)
-#   6 или navidrome   — Музыкальный стриминговый сервер (https://music.lan)
-#   7 или jellyfin    — Домашний кинотеатр и медиатека фильмов (https://jellyfin.lan)
-#   8 или ytdlp       — Веб-панель загрузки видео и музыки yt-dlp (https://downloads.lan)
-#   9 или torrent     — Торрент-клиент qBittorrent-nox (https://torrents.lan)
+#   6 или metube      — Веб-панель загрузки видео и музыки MeTube (https://downloads.lan)
+#   7 или torrent     — Торрент-клиент Transmission (https://torrents.lan)
 #
 # Примеры:
 #   HOMELAB_MODULES="all"               # Установить абсолютно все сервисы
-#   HOMELAB_MODULES="1 2 3 6 9"         # Caddy + Samba + Vaultwarden + Navidrome + Torrent
+#   HOMELAB_MODULES="1 2 3 6 7"         # Caddy + Samba + Vaultwarden + MeTube + Torrent
 #   HOMELAB_MODULES="none"              # Только шлюз (Sing-Box + AdGuard), без Homelab
-HOMELAB_MODULES="1 2 3 6 9"
+HOMELAB_MODULES="1 2 3 6 7"
 
 # ------------------------------------------------------------------------------
 # 4. Внешний накопитель и шифрование (USB / SATA / NVMe) [Опционально]

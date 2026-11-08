@@ -183,8 +183,6 @@ FORCE_GRP
           "singbox.lan",
           "vaultwarden.lan",
           "forgejo.lan",
-          "music.lan",
-          "jellyfin.lan",
           "downloads.lan",
           "torrents.lan",
           "code.lan"
@@ -201,8 +199,6 @@ FORCE_GRP
           "singbox.lan. 60 IN A ${CUR_LIP_SB}",
           "vaultwarden.lan. 60 IN A ${CUR_LIP_SB}",
           "forgejo.lan. 60 IN A ${CUR_LIP_SB}",
-          "music.lan. 60 IN A ${CUR_LIP_SB}",
-          "jellyfin.lan. 60 IN A ${CUR_LIP_SB}",
           "downloads.lan. 60 IN A ${CUR_LIP_SB}",
           "torrents.lan. 60 IN A ${CUR_LIP_SB}",
           "code.lan. 60 IN A ${CUR_LIP_SB}"
@@ -243,7 +239,6 @@ FORCE_GRP
       {
         "rule_set": [
           "ntp_domain",
-          "torrent_domain",
           "user_direct_domains"
         ],
         "server": "dns_ru"
@@ -318,7 +313,7 @@ FORCE_GRP
     },
     {
       "type": "selector",
-      "tag": "🤖 AI & Google",
+      "tag": "🤖 ИИ",
       "outbounds": [
         "⚡ Авто (Самый быстрый)"
       ],
@@ -326,26 +321,55 @@ FORCE_GRP
     },
     {
       "type": "selector",
-      "tag": "🎮 Roblox",
+      "tag": "🌐 Google & Android",
       "outbounds": [
+        "DIRECT",
         "⚡ Авто (Самый быстрый)"
       ],
       "providers": ${PROVIDER_TAGS_JSON}
     },
     {
       "type": "selector",
-      "tag": "▶️ YouTube & Spotify",
-      "outbounds": [
-        "⚡ Авто (Самый быстрый)"
-      ],
-      "providers": ${PROVIDER_TAGS_JSON}
-    },
-    {
-      "type": "selector",
-      "tag": "💬 Мессенджеры & Discord",
+      "tag": "💬 Мессенджеры",
       "outbounds": [
         "⚡ Авто (Самый быстрый)",
         "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "▶️ YouTube & Музыка",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "🎮 Гейминг",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "🛑 Заблокированные сайты (РКН / Meta)",
+      "outbounds": [
+        "⚡ Авто (Самый быстрый)",
+        "DIRECT"
+      ],
+      "providers": ${PROVIDER_TAGS_JSON}
+    },
+    {
+      "type": "selector",
+      "tag": "🧲 Торренты & P2P",
+      "outbounds": [
+        "DIRECT",
+        "⚡ Авто (Самый быстрый)"
       ],
       "providers": ${PROVIDER_TAGS_JSON}
     },
@@ -354,8 +378,8 @@ FORCE_GRP
       "type": "selector",
       "tag": "🌐 Остальной трафик",
       "outbounds": [
-        "⚡ Авто (Самый быстрый)",
-        "DIRECT"
+        "DIRECT",
+        "⚡ Авто (Самый быстрый)"
       ],
       "providers": ${PROVIDER_TAGS_JSON}
     },
@@ -415,14 +439,7 @@ FORCE_GRP
           "private_domain",
           "private_ip",
           "user_direct_domains",
-          "ntp_domain",
-          "torrent_domain"
-        ],
-        "outbound": "DIRECT"
-      },
-      {
-        "protocol": [
-          "bittorrent"
+          "ntp_domain"
         ],
         "outbound": "DIRECT"
       },
@@ -437,6 +454,18 @@ FORCE_GRP
           853
         ],
         "action": "reject"
+      },
+      {
+        "rule_set": [
+          "torrent_domain"
+        ],
+        "outbound": "🧲 Торренты & P2P"
+      },
+      {
+        "protocol": [
+          "bittorrent"
+        ],
+        "outbound": "🧲 Торренты & P2P"
       },
       {
         "rule_set": [
@@ -460,20 +489,32 @@ FORCE_GRP
           "spotify_domain",
           "twitch_domain"
         ],
-        "outbound": "▶️ YouTube & Spotify"
+        "outbound": "▶️ YouTube & Музыка"
+      },
+      {
+        "domain": [
+          "proactivebackend-pa.googleapis.com",
+          "alkalimakersuite-pa.googleapis.com",
+          "geller-pa.googleapis.com",
+          "robinfrontend-pa.googleapis.com"
+        ],
+        "domain_suffix": [
+          "alkalimakersuite-pa.clients6.google.com",
+          "wa-pa.clients6.google.com",
+          "generativelanguage.googleapis.com",
+          "ai.google.dev",
+          "gemini.google.com",
+          "bard.google.com",
+          "deepmind.google",
+          "deepmind.com"
+        ],
+        "outbound": "🤖 ИИ"
       },
       {
         "rule_set": [
-          "ai_domain",
-          "google_domain"
+          "ai_domain"
         ],
-        "outbound": "🤖 AI & Google"
-      },
-      {
-        "rule_set": [
-          "roblox_domain"
-        ],
-        "outbound": "🎮 Roblox"
+        "outbound": "🤖 ИИ"
       },
       {
         "network": [
@@ -482,7 +523,7 @@ FORCE_GRP
         "port_range": [
           "50000:50100"
         ],
-        "outbound": "💬 Мессенджеры & Discord"
+        "outbound": "💬 Мессенджеры"
       },
       {
         "network": [
@@ -493,30 +534,49 @@ FORCE_GRP
           5349,
           19302
         ],
-        "outbound": "💬 Мессенджеры & Discord"
+        "outbound": "💬 Мессенджеры"
       },
       {
         "rule_set": [
           "telegram_domain",
           "telegram_ip",
           "whatsapp_domain",
-          "meta_domain",
-          "facebook_ip",
           "discord_domain",
           "discord_voice_ip",
           "stun_domain"
         ],
-        "outbound": "💬 Мессенджеры & Discord"
+        "outbound": "💬 Мессенджеры"
+      },
+      {
+        "rule_set": [
+          "google_domain"
+        ],
+        "outbound": "🌐 Google & Android"
+      },
+      {
+        "domain_suffix": [
+          "steamcommunity.com"
+        ],
+        "outbound": "🎮 Гейминг"
+      },
+      {
+        "rule_set": [
+          "roblox_domain",
+          "steam_domain"
+        ],
+        "outbound": "🎮 Гейминг"
       },
       {
         "rule_set": [
           "user_proxy_domains",
           "ru_bundle",
           "refilter_ip",
+          "meta_domain",
+          "facebook_ip",
           "cloudflare_domain",
           "cloudflare_ip"
         ],
-        "outbound": "🌐 Остальной трафик"
+        "outbound": "🛑 Заблокированные сайты (РКН / Meta)"
       },
       {
         "rule_set": [
@@ -622,6 +682,13 @@ FORCE_GRP
         "format": "binary",
         "update_interval": "24h",
         "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/roblox.srs"
+      },
+      {
+        "tag": "steam_domain",
+        "type": "remote",
+        "format": "binary",
+        "update_interval": "24h",
+        "url": "${GH_PROXY}https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/steam.srs"
       },
       {
         "tag": "telegram_domain",

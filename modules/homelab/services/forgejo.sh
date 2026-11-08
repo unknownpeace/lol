@@ -1,3 +1,23 @@
+#!/bin/sh
+set -e
+
+# ==============================================================================
+# Модуль Forgejo (Легковесный Git-сервер)
+# ==============================================================================
+
+if [ -z "${GATEWAY_DIR:-}" ]; then
+    GATEWAY_DIR="$(cd -P "$(dirname "$0")/../../.." && pwd)"
+    . "${GATEWAY_DIR}/lib/constants.sh"
+    . "${GATEWAY_DIR}/lib/ui.sh"
+    . "${GATEWAY_DIR}/lib/core.sh"
+    . "${GATEWAY_DIR}/lib/env.sh"
+    . "${GATEWAY_DIR}/lib/env_store.sh"
+    . "${GATEWAY_DIR}/modules/caddy/ssl.sh"
+    . "${GATEWAY_DIR}/modules/caddy/caddy.sh"
+    . "${GATEWAY_DIR}/modules/network/firewall.sh"
+    . "${GATEWAY_DIR}/modules/homelab/registry.sh"
+fi
+
 install_module_forgejo() {
     echo "${C_CYN}[*] Установка модуля Forgejo (Git Server)...${C_RES}"
     umask 022
@@ -82,12 +102,20 @@ FG_EOF
 }
 
 remove_module_forgejo() {
-    service_ctl forgejo stop
-    service_ctl forgejo disable
+    service_ctl forgejo stop || true
+    service_ctl forgejo disable || true
     remove_caddy_site "forgejo"
     set_module_state "forgejo" "no"
     echo "${C_GRN}[✓] Модуль Forgejo отключен (репозитории в /var/lib/forgejo сохранены).${C_RES}"
     return 0
 }
 
-# 3. Модуль Server-Code (Официальный нативный Alpine musl VS Code Web Server)
+if [ "${0##*/}" = "forgejo.sh" ]; then
+    case "${1:-status}" in
+        install) install_module_forgejo ;;
+        remove)  remove_module_forgejo ;;
+        restart) service_ctl forgejo restart ;;
+        status)  service_ctl forgejo status ;;
+        *)       echo "Использование: $0 [install|remove|restart|status]" ;;
+    esac
+fi

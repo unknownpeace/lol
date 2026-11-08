@@ -1,196 +1,172 @@
+#!/bin/sh
+set -e
+
+# ==============================================================================
+# Модуль Transmission (BitTorrent Client Web UI)
+# Интеграция с единым хранилищем /srv/storage/Downloads и Caddy HTTPS
+# ==============================================================================
+
+if [ -z "${GATEWAY_DIR:-}" ]; then
+    GATEWAY_DIR="$(cd -P "$(dirname "$0")/../../.." && pwd)"
+    . "${GATEWAY_DIR}/lib/constants.sh"
+    . "${GATEWAY_DIR}/lib/ui.sh"
+    . "${GATEWAY_DIR}/lib/core.sh"
+    . "${GATEWAY_DIR}/lib/env.sh"
+    . "${GATEWAY_DIR}/lib/env_store.sh"
+    . "${GATEWAY_DIR}/modules/adguard/adguard.sh"
+    . "${GATEWAY_DIR}/modules/caddy/ssl.sh"
+    . "${GATEWAY_DIR}/modules/caddy/caddy.sh"
+    . "${GATEWAY_DIR}/modules/network/firewall.sh"
+    . "${GATEWAY_DIR}/modules/homelab/registry.sh"
+fi
+
 install_module_torrent() {
-    echo "${C_CYN}[*] Установка модуля qBittorrent-nox + Hardlink Media Pipeline...${C_RES}"
+    echo "${C_CYN}[*] Установка модуля Transmission (BitTorrent Web UI)...${C_RES}"
     umask 022
     ensure_alpine_community_repo
     apk update >/dev/null 2>&1 || true
-    if ! apk add qbittorrent-nox qbittorrent-nox-openrc; then
-        if ! apk add qbittorrent-nox; then
-            echo "${C_RED}[X] Не удалось установить пакет qbittorrent-nox!${C_RES}"
-            return 1
-        fi
-    fi
-
-    if ! id qbittorrent >/dev/null 2>&1; then
-        addgroup -S qbittorrent 2>/dev/null || true
-        adduser -S -D -H -h /var/lib/qbittorrent -s /sbin/nologin -G qbittorrent qbittorrent 2>/dev/null || true
-    fi
-
-    init_homelab_storage
-    addgroup qbittorrent "$MEDIA_GROUP" 2>/dev/null || true
-
-    # Генерация хука безопасного импорта завершенных торрентов через жесткие ссылки (hardlinks cp -al)
-    mkdir -p "$HOMELAB_LIB_DIR"
-    chmod 755 "$HOMELAB_LIB_DIR" 2>/dev/null || true
-    cat << HOOK_EOF > "$TORRENT_HOOK"
-#!/bin/sh
-# Авто-импорт завершенных раздач в медиатеку Jellyfin / Navidrome без остановки сидинга
-umask 0002
-CAT_NAME="\$(printf "%s" "\${1:-}" | tr 'A-Z' 'a-z')"
-CONTENT_PATH="\${2:-}"
-[ -z "\$CONTENT_PATH" ] || [ ! -e "\$CONTENT_PATH" ] && exit 0
-
-case "\$CAT_NAME" in
-    music|audio|музыка)
-        DEST_DIR="${STORAGE_MUSIC}"
-        ;;
-    movies|movie|films|фильмы)
-        DEST_DIR="${STORAGE_VIDEOS_MOVIES}"
-        ;;
-    series|tv|shows|сериалы)
-        DEST_DIR="${STORAGE_VIDEOS_SERIES}"
-        ;;
-    video|videos|видео)
-        DEST_DIR="${STORAGE_VIDEOS}"
-        ;;
-    *)
-        exit 0
-        ;;
-esac
-
-mkdir -p "\$DEST_DIR"
-BASE_NAME="\$(basename "\$CONTENT_PATH")"
-TARGET_PATH="\${DEST_DIR}/\${BASE_NAME}"
-
-# Мгновенное создание жестких ссылок (0 лишних байт на одной ФС, раздача продолжается!)
-cp -al "\$CONTENT_PATH" "\$DEST_DIR/" 2>/dev/null || cp -rf "\$CONTENT_PATH" "\$DEST_DIR/" 2>/dev/null || true
-if [ -e "\$TARGET_PATH" ]; then
-    chgrp -R "${MEDIA_GROUP}" "\$TARGET_PATH" 2>/dev/null || true
-    find "\$TARGET_PATH" -type d -exec chmod 2775 {} + 2>/dev/null || true
-    find "\$TARGET_PATH" -type f -exec chmod 0664 {} + 2>/dev/null || true
-fi
-exit 0
-HOOK_EOF
-    chmod 755 "$TORRENT_HOOK"
-
-    QB_HOME="/var/lib/qbittorrent"
-    QB_CONF_DIR="${QB_HOME}/.config/qBittorrent"
-    mkdir -p "$QB_CONF_DIR"
-
-    cat << QB_CATS > "${QB_CONF_DIR}/categories.json"
-{
-    "music": {
-        "save_path": "${STORAGE_DL_MUSIC}"
-    },
-    "videos": {
-        "save_path": "${STORAGE_DL_VIDEOS}"
-    },
-    "movies": {
-        "save_path": "${STORAGE_DL_VIDEOS}"
-    },
-    "series": {
-        "save_path": "${STORAGE_DL_VIDEOS}"
-    }
-}
-QB_CATS
-
-    load_gateway_env
-    QB_USER="${SMB_USER:-${AGH_USER:-admin}}"
-    QB_PBKDF2=""
-    if command -v python3 >/dev/null 2>&1; then
-        QB_PBKDF2=$(python3 - "${ADMIN_PASS:-admin}" << 'PY_QB_HASH' 2>/dev/null || true
-import hashlib, base64, os, sys
-pw = sys.argv[1].encode("utf-8")
-salt = os.urandom(16)
-dk = hashlib.pbkdf2_hmac("sha512", pw, salt, 100000, 64)
-print(f"@ByteArray({base64.b64encode(salt).decode()}:{base64.b64encode(dk).decode()})")
-PY_QB_HASH
-)
-    fi
-
-    cat << QB_CONF > "${QB_CONF_DIR}/qBittorrent.conf"
-[AutoRun]
-enabled=true
-program="${TORRENT_HOOK} \"%L\" \"%F\" \"%N\""
-
-[BitTorrent]
-Session\DefaultSavePath=${STORAGE_DL_OTHER}
-Session\Port=${PORT_TORRENT_PEER}
-Session\TempPath=${STORAGE_INC_TORRENTS}
-Session\TempPathEnabled=true
-
-[LegalNotice]
-Accepted=true
-
-[Preferences]
-Downloads\SavePath=${STORAGE_DL_OTHER}
-Downloads\TempPath=${STORAGE_INC_TORRENTS}
-Downloads\TempPathEnabled=true
-WebUI\Address=127.0.0.1
-WebUI\Port=${PORT_TORRENT_WEB}
-WebUI\Username=${QB_USER}
-WebUI\Password_PBKDF2="${QB_PBKDF2}"
-WebUI\AuthSubnetWhitelist=127.0.0.1/32, ::1/128
-WebUI\AuthSubnetWhitelistEnabled=true
-WebUI\CSRFProtection=false
-WebUI\HostHeaderValidation=false
-WebUI\LocalHostAuth=false
-QB_CONF
-
-    chown -R qbittorrent:"$MEDIA_GROUP" "$QB_HOME" 2>/dev/null || true
-    chmod 750 "$QB_HOME" 2>/dev/null || true
-
-    cat << QB_CONF_D > /etc/conf.d/qbittorrent-nox
-WEBUI_PORT=${PORT_TORRENT_WEB}
-command_user="qbittorrent:${MEDIA_GROUP}"
-directory="/var/lib/qbittorrent"
-umask="0002"
-rc_nice="10"
-rc_oom_score_adj="500"
-QB_CONF_D
-
-    cat << QB_INIT > /etc/init.d/qbittorrent-nox
-#!/sbin/openrc-run
-name="qbittorrent-nox"
-description="qBittorrent-nox headless BitTorrent client"
-supervisor="supervise-daemon"
-command="/usr/bin/qbittorrent-nox"
-command_args="--webui-port=\${WEBUI_PORT:-${PORT_TORRENT_WEB}}"
-command_user="\${command_user:-qbittorrent:${MEDIA_GROUP}}"
-directory="/var/lib/qbittorrent"
-umask="0002"
-output_log="/var/log/qbittorrent-nox.log"
-error_log="/var/log/qbittorrent-nox.log"
-rc_ulimit="-n 50000"
-rc_nice="10"
-rc_oom_score_adj="500"
-export HOME="/var/lib/qbittorrent"
-export XDG_CONFIG_HOME="/var/lib/qbittorrent/.config"
-export XDG_DATA_HOME="/var/lib/qbittorrent/.local/share"
-
-depend() {
-    need net
-    after firewall
-}
-
-start_pre() {
-    checkpath -d -m 0750 -o qbittorrent:${MEDIA_GROUP} /var/lib/qbittorrent
-    checkpath -f -m 0640 -o qbittorrent:${MEDIA_GROUP} /var/log/qbittorrent-nox.log
-}
-QB_INIT
-    chmod +x /etc/init.d/qbittorrent-nox
-
-    repair_storage_permissions
-    service_ctl qbittorrent-nox enable
-    if ! service_ctl qbittorrent-nox restart; then
-        echo "${C_RED}[X] Служба qbittorrent-nox не смогла запуститься!${C_RES}"
+    if ! apk add transmission-daemon transmission-daemon-openrc; then
+        echo "${C_RED}[X] Не удалось установить пакет transmission-daemon!${C_RES}"
         return 1
     fi
+
+    load_gateway_env
+    init_homelab_storage
+    ensure_media_group_and_users
+
+    # Убеждаемся в наличии пользователя transmission и его участии в группе media
+    if ! id transmission >/dev/null 2>&1; then
+        addgroup -S transmission 2>/dev/null || true
+        adduser -S -D -H -h /var/lib/transmission -s /sbin/nologin -G transmission transmission 2>/dev/null || true
+    fi
+    addgroup transmission "$MEDIA_GROUP" 2>/dev/null || true
+
+    TR_HOME="/var/lib/transmission"
+    TR_CONF_DIR="${TR_HOME}/config"
+    mkdir -p "$TR_CONF_DIR" "${STORAGE_DOWNLOADS}" "${STORAGE_INCOMPLETE}"
+
+    TR_USER="${SMB_USER:-${AGH_USER:-admin}}"
+    TR_PASS="${ADMIN_PASS:-admin}"
+
+    # Остановка сервиса перед перезаписью settings.json (Transmission перезаписывает файл при завершении)
+    service_ctl transmission-daemon stop 2>/dev/null || true
+
+    cat << TR_SETTINGS > "${TR_CONF_DIR}/settings.json"
+{
+    "alt-speed-down": 50,
+    "alt-speed-enabled": false,
+    "alt-speed-time-begin": 540,
+    "alt-speed-time-day": 127,
+    "alt-speed-time-enabled": false,
+    "alt-speed-time-end": 1020,
+    "alt-speed-up": 50,
+    "bind-address-ipv4": "0.0.0.0",
+    "bind-address-ipv6": "::",
+    "blocklist-enabled": false,
+    "dht-enabled": true,
+    "download-dir": "${STORAGE_DOWNLOADS}",
+    "download-queue-enabled": true,
+    "download-queue-size": 5,
+    "encryption": 1,
+    "idle-seeding-limit": 30,
+    "idle-seeding-limit-enabled": false,
+    "incomplete-dir": "${STORAGE_INCOMPLETE}",
+    "incomplete-dir-enabled": true,
+    "lpd-enabled": false,
+    "max-peers-global": 200,
+    "message-level": 1,
+    "peer-congestion-algorithm": "",
+    "peer-id-ttl-hours": 6,
+    "peer-limit-global": 200,
+    "peer-limit-per-torrent": 50,
+    "peer-port": ${PORT_TRANSMISSION_PEER:-51413},
+    "peer-port-random-high": 65535,
+    "peer-port-random-low": 49152,
+    "peer-port-random-on-start": false,
+    "peer-socket-tos": "default",
+    "pex-enabled": true,
+    "port-forwarding-enabled": false,
+    "queue-stalled-enabled": true,
+    "queue-stalled-minutes": 30,
+    "ratio-limit": 2,
+    "ratio-limit-enabled": false,
+    "rename-partial-files": true,
+    "rpc-authentication-required": true,
+    "rpc-bind-address": "127.0.0.1",
+    "rpc-enabled": true,
+    "rpc-host-whitelist-enabled": false,
+    "rpc-password": "${TR_PASS}",
+    "rpc-port": ${PORT_TRANSMISSION_WEB:-9091},
+    "rpc-url": "/transmission/",
+    "rpc-username": "${TR_USER}",
+    "rpc-whitelist-enabled": false,
+    "scrape-paused-torrents-enabled": true,
+    "script-torrent-done-enabled": false,
+    "seed-queue-enabled": false,
+    "speed-limit-down": 100,
+    "speed-limit-down-enabled": false,
+    "speed-limit-up": 100,
+    "speed-limit-up-enabled": false,
+    "start-added-torrents": true,
+    "trash-original-torrent-files": false,
+    "umask": 2,
+    "upload-slots-per-torrent": 14,
+    "utp-enabled": true
+}
+TR_SETTINGS
+
+    chmod 600 "${TR_CONF_DIR}/settings.json"
+    chown -R transmission:"$MEDIA_GROUP" "$TR_HOME" 2>/dev/null || true
+    chmod 770 "$TR_HOME" "$TR_CONF_DIR" 2>/dev/null || true
+
+    # Настройка параметров OpenRC запуска
+    mkdir -p /etc/conf.d
+    cat << TR_CONFD > /etc/conf.d/transmission-daemon
+runas_user="transmission:${MEDIA_GROUP}"
+config_dir="${TR_CONF_DIR}"
+download_dir="${STORAGE_DOWNLOADS}"
+logfile="/var/log/transmission/transmission.log"
+TRANSMISSION_OPTIONS="--foreground"
+TR_CONFD
+
+    mkdir -p /var/log/transmission
+    chown -R transmission:"$MEDIA_GROUP" /var/log/transmission 2>/dev/null || true
+    chmod 750 /var/log/transmission 2>/dev/null || true
+
+    repair_storage_permissions
+    init_homelab_registry
+    service_ctl transmission-daemon enable
+    if ! service_ctl transmission-daemon restart; then
+        echo "${C_RED}[X] Служба transmission-daemon не смогла запуститься!${C_RES}"
+        return 1
+    fi
+
     sync_dns_firewall "yes" "keep"
-    register_caddy_site "torrent" "$DOM_TORRENT" "$PORT_TORRENT_WEB" "yes"
+    register_caddy_site "torrent" "$DOM_TORRENT" "${PORT_TRANSMISSION_WEB:-9091}" "yes"
     set_module_state "torrent" "yes"
 
-    echo "${C_GRN}[✓] qBittorrent-nox запущен: https://${DOM_TORRENT} (защищен BasicAuth паролем шлюза)${C_RES}"
-    echo "    Категории 'music', 'videos', 'movies', 'series' автоматически линкуются в медиатеку без потери раздачи!"
+    echo "${C_GRN}[✓] Transmission успешно запущен: https://${DOM_TORRENT} (RPC порт: ${PORT_TRANSMISSION_WEB:-9091})${C_RES}"
+    echo "    • Логин: ${C_BLD}${TR_USER}${C_RES} / Пароль: ${C_BLD}${TR_PASS}${C_RES}"
+    echo "    • Загрузки сохраняются в: ${C_CYN}${STORAGE_DOWNLOADS}${C_RES}"
     return 0
 }
 
 remove_module_torrent() {
-    service_ctl qbittorrent-nox stop
-    service_ctl qbittorrent-nox disable
+    echo "Остановка и отключение Transmission..."
+    service_ctl transmission-daemon stop || true
+    service_ctl transmission-daemon disable || true
     remove_caddy_site "torrent"
     set_module_state "torrent" "no"
-    echo "${C_GRN}[✓] Модуль qBittorrent-nox отключен (файлы в ${STORAGE_DOWNLOADS} сохранены).${C_RES}"
+    echo "${C_GRN}[✓] Модуль Transmission отключен (файлы в ${STORAGE_DOWNLOADS} сохранены).${C_RES}"
     return 0
 }
 
-# Синхронизация прав доступа сервисов Homelab и единого хранилища /srv/storage
+if [ "${0##*/}" = "torrent.sh" ] || [ "${0##*/}" = "transmission.sh" ]; then
+    case "${1:-status}" in
+        install) install_module_torrent ;;
+        remove)  remove_module_torrent ;;
+        restart) service_ctl transmission-daemon restart ;;
+        status)  service_ctl transmission-daemon status ;;
+        *)       echo "Использование: $0 [install|remove|restart|status]" ;;
+    esac
+fi

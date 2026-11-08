@@ -14,27 +14,25 @@ prompt_homelab_modules_wizard() {
         echo "  ${C_CYN}[3]${C_RES} vaultwarden — Менеджер паролей Bitwarden (https://vaultwarden.lan)"
         echo "  ${C_CYN}[4]${C_RES} forgejo     — Локальный Git-сервер (https://forgejo.lan)"
         echo "  ${C_CYN}[5]${C_RES} code        — VS Code в браузере Server-Code (https://code.lan)"
-        echo "  ${C_CYN}[6]${C_RES} navidrome   — Музыкальный стриминг Subsonic/Spotify-style (https://music.lan)"
-        echo "  ${C_CYN}[7]${C_RES} jellyfin    — Домашний кинотеатр Jellyfin (https://jellyfin.lan)"
-        echo "  ${C_CYN}[8]${C_RES} ytdlp       — Веб-панель загрузки видео и музыки yt-dlp (https://downloads.lan)"
-        echo "  ${C_CYN}[9]${C_RES} torrent     — Торрент-клиент qBittorrent-nox + Hardlink-импорт (https://torrents.lan)"
+        echo "  ${C_CYN}[6]${C_RES} ytdlp       — MeTube загрузка видео и музыки yt-dlp (https://downloads.lan)"
+        echo "  ${C_CYN}[7]${C_RES} torrent     — Торрент-клиент Transmission (https://torrents.lan)"
         ui_box_sep
-        printf "Введите номера через пробел (например: 1 2 3 6 8 9), 'all' для всех или Enter (только шлюз): "
+        printf "Введите номера через пробел (например: 1 2 3 6 7), 'all' для всех или Enter (только шлюз): "
         read -r HL_SEL < /dev/tty || true
     fi
     HL_SEL=$(printf "%s" "$HL_SEL" | tr ',' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     [ -z "$HL_SEL" ] || [ "$HL_SEL" = "0" ] || [ "$HL_SEL" = "none" ] && return 0
 
     if [ "$HL_SEL" = "all" ] || [ "$HL_SEL" = "ALL" ]; then
-        HL_SEL="1 2 3 4 5 6 7 8 9"
+        HL_SEL="1 2 3 4 5 6 7"
     fi
 
     init_homelab_storage
-    # Если выбран любой веб-модуль (3..9), автоматически устанавливаем Caddy первым
+    # Если выбран любой веб-модуль (3..7), автоматически устанавливаем Caddy первым
     NEED_CADDY="no"
     for ITEM in $HL_SEL; do
         case "$ITEM" in
-            1|caddy|3|vaultwarden|4|forgejo|5|code|6|navidrome|7|jellyfin|8|ytdlp|9|torrent)
+            1|caddy|3|vaultwarden|4|forgejo|5|code|6|ytdlp|metube|7|torrent|transmission)
                 NEED_CADDY="yes"
                 ;;
         esac
@@ -50,10 +48,8 @@ prompt_homelab_modules_wizard() {
             3|vaultwarden) install_module_vaultwarden || true ;;
             4|forgejo)     install_module_forgejo || true ;;
             5|code)        install_module_code || true ;;
-            6|navidrome)   install_module_navidrome || true ;;
-            7|jellyfin)    install_module_jellyfin || true ;;
-            8|ytdlp)       install_module_ytdlp || true ;;
-            9|torrent)     install_module_torrent || true ;;
+            6|ytdlp|metube) install_module_ytdlp || true ;;
+            7|torrent|transmission) install_module_torrent || true ;;
         esac
     done
 
@@ -328,12 +324,10 @@ run_installer() {
         echo "  ${C_CYN}[3]${C_RES} vaultwarden — Менеджер паролей Bitwarden (https://vaultwarden.lan)"
         echo "  ${C_CYN}[4]${C_RES} forgejo     — Локальный Git-сервер (https://forgejo.lan)"
         echo "  ${C_CYN}[5]${C_RES} code        — VS Code в браузере Server-Code (https://code.lan)"
-        echo "  ${C_CYN}[6]${C_RES} navidrome   — Музыкальный стриминг Subsonic/Spotify-style (https://music.lan)"
-        echo "  ${C_CYN}[7]${C_RES} jellyfin    — Домашний кинотеатр Jellyfin (https://jellyfin.lan)"
-        echo "  ${C_CYN}[8]${C_RES} ytdlp       — Веб-панель загрузки видео и музыки yt-dlp (https://downloads.lan)"
-        echo "  ${C_CYN}[9]${C_RES} torrent     — Торрент-клиент qBittorrent-nox + Hardlink-импорт (https://torrents.lan)"
+        echo "  ${C_CYN}[6]${C_RES} ytdlp       — MeTube загрузка видео и музыки yt-dlp (https://downloads.lan)"
+        echo "  ${C_CYN}[7]${C_RES} torrent     — Торрент-клиент Transmission (https://torrents.lan)"
         ui_box_sep
-        printf "Введите номера через пробел (например: 1 2 3 6 8 9), 'all' для всех или Enter (только шлюз): "
+        printf "Введите номера через пробел (например: 1 2 3 6 7), 'all' для всех или Enter (только шлюз): "
         read -r PRE_HL_SEL < /dev/tty || true
         PRE_HL_SEL=$(printf "%s" "$PRE_HL_SEL" | tr ',' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         [ -z "$PRE_HL_SEL" ] || [ "$PRE_HL_SEL" = "0" ] || [ "$PRE_HL_SEL" = "none" ] && PRE_HL_SEL="__SKIP__"
@@ -346,7 +340,7 @@ run_installer() {
     echo " - IP сервера (LAN):${TARGET_LAN_IP} (интерфейс $(get_lan_ifname), маска /24)"
     echo " - Основной роутер: ${GW_IP}"
     echo " - DNS и Домены:    AdGuard Home (0.0.0.0:53 + *.lan) -> Sing-Box (127.0.0.1:1053)"
-    echo " - Хранилище:       ${STORAGE_ROOT} (Music, Videos/Movies, Videos/Series, Downloads)"
+    echo " - Хранилище:       ${STORAGE_ROOT} (Music, Videos, Downloads)"
     echo " - Единый логин:    ${AGH_USER} (AdGuard + Samba + Homelab) / Пароль: [СКРЫТ]"
     echo " - Модули Homelab:  ${PRE_HL_SEL}"
     ui_box_sep

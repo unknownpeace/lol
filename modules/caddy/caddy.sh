@@ -1,3 +1,19 @@
+#!/bin/sh
+# ==============================================================================
+# Модуль Caddy Reverse Proxy & HTTPS PKI CA
+# ==============================================================================
+
+if [ -z "${GATEWAY_DIR:-}" ]; then
+    GATEWAY_DIR="$(cd -P "$(dirname "$0")/../.." && pwd)"
+    . "${GATEWAY_DIR}/lib/constants.sh"
+    . "${GATEWAY_DIR}/lib/ui.sh"
+    . "${GATEWAY_DIR}/lib/core.sh"
+    . "${GATEWAY_DIR}/lib/env.sh"
+    . "${GATEWAY_DIR}/lib/env_store.sh"
+    . "${GATEWAY_DIR}/modules/homelab/registry.sh"
+    . "${GATEWAY_DIR}/modules/caddy/ssl.sh"
+fi
+
 find_caddy_root_cert() {
     for c_cand in \
         "$CADDY_ROOT_CERT" \
@@ -88,10 +104,8 @@ build_pki_portal() {
       <li><a href="https://${DOM_ZASHBOARD}/ui/">https://${DOM_ZASHBOARD}</a> (или <a href="https://${DOM_SINGBOX}/ui/">https://${DOM_SINGBOX}</a>) — Панель Sing-Box (Zashboard)</li>
       <li><a href="https://${DOM_ADGUARD}">https://${DOM_ADGUARD}</a> — Панель AdGuard Home</li>
       <li><a href="https://${DOM_VAULTWARDEN}">https://${DOM_VAULTWARDEN}</a> — Vaultwarden (Пароли)</li>
-      <li><a href="https://${DOM_JELLYFIN}">https://${DOM_JELLYFIN}</a> — Jellyfin (Единая медиаплатформа: Видео + Музыка)</li>
-      <li><a href="https://${DOM_NAVIDROME}">https://${DOM_NAVIDROME}</a> — Navidrome (Специализированный музыкальный сервер Subsonic)</li>
-      <li><a href="https://${DOM_YTDLP}">https://${DOM_YTDLP}</a> — yt-dlp Web UI (Загрузчик видео/аудио)</li>
-      <li><a href="https://${DOM_TORRENT}">https://${DOM_TORRENT}</a> — qBittorrent (Торренты)</li>
+      <li><a href="https://${DOM_YTDLP}">https://${DOM_YTDLP}</a> — MeTube (Загрузчик видео/аудио)</li>
+      <li><a href="https://${DOM_TORRENT}">https://${DOM_TORRENT}</a> — Transmission (Торренты)</li>
       <li><a href="https://${DOM_FORGEJO}">https://${DOM_FORGEJO}</a> — Forgejo (Git-сервер)</li>
       <li><a href="https://${DOM_CODE}">https://${DOM_CODE}</a> — Server-Code (VS Code в браузере)</li>
     </ul>
@@ -376,10 +390,8 @@ sync_all_caddy_sites() {
     is_module_enabled "vaultwarden" && register_caddy_site "vaultwarden" "${DOM_VAULTWARDEN:-vaultwarden.lan}" "${PORT_VAULTWARDEN:-8222}" "no" || true
     is_module_enabled "forgejo"     && register_caddy_site "forgejo" "${DOM_FORGEJO:-forgejo.lan}" "${PORT_FORGEJO:-3001}" "no" || true
     is_module_enabled "code"        && register_caddy_site "code" "${DOM_CODE:-code.lan}" "${PORT_CODE:-8443}" "yes" || true
-    is_module_enabled "navidrome"   && register_caddy_site "navidrome" "${DOM_NAVIDROME:-music.lan}" "${PORT_NAVIDROME:-4533}" "no" || true
-    is_module_enabled "jellyfin"    && register_caddy_site "jellyfin" "${DOM_JELLYFIN:-jellyfin.lan}" "${PORT_JELLYFIN:-8096}" "no" || true
-    is_module_enabled "ytdlp"       && register_caddy_site "ytdlp" "${DOM_YTDLP:-downloads.lan}" "${PORT_YTDLP:-8081}" "yes" || true
-    is_module_enabled "torrent"     && register_caddy_site "torrent" "${DOM_TORRENT:-torrents.lan}" "${PORT_TORRENT_WEB:-8080}" "yes" || true
+    is_module_enabled "ytdlp"       && register_caddy_site "ytdlp" "${DOM_YTDLP:-downloads.lan}" "${PORT_METUBE:-8081}" "yes" || true
+    is_module_enabled "torrent"     && register_caddy_site "torrent" "${DOM_TORRENT:-torrents.lan}" "${PORT_TRANSMISSION_WEB:-9091}" "yes" || true
     reload_caddy_safe
     return 0
 }
@@ -504,8 +516,26 @@ show_https_ca_instructions() {
     return 0
 }
 
-# ==============================================================================
-# Модуль Samba (SMB2/SMB3) + Сетевое обнаружение Windows 11 (wsdd) и Linux (avahi)
-# ==============================================================================
-
-# Настройка демонов сетевого обнаружения: wsdd (Windows 11 Explorer) и avahi (Linux File Managers)
+# Standalone CLI execution
+if [ "$(basename "$0")" = "caddy.sh" ]; then
+    case "$1" in
+        install)
+            install_module_caddy
+            ;;
+        remove|uninstall)
+            remove_module_caddy
+            ;;
+        restart)
+            service_ctl caddy restart
+            ;;
+        status)
+            rc-service caddy status 2>/dev/null || rc-status
+            ;;
+        portal)
+            build_pki_portal
+            show_https_ca_instructions
+            ;;
+        *)
+            ;;
+    esac
+fi

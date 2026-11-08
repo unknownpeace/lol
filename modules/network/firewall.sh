@@ -75,7 +75,7 @@ table inet gateway_fw {
         ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } tcp dport { ${LAN_TCP_PORTS} } accept
         ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } udp dport { ${LAN_UDP_PORTS} } accept
         ip daddr { 224.0.0.251, 239.255.255.250 } udp dport { 3702, 5353 } accept
-        tcp dport { 80, 443, 445, 3000, 3001, 4533, 5357, 7890, 8080, 8081, 8096, 8222, 8443, 9090 } drop
+        tcp dport { 80, 443, 445, 3000, 3001, 5357, 7890, 8081, 8222, 8443, 9090, 9091 } drop
         udp dport { 443, 3702, 5353, 7890 } drop
     }
 
@@ -104,6 +104,10 @@ table inet gateway_fw {
 }
 NFT_ALPINE
     chmod +x "${ALPINE_NFT_CONF}.tmp.$$" 2>/dev/null || true
+    if ! command -v nft >/dev/null 2>&1; then
+        rm -f "${ALPINE_NFT_CONF}.tmp.$$"
+        return 0
+    fi
     if nft --check -f "${ALPINE_NFT_CONF}.tmp.$$" >/dev/null 2>&1; then
         mv -f "${ALPINE_NFT_CONF}.tmp.$$" "$ALPINE_NFT_CONF"
         nft -f "$ALPINE_NFT_CONF" 2>/dev/null || true

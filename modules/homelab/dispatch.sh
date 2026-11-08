@@ -12,28 +12,15 @@ sync_all_homelab_permissions() {
         chmod 750 /var/lib/forgejo /var/log/forgejo /etc/forgejo 2>/dev/null || true
         [ -f /etc/forgejo/app.ini ] && chmod 640 /etc/forgejo/app.ini 2>/dev/null || true
     fi
-    if id navidrome >/dev/null 2>&1 && [ -d /var/lib/navidrome ]; then
-        addgroup navidrome "$MEDIA_GROUP" 2>/dev/null || true
-        chown -R navidrome:"$MEDIA_GROUP" /var/lib/navidrome /etc/navidrome 2>/dev/null || true
-        chmod 750 /var/lib/navidrome /etc/navidrome 2>/dev/null || true
+    if id metube >/dev/null 2>&1; then
+        addgroup metube "$MEDIA_GROUP" 2>/dev/null || true
+        touch /var/log/metube.log 2>/dev/null || true
+        chown metube:"$MEDIA_GROUP" /var/log/metube.log 2>/dev/null || true
     fi
-    if id jellyfin >/dev/null 2>&1; then
-        for GRP_J in "$MEDIA_GROUP" video render; do
-            addgroup jellyfin "$GRP_J" 2>/dev/null || true
-        done
-        for JF_D in /var/lib/jellyfin /etc/jellyfin /var/log/jellyfin /var/cache/jellyfin; do
-            [ -d "$JF_D" ] && { chown -R jellyfin:"$MEDIA_GROUP" "$JF_D" 2>/dev/null || true; chmod 750 "$JF_D" 2>/dev/null || true; }
-        done
-    fi
-    if id ytdlp >/dev/null 2>&1; then
-        addgroup ytdlp "$MEDIA_GROUP" 2>/dev/null || true
-        touch /var/log/ytdlp-webui.log 2>/dev/null || true
-        chown ytdlp:"$MEDIA_GROUP" /var/log/ytdlp-webui.log 2>/dev/null || true
-    fi
-    if id qbittorrent >/dev/null 2>&1 && [ -d /var/lib/qbittorrent ]; then
-        addgroup qbittorrent "$MEDIA_GROUP" 2>/dev/null || true
-        chown -R qbittorrent:"$MEDIA_GROUP" /var/lib/qbittorrent 2>/dev/null || true
-        chmod 750 /var/lib/qbittorrent 2>/dev/null || true
+    if id transmission >/dev/null 2>&1 && [ -d /var/lib/transmission ]; then
+        addgroup transmission "$MEDIA_GROUP" 2>/dev/null || true
+        chown -R transmission:"$MEDIA_GROUP" /var/lib/transmission 2>/dev/null || true
+        chmod 770 /var/lib/transmission 2>/dev/null || true
     fi
     if id caddy >/dev/null 2>&1; then
         chown -R caddy:caddy /var/lib/caddy "$PKI_PORTAL_DIR" /etc/caddy 2>/dev/null || true
@@ -59,10 +46,8 @@ print_quick_access_card() {
         ui_box_sep "АКТИВНЫЕ МОДУЛИ HOMELAB И СЕТЕВЫЕ ШАРЫ"
         is_module_enabled "samba"       && ui_box_row "▸ Сетевой диск Samba (SMB3):   ${C_CYN}\\\\${HN_VAL}\\storage${C_RES} │ ${C_CYN}\\\\${CUR_LIP}\\storage${C_RES}"
         is_module_enabled "vaultwarden" && ui_box_row "▸ Пароли (Vaultwarden):        ${C_GRN}https://vaultwarden.${SSL_DOMAIN}${C_RES} ${C_DIM}(админ: /admin)${C_RES}"
-        is_module_enabled "jellyfin"    && ui_box_row "▸ Кинотеатр (Jellyfin):        ${C_GRN}https://jellyfin.${SSL_DOMAIN}${C_RES}"
-        is_module_enabled "navidrome"   && ui_box_row "▸ Музыка (Navidrome):          ${C_GRN}https://music.${SSL_DOMAIN}${C_RES}"
-        is_module_enabled "ytdlp"       && ui_box_row "▸ Загрузчик видео/аудио:       ${C_GRN}https://downloads.${SSL_DOMAIN}${C_RES}"
-        is_module_enabled "torrent"     && ui_box_row "▸ Торренты (qBittorrent):      ${C_GRN}https://torrents.${SSL_DOMAIN}${C_RES}"
+        is_module_enabled "ytdlp"       && ui_box_row "▸ Загрузчик MeTube:            ${C_GRN}https://downloads.${SSL_DOMAIN}${C_RES} ${C_DIM}(видео -> Videos, аудио -> Music)${C_RES}"
+        is_module_enabled "torrent"     && ui_box_row "▸ Торренты (Transmission):     ${C_GRN}https://torrents.${SSL_DOMAIN}${C_RES}"
         is_module_enabled "forgejo"     && ui_box_row "▸ Git-сервер (Forgejo):        ${C_GRN}https://forgejo.${SSL_DOMAIN}${C_RES}"
         is_module_enabled "code"        && ui_box_row "▸ VS Code в браузере:          ${C_GRN}https://code.${SSL_DOMAIN}${C_RES}"
     else
@@ -74,10 +59,8 @@ print_quick_access_card() {
         ui_box_sep "АКТИВНЫЕ МОДУЛИ HOMELAB И СЕТЕВЫЕ ШАРЫ"
         is_module_enabled "samba"       && ui_box_row "▸ Сетевой диск Samba (SMB3):   ${C_CYN}\\\\${HN_VAL}\\storage${C_RES} │ ${C_CYN}\\\\${CUR_LIP}\\storage${C_RES} (логин: ${C_BLD}${SMB_USER:-admin}${C_RES})"
         is_module_enabled "vaultwarden" && ui_box_row "▸ Пароли (Vaultwarden):        ${C_GRN}https://${DOM_VAULTWARDEN}${C_RES} ${C_DIM}(админ-панель: /admin)${C_RES}"
-        is_module_enabled "jellyfin"    && ui_box_row "▸ Кинотеатр (Jellyfin):        ${C_GRN}https://${DOM_JELLYFIN}${C_RES}    ${C_DIM}(Фильмы / Сериалы / Музыка)${C_RES}"
-        is_module_enabled "navidrome"   && ui_box_row "▸ Музыка (Navidrome Subsonic): ${C_GRN}https://${DOM_NAVIDROME}${C_RES}   ${C_DIM}(каталог: ${STORAGE_MUSIC})${C_RES}"
-        is_module_enabled "ytdlp"       && ui_box_row "▸ Загрузчик видео/аудио:       ${C_GRN}https://${DOM_YTDLP}${C_RES}   ${C_DIM}(авто-обложки и теги)${C_RES}"
-        is_module_enabled "torrent"     && ui_box_row "▸ Торренты (qBittorrent):      ${C_GRN}https://${DOM_TORRENT}${C_RES}    ${C_DIM}(Hardlink-импорт в медиатеку)${C_RES}"
+        is_module_enabled "ytdlp"       && ui_box_row "▸ Загрузчик MeTube:            ${C_GRN}https://${DOM_METUBE}${C_RES}   ${C_DIM}(видео -> Videos, аудио -> Music)${C_RES}"
+        is_module_enabled "torrent"     && ui_box_row "▸ Торренты (Transmission):     ${C_GRN}https://${DOM_TORRENT}${C_RES}    ${C_DIM}(RPC веб-интерфейс)${C_RES}"
         is_module_enabled "forgejo"     && ui_box_row "▸ Git-сервер (Forgejo):        ${C_GRN}https://${DOM_FORGEJO}${C_RES}"
         is_module_enabled "code"        && ui_box_row "▸ VS Code в браузере:          ${C_GRN}https://${DOM_CODE}${C_RES}"
     fi
@@ -108,10 +91,8 @@ homelab_module_dispatch() {
                 vaultwarden) install_module_vaultwarden ;;
                 forgejo)     install_module_forgejo ;;
                 code)        install_module_code ;;
-                navidrome)   install_module_navidrome ;;
-                jellyfin)    install_module_jellyfin ;;
-                ytdlp)       install_module_ytdlp ;;
-                torrent)     install_module_torrent ;;
+                ytdlp|metube) install_module_ytdlp ;;
+                torrent|transmission) install_module_torrent ;;
                 *)           echo "${C_RED}[X] Неизвестный модуль: ${MOD_ID}${C_RES}"; return 1 ;;
             esac
             ;;
@@ -122,10 +103,8 @@ homelab_module_dispatch() {
                 vaultwarden) remove_module_vaultwarden ;;
                 forgejo)     remove_module_forgejo ;;
                 code)        remove_module_code ;;
-                navidrome)   remove_module_navidrome ;;
-                jellyfin)    remove_module_jellyfin ;;
-                ytdlp)       remove_module_ytdlp ;;
-                torrent)     remove_module_torrent ;;
+                ytdlp|metube) remove_module_ytdlp ;;
+                torrent|transmission) remove_module_torrent ;;
                 *)           echo "${C_RED}[X] Неизвестный модуль: ${MOD_ID}${C_RES}"; return 1 ;;
             esac
             ;;
@@ -150,10 +129,8 @@ homelab_module_dispatch() {
                 vaultwarden) apk upgrade vaultwarden vaultwarden-openrc vaultwarden-web-vault && sync_vaultwarden_config ;;
                 forgejo)     apk upgrade forgejo forgejo-openrc ;;
                 code)        rm -f /opt/code-server/code; install_module_code ;;
-                navidrome)   apk upgrade navidrome navidrome-openrc ffmpeg ;;
-                jellyfin)    apk upgrade jellyfin jellyfin-openrc jellyfin-web jellyfin-ffmpeg ;;
-                ytdlp)       apk upgrade yt-dlp py3-yt-dlp py3-mutagen ffmpeg && install_module_ytdlp ;;
-                torrent)     apk upgrade qbittorrent-nox qbittorrent-nox-openrc ;;
+                ytdlp|metube) apk upgrade yt-dlp python3 py3-aiohttp ffmpeg && install_module_ytdlp ;;
+                torrent|transmission) apk upgrade transmission-daemon transmission-daemon-openrc ;;
             esac
             if [ -n "$MOD_SVC" ]; then
                 if service_ctl "$MOD_SVC" restart; then

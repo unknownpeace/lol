@@ -1,16 +1,14 @@
 resolve_homelab_module_id() {
     RAW_M=$(printf "%s" "${1:-}" | tr 'A-Z' 'a-z' | tr -d ' \t\r\n')
     case "$RAW_M" in
-        1|caddy)                  printf "caddy" ;;
-        2|samba|smb)              printf "samba" ;;
-        3|vaultwarden|vw|bw)      printf "vaultwarden" ;;
-        4|forgejo|git)            printf "forgejo" ;;
-        5|code|vscode|code-server) printf "code" ;;
-        6|navidrome|music)        printf "navidrome" ;;
-        7|jellyfin|jf)            printf "jellyfin" ;;
-        8|ytdlp|yt|downloads)     printf "ytdlp" ;;
-        9|torrent|qbittorrent)    printf "torrent" ;;
-        *)                        return 1 ;;
+        1|caddy)                          printf "caddy" ;;
+        2|samba|smb)                      printf "samba" ;;
+        3|vaultwarden|vw|bw)              printf "vaultwarden" ;;
+        4|forgejo|git)                    printf "forgejo" ;;
+        5|code|vscode|code-server)        printf "code" ;;
+        6|ytdlp|yt|metube|downloads)     printf "ytdlp" ;;
+        7|torrent|transmission|tr|qbittorrent) printf "torrent" ;;
+        *)                                return 1 ;;
     esac
     return 0
 }
@@ -35,8 +33,8 @@ show_service_logs_cli() {
         vaultwarden|vw|bitwarden)
             tail -n "$LINES_Q" /var/log/vaultwarden.log 2>/dev/null || echo "  (лог /var/log/vaultwarden.log пуст)"
             ;;
-        ytdlp|ytdlp-webui|downloads)
-            tail -n "$LINES_Q" /var/log/ytdlp-webui.log 2>/dev/null || echo "  (лог /var/log/ytdlp-webui.log пуст)"
+        ytdlp|metube|downloads)
+            tail -n "$LINES_Q" /var/log/metube.log /var/log/ytdlp-webui.log 2>/dev/null || echo "  (лог MeTube пуст)"
             ;;
         code|code-server|vscode)
             tail -n "$LINES_Q" /var/log/code-server.log 2>/dev/null || echo "  (лог /var/log/code-server.log пуст)"
@@ -47,21 +45,15 @@ show_service_logs_cli() {
         forgejo|git)
             tail -n "$LINES_Q" /var/log/forgejo/*.log 2>/dev/null || echo "  (лог /var/log/forgejo пуст)"
             ;;
-        jellyfin|jf)
-            tail -n "$LINES_Q" /var/log/jellyfin/*.log /var/log/jellyfin.log 2>/dev/null || echo "  (лог jellyfin пуст)"
-            ;;
-        navidrome|music)
-            tail -n "$LINES_Q" /var/log/navidrome.log 2>/dev/null || echo "  (лог /var/log/navidrome.log пуст)"
-            ;;
-        torrent|qbittorrent|qbittorrent-nox)
-            tail -n "$LINES_Q" /var/log/qbittorrent-nox.log 2>/dev/null || echo "  (лог /var/log/qbittorrent-nox.log пуст)"
+        torrent|transmission|tr)
+            tail -n "$LINES_Q" /var/log/transmission/transmission.log /var/log/qbittorrent-nox.log 2>/dev/null || echo "  (лог Transmission пуст)"
             ;;
         autoupdate|cron)
             tail -n "$LINES_Q" "$AUTOUPDATE_LOG" 2>/dev/null || echo "  (лог ${AUTOUPDATE_LOG} пуст)"
             ;;
         *)
             echo "  ${C_YEL}[▲] Неизвестная служба: ${SVC_Q}${C_RES}"
-            echo "  Доступные: sing-box, adguard, caddy, vaultwarden, ytdlp, code, samba, forgejo, jellyfin, navidrome, torrent, autoupdate"
+            echo "  Доступные: sing-box, adguard, caddy, vaultwarden, metube, code, samba, forgejo, transmission, autoupdate"
             ;;
     esac
     ui_box_bottom
@@ -162,8 +154,8 @@ ADMIN_PASS="ChangeMe123!"
 ENABLE_AUTOUPDATE="no"
 
 # 3. Модули домашнего сервера (Homelab & Media Stack)
-# Доступно: 1/caddy, 2/samba, 3/vaultwarden, 4/forgejo, 5/code, 6/navidrome, 7/jellyfin, 8/ytdlp, 9/torrent, 'all', 'none'
-HOMELAB_MODULES="1 2 3 6 9"
+# Доступно: 1/caddy, 2/samba, 3/vaultwarden, 4/forgejo, 5/code, 6/metube, 7/torrent, 'all', 'none'
+HOMELAB_MODULES="1 2 3 6 7"
 
 # 4. Внешний накопитель и шифрование (USB / SATA / NVMe) [Опционально]
 STORAGE_DISK="none"
@@ -259,7 +251,7 @@ print_gateway_cli_help() {
     ui_box_row "${C_CYN}gw restart${C_RES}                  — Быстрая пересборка конфига, сброс conntrack и перезапуск шлюза"
     ui_box_row "${C_CYN}gw update${C_RES} (или ${C_CYN}check${C_RES})        — Полное обновление: скрипты Git + ядра Sing-Box/AGH + Homelab"
     ui_box_row "${C_CYN}gw links${C_RES} (или ${C_CYN}gw urls${C_RES})         — Карточка всех веб-адресов https://*.lan, сертификата и шары Samba"
-    ui_box_row "${C_CYN}gw logs [служба]${C_RES}            — Живые логи (sing-box|adguard|caddy|vaultwarden|jellyfin|samba|...)"
+    ui_box_row "${C_CYN}gw logs [служба]${C_RES}            — Живые логи (sing-box|adguard|caddy|vaultwarden|metube|samba|...)"
     ui_box_sep "🤖 АВТОМАТИЧЕСКАЯ УСТАНОВКА И ФАЙЛЫ ОТВЕТОВ (ZERO-TOUCH)"
     ui_box_row "${C_CYN}gw install --answers <файл>${C_RES} — Полная тихая установка шлюза и сервисов без единого вопроса"
     ui_box_row "${C_CYN}gw answers template [файл]${C_RES}  — Сгенерировать подробный шаблон файла ответов (Answers File)"
@@ -285,8 +277,8 @@ print_gateway_cli_help() {
     ui_box_row "${C_CYN}gw lxc menu${C_RES}                 — Интерактивное TUI-меню LXC виртуализации"
     ui_box_sep "🏠 МОДУЛИ HOMELAB И ЕДИНЫЙ БЭКАП"
     ui_box_row "${C_CYN}gw homelab${C_RES}                  — Открыть интерактивное меню управления домашним сервером (Пункт 13)"
-    ui_box_row "${C_CYN}gw homelab install <1-9>${C_RES}    — Установить модуль (caddy|samba|vaultwarden|forgejo|code|navidrome|jellyfin|ytdlp|torrent)"
-    ui_box_row "${C_CYN}gw homelab restart <1-9>${C_RES}    — Перезапустить выбранный модуль Homelab"
+    ui_box_row "${C_CYN}gw homelab install <1-7>${C_RES}    — Установить модуль (caddy|samba|vaultwarden|forgejo|code|metube|torrent)"
+    ui_box_row "${C_CYN}gw homelab restart <1-7>${C_RES}    — Перезапустить выбранный модуль Homelab"
     ui_box_row "${C_CYN}gw backup [create|full|restore|telegram]${C_RES} — Управление резервными копиями и отправка в Telegram"
     ui_box_bottom
     return 0

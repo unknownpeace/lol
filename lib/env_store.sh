@@ -74,7 +74,6 @@ load_gateway_env() {
     [ -z "${SMB_USER:-}" ] && SMB_USER="${AGH_USER:-homelab}"
     [ -z "${SMB_PASS:-}" ] && SMB_PASS="${ADMIN_PASS:-}"
     [ -z "${STORAGE_ROOT:-}" ] && STORAGE_ROOT="/srv/storage"
-    [ -z "${JELLYFIN_UNIFIED_MEDIA:-}" ] && JELLYFIN_UNIFIED_MEDIA="yes"
     [ -z "${EXT_STORAGE_EXPECTED:-}" ] && EXT_STORAGE_EXPECTED="no"
     [ -z "${EXT_STORAGE_UUID:-}" ] && EXT_STORAGE_UUID=""
     [ -z "${EXT_STORAGE_LUKS_UUID:-}" ] && EXT_STORAGE_LUKS_UUID=""
@@ -137,7 +136,6 @@ save_homelab_env() {
     ESC_SMBU=$(escape_single_quotes "${SMB_USER:-${AGH_USER:-homelab}}")
     ESC_SMBP=$(escape_single_quotes "${SMB_PASS:-${ADMIN_PASS:-}}")
     ESC_SROOT=$(escape_single_quotes "${STORAGE_ROOT:-/srv/storage}")
-    ESC_JFUNI=$(escape_single_quotes "${JELLYFIN_UNIFIED_MEDIA:-yes}")
     ESC_EXP=$(escape_single_quotes "${EXT_STORAGE_EXPECTED:-no}")
     ESC_EUUID=$(escape_single_quotes "${EXT_STORAGE_UUID:-}")
     ESC_LUUID=$(escape_single_quotes "${EXT_STORAGE_LUKS_UUID:-}")
@@ -150,7 +148,6 @@ save_homelab_env() {
 SMB_USER='${ESC_SMBU}'
 SMB_PASS='${ESC_SMBP}'
 STORAGE_ROOT='${ESC_SROOT}'
-JELLYFIN_UNIFIED_MEDIA='${ESC_JFUNI}'
 EXT_STORAGE_EXPECTED='${ESC_EXP}'
 EXT_STORAGE_UUID='${ESC_EUUID}'
 EXT_STORAGE_LUKS_UUID='${ESC_LUUID}'

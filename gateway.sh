@@ -89,12 +89,9 @@ fi
 
 # Загрузка экосистемы Homelab и медиа-сервисов
 . "${GATEWAY_DIR}/modules/homelab/registry.sh"
-. "${GATEWAY_DIR}/modules/homelab/advisor.sh"
 . "${GATEWAY_DIR}/modules/homelab/services/vaultwarden.sh"
 . "${GATEWAY_DIR}/modules/homelab/services/forgejo.sh"
 . "${GATEWAY_DIR}/modules/homelab/services/code.sh"
-. "${GATEWAY_DIR}/modules/homelab/services/navidrome.sh"
-. "${GATEWAY_DIR}/modules/homelab/services/jellyfin.sh"
 . "${GATEWAY_DIR}/modules/homelab/services/ytdlp.sh"
 . "${GATEWAY_DIR}/modules/homelab/services/torrent.sh"
 . "${GATEWAY_DIR}/modules/homelab/dispatch.sh"

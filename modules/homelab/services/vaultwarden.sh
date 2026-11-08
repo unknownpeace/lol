@@ -1,3 +1,23 @@
+#!/bin/sh
+set -e
+
+# ==============================================================================
+# Модуль Vaultwarden (Bitwarden Server)
+# ==============================================================================
+
+if [ -z "${GATEWAY_DIR:-}" ]; then
+    GATEWAY_DIR="$(cd -P "$(dirname "$0")/../../.." && pwd)"
+    . "${GATEWAY_DIR}/lib/constants.sh"
+    . "${GATEWAY_DIR}/lib/ui.sh"
+    . "${GATEWAY_DIR}/lib/core.sh"
+    . "${GATEWAY_DIR}/lib/env.sh"
+    . "${GATEWAY_DIR}/lib/env_store.sh"
+    . "${GATEWAY_DIR}/modules/caddy/ssl.sh"
+    . "${GATEWAY_DIR}/modules/caddy/caddy.sh"
+    . "${GATEWAY_DIR}/modules/network/firewall.sh"
+    . "${GATEWAY_DIR}/modules/homelab/registry.sh"
+fi
+
 detect_vaultwarden_web_dir() {
     for WV_CAND in \
         "/usr/share/webapps/vaultwarden-web" \
@@ -142,12 +162,20 @@ VW_INIT_EOF
 }
 
 remove_module_vaultwarden() {
-    service_ctl vaultwarden stop
-    service_ctl vaultwarden disable
+    service_ctl vaultwarden stop || true
+    service_ctl vaultwarden disable || true
     remove_caddy_site "vaultwarden"
     set_module_state "vaultwarden" "no"
     echo "${C_GRN}[✓] Модуль Vaultwarden отключен (база паролей в /var/lib/vaultwarden сохранена).${C_RES}"
     return 0
 }
 
-# 2. Модуль Forgejo (Локальный Git-сервер на порту 3001)
+if [ "${0##*/}" = "vaultwarden.sh" ]; then
+    case "${1:-status}" in
+        install) install_module_vaultwarden ;;
+        remove)  remove_module_vaultwarden ;;
+        restart) service_ctl vaultwarden restart ;;
+        status)  service_ctl vaultwarden status ;;
+        *)       echo "Использование: $0 [install|remove|restart|status]" ;;
+    esac
+fi

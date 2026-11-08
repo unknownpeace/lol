@@ -27,10 +27,8 @@ samba|no|samba|445|_|homelab|Samba SMB2/3 + WSDD + Avahi
 vaultwarden|no|vaultwarden|8222|vaultwarden.lan|vaultwarden|Vaultwarden (Bitwarden Server)
 forgejo|no|forgejo|3001|forgejo.lan|forgejo|Forgejo (Git Service)
 code|no|code-server|8443|code.lan|coder|Server-Code (VS Code Web IDE)
-navidrome|no|navidrome|4533|music.lan|navidrome|Navidrome (Music Streaming)
-jellyfin|no|jellyfin|8096|jellyfin.lan|jellyfin|Jellyfin (Media Server)
-ytdlp|no|ytdlp-webui|8081|downloads.lan|ytdlp|yt-dlp Web UI (Video/Audio Downloader)
-torrent|no|qbittorrent-nox|8080|torrents.lan|qbittorrent|qBittorrent-nox (Torrent Web UI)
+ytdlp|no|metube|8081|downloads.lan|metube|MeTube (yt-dlp Video & Audio Web UI)
+torrent|no|transmission-daemon|9091|torrents.lan|transmission|Transmission (BitTorrent Web UI)
 REG_EOF
     fi
     return 0
@@ -89,14 +87,14 @@ ensure_media_group_and_users() {
     addgroup "$SMB_USER" "$MEDIA_GROUP" 2>/dev/null || true
 
     # Разблокировка сервисных и пользовательских аккаунтов ('!' -> '*' в /etc/shadow) для smbd, OpenRC и su
-    for UNLOCK_U in "$SMB_USER" caddy vaultwarden forgejo navidrome jellyfin ytdlp qbittorrent coder homelab; do
+    for UNLOCK_U in "$SMB_USER" caddy vaultwarden forgejo metube transmission coder homelab; do
         if [ -f /etc/shadow ] && grep -q "^${UNLOCK_U}:!" /etc/shadow 2>/dev/null; then
             sed -i "s/^${UNLOCK_U}:!/${UNLOCK_U}:*/" /etc/shadow 2>/dev/null || passwd -u "$UNLOCK_U" >/dev/null 2>&1 || true
         fi
     done
 
-    # Добавление установленных сервисных пользователей медиаконвейера в единую группу media
-    for SVC_U in jellyfin navidrome ytdlp qbittorrent coder; do
+    # Добавление установленных сервисных пользователей в единую группу media
+    for SVC_U in metube transmission coder; do
         if id "$SVC_U" >/dev/null 2>&1; then
             addgroup "$SVC_U" "$MEDIA_GROUP" 2>/dev/null || true
         fi
@@ -111,19 +109,9 @@ init_homelab_storage() {
     mkdir -p \
         "$STORAGE_MUSIC" \
         "$STORAGE_VIDEOS" \
-        "$STORAGE_VIDEOS_MOVIES" \
-        "$STORAGE_VIDEOS_SERIES" \
         "$STORAGE_DOWNLOADS" \
-        "$STORAGE_DL_MUSIC" \
-        "$STORAGE_DL_VIDEOS" \
-        "$STORAGE_DL_OTHER" \
         "$STORAGE_INCOMPLETE" \
-        "$STORAGE_INC_TORRENTS" \
-        "$STORAGE_INC_YTDLP" \
-        "$STORAGE_BACKUPS" \
-        "$STORAGE_REPOS" \
-        "$STORAGE_CODE" \
-        "$STORAGE_PERSONAL"
+        "$STORAGE_BACKUPS"
 
     repair_storage_permissions
     umask 022
@@ -142,23 +130,13 @@ repair_storage_permissions() {
     for SUB_D in \
         "$STORAGE_MUSIC" \
         "$STORAGE_VIDEOS" \
-        "$STORAGE_VIDEOS_MOVIES" \
-        "$STORAGE_VIDEOS_SERIES" \
         "$STORAGE_DOWNLOADS" \
-        "$STORAGE_DL_MUSIC" \
-        "$STORAGE_DL_VIDEOS" \
-        "$STORAGE_DL_OTHER" \
         "$STORAGE_INCOMPLETE" \
-        "$STORAGE_INC_TORRENTS" \
-        "$STORAGE_INC_YTDLP" \
-        "$STORAGE_BACKUPS" \
-        "$STORAGE_REPOS" \
-        "$STORAGE_CODE" \
-        "$STORAGE_PERSONAL"; do
+        "$STORAGE_BACKUPS"; do
         [ -d "$SUB_D" ] || mkdir -p "$SUB_D" 2>/dev/null || continue
     done
 
-    for TOP_D in "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" "$STORAGE_CODE" "$STORAGE_PERSONAL" "$STORAGE_BACKUPS"; do
+    for TOP_D in "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" "$STORAGE_BACKUPS"; do
         [ -d "$TOP_D" ] || continue
         chown -R "${SMB_USER}:${MEDIA_GROUP}" "$TOP_D" 2>/dev/null || chgrp -R "$MEDIA_GROUP" "$TOP_D" 2>/dev/null || true
         find "$TOP_D" -type d -exec chmod 2775 {} + 2>/dev/null || true
@@ -166,13 +144,9 @@ repair_storage_permissions() {
     done
 
     # Выделение прав владельца на временные буферы соответствующим демонам при сохранении группы media (2775)
-    if id qbittorrent >/dev/null 2>&1 && [ -d "$STORAGE_INC_TORRENTS" ]; then
-        chown -R "qbittorrent:${MEDIA_GROUP}" "$STORAGE_INC_TORRENTS" 2>/dev/null || true
-        chmod 2775 "$STORAGE_INC_TORRENTS" 2>/dev/null || true
-    fi
-    if id ytdlp >/dev/null 2>&1 && [ -d "$STORAGE_INC_YTDLP" ]; then
-        chown -R "ytdlp:${MEDIA_GROUP}" "$STORAGE_INC_YTDLP" 2>/dev/null || true
-        chmod 2775 "$STORAGE_INC_YTDLP" 2>/dev/null || true
+    if id transmission >/dev/null 2>&1 && [ -d "$STORAGE_INCOMPLETE" ]; then
+        chown -R "transmission:${MEDIA_GROUP}" "$STORAGE_INCOMPLETE" 2>/dev/null || true
+        chmod 2775 "$STORAGE_INCOMPLETE" 2>/dev/null || true
     fi
 
     # Применение наследуемых POSIX ACL (если установлен пакет acl и ФС поддерживает ACL)
@@ -180,7 +154,7 @@ repair_storage_permissions() {
         setfacl -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" -d -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" "$STORAGE_ROOT" 2>/dev/null || true
         setfacl -R -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" -d -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" \
             "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" 2>/dev/null || true
-        for ACL_U in jellyfin navidrome ytdlp qbittorrent coder; do
+        for ACL_U in metube transmission coder; do
             if id "$ACL_U" >/dev/null 2>&1; then
                 setfacl -R -m "u:${ACL_U}:rwx" -d -m "u:${ACL_U}:rwx" \
                     "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" 2>/dev/null || true
@@ -236,21 +210,13 @@ print_storage_stats() {
         ui_box_row "${C_YEL}[▲] ВНИМАНИЕ: Внешний накопитель ожидает разблокировки LUKS2 (gateway unlock) или подключения!${C_RES}"
         ui_box_row "${C_DIM}    Зависимые медиа-сервисы удерживаются в безопасной паузе для защиты системного диска.${C_RES}"
     fi
-    ui_box_sep "КАТАЛОГИ МЕДИАТЕКИ И ОБЛАКА"
+    ui_box_sep "КАТАЛОГИ ХРАНИЛИЩА (SAMBA & МЕДИА)"
     for D_ITEM in \
         "$STORAGE_MUSIC" \
         "$STORAGE_VIDEOS" \
-        "$STORAGE_VIDEOS_MOVIES" \
-        "$STORAGE_VIDEOS_SERIES" \
         "$STORAGE_DOWNLOADS" \
-        "$STORAGE_DL_MUSIC" \
-        "$STORAGE_DL_VIDEOS" \
-        "$STORAGE_DL_OTHER" \
-        "$STORAGE_REPOS" \
-        "$STORAGE_CODE" \
-        "$STORAGE_PERSONAL" \
-        "$STORAGE_BACKUPS" \
-        "$STORAGE_INCOMPLETE"; do
+        "$STORAGE_INCOMPLETE" \
+        "$STORAGE_BACKUPS"; do
         if [ -d "$D_ITEM" ]; then
             D_SZ=$(du -sh "$D_ITEM" 2>/dev/null | awk '{print $1}' || echo "0")
             D_PM=$(stat -c "%a %U:%G" "$D_ITEM" 2>/dev/null || echo "н/д")

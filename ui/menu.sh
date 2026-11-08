@@ -5,22 +5,21 @@ show_homelab_menu() {
         clear
         ui_banner "HOMELAB & MEDIA STACK // МОДУЛЬНЫЙ ДОМАШНИЙ СЕРВЕР ALPINE"
         print_homelab_services_table
-        ui_box_top "🎛️ ПАНЕЛЬ УПРАВЛЕНИЯ ДОМАШНИМ СЕРВЕРОМ [0-12]"
+        ui_box_top "🎛️ ПАНЕЛЬ УПРАВЛЕНИЯ ДОМАШНИМ СЕРВЕРОМ [0-11]"
         ui_box_row "${C_CYN}1)${C_RES}  🔗 Карточка всех веб-ссылок (*.lan), сетевых папок и диагностика (Self-Test)"
-        ui_box_row "${C_CYN}2)${C_RES}  ➕ Установить дополнительные модули Homelab (по номерам 1–9)"
-        ui_box_row "${C_CYN}3)${C_RES}  ➖ Отключить / остановить модуль по номеру [1–9] (с сохранением данных)"
-        ui_box_row "${C_CYN}4)${C_RES}  🔄 Обновить модули Homelab (по номеру [1–9] или 'all' для всех)"
-        ui_box_row "${C_CYN}5)${C_RES}  ⚙️ Управление службами: Старт / Стоп / Перезапуск (по номеру [1–9])"
+        ui_box_row "${C_CYN}2)${C_RES}  ➕ Установить дополнительные модули Homelab (по номерам 1–7)"
+        ui_box_row "${C_CYN}3)${C_RES}  ➖ Отключить / остановить модуль по номеру [1–7] (с сохранением данных)"
+        ui_box_row "${C_CYN}4)${C_RES}  🔄 Обновить модули Homelab (по номеру [1–7] или 'all' для всех)"
+        ui_box_row "${C_CYN}5)${C_RES}  ⚙️ Управление службами: Старт / Стоп / Перезапуск (по номеру [1–7])"
         ui_box_row "${C_CYN}6)${C_RES}  📜 Просмотр живых логов сервисов Homelab"
         ui_box_row "${C_CYN}7)${C_RES}  ${C_GRN}💽 Внешние накопители (USB/SATA/NVMe), LUKS2, ФС (ext4/btrfs/f2fs) и перенос данных${C_RES}"
         ui_box_row "${C_CYN}8)${C_RES}  📁 Настройка сетевого диска Samba и обнаружения (Windows 11 24H2+ / Linux)"
         ui_box_row "${C_CYN}9)${C_RES}  🔒 Управление SSL/TLS: Валидный Let's Encrypt (DuckDNS) vs Локальный PKI (*.lan)"
         ui_box_row "${C_CYN}10)${C_RES} 📦 Резервное копирование и восстановление (Шлюз + БД SQLite + Telegram)"
-        ui_box_row "${C_CYN}11)${C_RES} 🎬🎵 Архитектура медиатеки: режим работы Jellyfin и Navidrome"
-        ui_box_row "${C_CYN}12)${C_RES} ${C_YEL}🔓 Быстро разблокировать внешний диск LUKS2 (gateway unlock)${C_RES}"
+        ui_box_row "${C_CYN}11)${C_RES} ${C_YEL}🔓 Быстро разблокировать внешний диск LUKS2 (gateway unlock)${C_RES}"
         ui_box_row "${C_CYN}0)${C_RES}  Назад в главное меню шлюза"
         ui_box_bottom
-        printf "Выберите действие [0-12]: "
+        printf "Выберите действие [0-11]: "
         read -r HL_ACT < /dev/tty || true
 
         case "$HL_ACT" in
@@ -40,19 +39,19 @@ show_homelab_menu() {
                 read -r _ < /dev/tty || true
                 ;;
             3)
-                printf "Введите номер [1-9] или имя модуля для отключения: "
+                printf "Введите номер [1-7] или имя модуля для отключения: "
                 read -r RM_IN < /dev/tty || true
                 RM_MOD=$(resolve_homelab_module_id "$RM_IN" || true)
                 if [ -n "$RM_MOD" ]; then
                     homelab_module_dispatch "$RM_MOD" "remove" || true
                 else
-                    ui_warn_box "Модуль '${RM_IN}' не распознан." "Введите число от 1 до 9 или имя модуля (например: jellyfin)."
+                    ui_warn_box "Модуль '${RM_IN}' не распознан." "Введите число от 1 до 7 или имя модуля (например: transmission)."
                 fi
                 printf "\nНажмите Enter для продолжения..."
                 read -r _ < /dev/tty || true
                 ;;
             4)
-                printf "Введите номер модуля [1-9] для обновления (или Enter / 'all' — обновить все активные): "
+                printf "Введите номер модуля [1-7] для обновления (или Enter / 'all' — обновить все активные): "
                 read -r UP_IN < /dev/tty || true
                 UP_IN=$(printf "%s" "$UP_IN" | tr -d ' \t\r\n')
                 if [ -z "$UP_IN" ] || [ "$UP_IN" = "all" ] || [ "$UP_IN" = "ALL" ]; then
@@ -65,14 +64,14 @@ show_homelab_menu() {
                     if [ -n "$UP_MOD" ]; then
                         homelab_module_dispatch "$UP_MOD" "update" || true
                     else
-                        ui_warn_box "Модуль '${UP_IN}' не распознан." "Введите число от 1 до 9 или 'all'."
+                        ui_warn_box "Модуль '${UP_IN}' не распознан." "Введите число от 1 до 7 или 'all'."
                     fi
                 fi
                 printf "\nНажмите Enter для продолжения..."
                 read -r _ < /dev/tty || true
                 ;;
             5)
-                printf "Введите номер [1-9] или имя модуля: "
+                printf "Введите номер [1-7] или имя модуля: "
                 read -r CTL_IN < /dev/tty || true
                 CTL_MOD=$(resolve_homelab_module_id "$CTL_IN" || true)
                 if [ -n "$CTL_MOD" ]; then
@@ -87,14 +86,14 @@ show_homelab_menu() {
                     esac
                     homelab_module_dispatch "$CTL_MOD" "$CTL_OP" || true
                 else
-                    ui_warn_box "Модуль '${CTL_IN}' не распознан." "Введите число от 1 до 9."
+                    ui_warn_box "Модуль '${CTL_IN}' не распознан." "Введите число от 1 до 7."
                 fi
                 printf "\nНажмите Enter для продолжения..."
                 read -r _ < /dev/tty || true
                 ;;
             6)
-                echo "Доступные журналы: 1) caddy  2) vaultwarden  3) ytdlp  4) code-server  5) samba  6) forgejo  7) jellyfin  8) navidrome  9) qbittorrent"
-                printf "Выберите журнал [1-9]: "
+                echo "Доступные журналы: 1) caddy  2) vaultwarden  3) metube  4) code-server  5) samba  6) forgejo  7) transmission"
+                printf "Выберите журнал [1-7]: "
                 read -r LOG_SEL < /dev/tty || true
                 case "$LOG_SEL" in
                     1) show_service_logs_cli "caddy" ;;
@@ -103,9 +102,7 @@ show_homelab_menu() {
                     4) show_service_logs_cli "code" ;;
                     5) show_service_logs_cli "samba" ;;
                     6) show_service_logs_cli "forgejo" ;;
-                    7) show_service_logs_cli "jellyfin" ;;
-                    8) show_service_logs_cli "navidrome" ;;
-                    9) show_service_logs_cli "torrent" ;;
+                    7) show_service_logs_cli "torrent" ;;
                 esac
                 printf "\nНажмите Enter для продолжения..."
                 read -r _ < /dev/tty || true
@@ -171,11 +168,6 @@ show_homelab_menu() {
                 read -r _ < /dev/tty || true
                 ;;
             11)
-                show_media_architecture_advisor || true
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
-                ;;
-            12)
                 unlock_external_storage_cli || true
                 printf "\nНажмите Enter для продолжения..."
                 read -r _ < /dev/tty || true
@@ -260,7 +252,7 @@ show_menu() {
                 echo ""
                 run_self_test
                 ui_box_top "🔌 АКТИВНЫЕ СЕТЕВЫЕ ПОРТЫ СЕРВЕРА"
-                ss -tulpn 2>/dev/null | grep -E ':(53|80|443|445|1053|3000|3001|4533|7890|8080|8081|8096|8222|8443|9090)\b' || true
+                ss -tulpn 2>/dev/null | grep -E ':(53|80|443|445|1053|3000|3001|7890|8081|8222|8443|9090|9091)\b' || true
                 ui_box_bottom
                 printf "Нажмите Enter для возврата в меню (или введите 'd' для рентгена любого сайта): "
                 read -r ST_ACT < /dev/tty || true

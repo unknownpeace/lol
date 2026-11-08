@@ -1,3 +1,20 @@
+#!/bin/sh
+# ==============================================================================
+# Модуль Homelab: VS Code Web Server (Native Alpine musl)
+# ==============================================================================
+
+if [ -z "${GATEWAY_DIR:-}" ]; then
+    GATEWAY_DIR="$(cd -P "$(dirname "$0")/../../.." && pwd)"
+    . "${GATEWAY_DIR}/lib/constants.sh"
+    . "${GATEWAY_DIR}/lib/ui.sh"
+    . "${GATEWAY_DIR}/lib/core.sh"
+    . "${GATEWAY_DIR}/lib/env.sh"
+    . "${GATEWAY_DIR}/lib/env_store.sh"
+    . "${GATEWAY_DIR}/modules/caddy/ssl.sh"
+    . "${GATEWAY_DIR}/modules/caddy/caddy.sh"
+    . "${GATEWAY_DIR}/modules/homelab/registry.sh"
+fi
+
 install_module_code() {
     echo "${C_CYN}[*] Установка модуля Server-Code (VS Code Web Server — нативный Alpine musl)...${C_RES}"
     umask 022
@@ -84,4 +101,22 @@ remove_module_code() {
     return 0
 }
 
-# 4. Модуль Navidrome (Специализированный музыкальный сервер Subsonic/OpenSubsonic с чтением /srv/storage/Music)
+# Standalone CLI execution
+if [ "$(basename "$0")" = "code.sh" ]; then
+    case "$1" in
+        install)
+            install_module_code
+            ;;
+        remove|uninstall)
+            remove_module_code
+            ;;
+        restart)
+            service_ctl code-server restart
+            ;;
+        status)
+            rc-service code-server status 2>/dev/null || rc-status
+            ;;
+        *)
+            ;;
+    esac
+fi

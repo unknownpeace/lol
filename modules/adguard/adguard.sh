@@ -15,9 +15,9 @@ sync_agh_homelab_rewrites() {
         rc-service adguardhome stop >/dev/null 2>&1 || /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
     fi
 
-    DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan music.lan jellyfin.lan downloads.lan torrents.lan code.lan"
+    DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan downloads.lan torrents.lan code.lan"
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN} vaultwarden.${SSL_DOMAIN} forgejo.${SSL_DOMAIN} music.${SSL_DOMAIN} jellyfin.${SSL_DOMAIN} downloads.${SSL_DOMAIN} torrents.${SSL_DOMAIN} code.${SSL_DOMAIN} adguard.${SSL_DOMAIN} zashboard.${SSL_DOMAIN} singbox.${SSL_DOMAIN}"
+        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN} vaultwarden.${SSL_DOMAIN} forgejo.${SSL_DOMAIN} downloads.${SSL_DOMAIN} torrents.${SSL_DOMAIN} code.${SSL_DOMAIN} adguard.${SSL_DOMAIN} zashboard.${SSL_DOMAIN} singbox.${SSL_DOMAIN}"
     fi
 
     awk -v lip="$TARGET_LAN_IP" -v dom_list="$DOMS_STR" '

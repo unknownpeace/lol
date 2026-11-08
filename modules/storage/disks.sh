@@ -152,7 +152,7 @@ resolve_disk_selection() {
 
 # Остановка и запуск всех сервисов, использующих /srv/storage (перед монтированием или миграцией)
 stop_storage_dependent_services() {
-    for svc_s in samba qbittorrent-nox ytdlp-webui jellyfin navidrome forgejo code-server; do
+    for svc_s in samba transmission-daemon metube forgejo code-server; do
         if [ -x "/etc/init.d/${svc_s}" ] && rc-service "$svc_s" status >/dev/null 2>&1; then
             rc-service "$svc_s" stop >/dev/null 2>&1 || true
         fi
@@ -471,7 +471,7 @@ format_and_mount_external_drive() {
     return 0
 }
 
-# Умный перенос тяжелых данных сервисов Homelab (Git-репозитории Forgejo, проекты VS Code, кэш Jellyfin, бэкапы) на внешний диск
+# Умный перенос тяжелых данных сервисов Homelab (Git-репозитории Forgejo, проекты VS Code, бэкапы) на внешний диск
 relocate_heavy_services_to_external_storage() {
     load_gateway_env
     if ! is_storage_mount_ready; then
@@ -512,37 +512,8 @@ relocate_heavy_services_to_external_storage() {
     fi
     ui_box_row "${C_GRN}[✔]${C_RES} Рабочая папка проектов VS Code (Server-Code) вынесена в ${STORAGE_CODE}"
 
-    # 3. Тяжелый кэш транскодирования и метаданные обложек Jellyfin -> /srv/storage/.jellyfin-data
-    JF_EXT_DIR="${STORAGE_ROOT}/.jellyfin-data"
-    mkdir -p "${JF_EXT_DIR}/cache" "${JF_EXT_DIR}/metadata"
-    if [ -d /var/cache/jellyfin ] && [ ! -L /var/cache/jellyfin ]; then
-        cp -a /var/cache/jellyfin/. "${JF_EXT_DIR}/cache/" 2>/dev/null || true
-        rm -rf /var/cache/jellyfin
-        ln -s "${JF_EXT_DIR}/cache" /var/cache/jellyfin
-    fi
-    if [ -d /var/lib/jellyfin/metadata ] && [ ! -L /var/lib/jellyfin/metadata ]; then
-        cp -a /var/lib/jellyfin/metadata/. "${JF_EXT_DIR}/metadata/" 2>/dev/null || true
-        rm -rf /var/lib/jellyfin/metadata
-        ln -s "${JF_EXT_DIR}/metadata" /var/lib/jellyfin/metadata
-    fi
-    if id jellyfin >/dev/null 2>&1; then
-        chown -R "jellyfin:${MEDIA_GROUP}" "$JF_EXT_DIR" 2>/dev/null || true
-        chmod -R 750 "$JF_EXT_DIR" 2>/dev/null || true
-    fi
-    ui_box_row "${C_GRN}[✔]${C_RES} Кэш транскодирования и обложки Jellyfin вынесены в ${JF_EXT_DIR}"
-
-    # 4. Кэш транскодирования аудио Navidrome -> /srv/storage/.navidrome-cache
-    ND_EXT_DIR="${STORAGE_ROOT}/.navidrome-cache"
-    mkdir -p "$ND_EXT_DIR"
-    if [ -d /var/lib/navidrome/cache ] && [ ! -L /var/lib/navidrome/cache ]; then
-        cp -a /var/lib/navidrome/cache/. "$ND_EXT_DIR/" 2>/dev/null || true
-        rm -rf /var/lib/navidrome/cache
-        ln -s "$ND_EXT_DIR" /var/lib/navidrome/cache
-    fi
-    if id navidrome >/dev/null 2>&1; then
-        chown -R "navidrome:${MEDIA_GROUP}" "$ND_EXT_DIR" 2>/dev/null || true
-    fi
-    ui_box_row "${C_GRN}[✔]${C_RES} Кэш аудио-транскодирования Navidrome вынесен в ${ND_EXT_DIR}"
+    # 3. Синхронизация прав медиа-хранилища
+    repair_storage_permissions
 
     # 5. Автоматическое зеркалирование архивов бэкапа в /srv/storage/Backups
     mkdir -p "$STORAGE_BACKUPS"
@@ -600,16 +571,15 @@ manage_external_disks_menu() {
         print_storage_stats
         list_available_external_disks
         ui_box_top "📦 ЧТО ХРАНИТСЯ И ВЫНОСИТСЯ НА ВНЕШНИЙ НАКОПИТЕЛЬ (${STORAGE_ROOT})"
-        ui_box_row "• 🎵 ${C_CYN}Music${C_RES} & 🎬 ${C_CYN}Videos (Movies/Series)${C_RES} — вся медиатека Jellyfin и Navidrome"
-        ui_box_row "• ⬇️ ${C_CYN}Downloads & Incomplete${C_RES}          — тяжелые раздачи qBittorrent и буфер yt-dlp (0 износа SD/eMMC!)"
-        ui_box_row "• 💻 ${C_CYN}Git-Repos & Workspace${C_RES}           — Git-репозитории/LFS Forgejo и проекты VS Code (Server-Code)"
-        ui_box_row "• 🗂️ ${C_CYN}Personal & Backups${C_RES}              — личный сетевой диск Samba для ПК/телефона + архивы бэкапов"
-        ui_box_row "• ⚡ ${C_CYN}.jellyfin-data & .navidrome${C_RES}     — тяжелый кэш транскодирования видео/аудио и постеры"
+        ui_box_row "• 🎵 ${C_CYN}Music${C_RES} & 🎬 ${C_CYN}Videos${C_RES}                 — аудиотека и видеоархив (MeTube)"
+        ui_box_row "• ⬇️ ${C_CYN}Downloads & Incomplete${C_RES}          — загрузки Transmission и буфер MeTube (0 износа SD/eMMC!)"
+        ui_box_row "• 💻 ${C_CYN}Git-Repos & Workspace${C_RES}           — Git-репозитории Forgejo и проекты VS Code (Server-Code)"
+        ui_box_row "• 🗂️ ${C_CYN}Backups${C_RES}                         — архивы бэкапов шлюза"
         ui_box_sep "ДЕЙСТВИЯ С НАКОПИТЕЛЯМИ [0-7]"
         ui_box_row "${C_CYN}1)${C_RES} 🔌 Подключить существующий диск / раздел (обычный или зашифрованный ${C_YEL}LUKS2${C_RES}) в ${STORAGE_ROOT}"
         ui_box_row "${C_CYN}2)${C_RES} 💿 Форматировать накопитель в ${C_GRN}ext4 / btrfs / f2fs${C_RES} (без шифрования) и подключить"
         ui_box_row "${C_CYN}3)${C_RES} 🔐 Зашифровать накопитель в ${C_YEL}LUKS2 (AES-XTS 512-bit)${C_RES} + отформатировать (${C_GRN}ext4 / btrfs / f2fs${C_RES})"
-        ui_box_row "${C_CYN}4)${C_RES} 🚀 Вынести все тяжелые данные сервисов (Git, VS Code, кэш Jellyfin, Бэкапы) на накопитель"
+        ui_box_row "${C_CYN}4)${C_RES} 🚀 Вынести все тяжелые данные сервисов (Git, VS Code, Бэкапы) на накопитель"
         ui_box_row "${C_CYN}5)${C_RES} 🔧 Синхронизировать права доступа (${MEDIA_GROUP} + setgid 2775 + POSIX ACL) и очистить буферы"
         ui_box_row "${C_CYN}6)${C_RES} ⏏️ Безопасно размонтировать внешний диск и закрыть контейнер LUKS2 (${C_YEL}gateway eject${C_RES})"
         ui_box_row "${C_CYN}7)${C_RES} 🔓 Быстро разблокировать LUKS2-накопитель после перезагрузки (${C_GRN}gateway unlock${C_RES})"

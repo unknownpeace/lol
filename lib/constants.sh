@@ -7,7 +7,7 @@ set -e
 # ==============================================================================
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-# Автоматическое определение GATEWAY_DIR и самораспаковка автономного Install.sh
+# Автоматическое определение GATEWAY_DIR
 if [ -z "${GATEWAY_DIR:-}" ]; then
     TARGET_EXEC="${BASH_SOURCE:-$0}"
     case "$TARGET_EXEC" in
@@ -29,20 +29,9 @@ fi
 
 if [ -d "/usr/bin" ] && [ -w "/usr/bin" ]; then
     mkdir -p "/opt/gateway" 2>/dev/null || true
-    CUR_RUNNING="${BASH_SOURCE:-$0}"
-    if [ -f "$CUR_RUNNING" ] && [ "$(readlink -f "$CUR_RUNNING" 2>/dev/null)" != "/opt/gateway/Install.sh" ] && \
-       [ "$(readlink -f "$CUR_RUNNING" 2>/dev/null)" != "/opt/gateway/gateway.sh" ] && \
-       [ "$CUR_RUNNING" != "/usr/bin/gateway" ] && [ "$CUR_RUNNING" != "/usr/bin/gw" ]; then
-        case "$CUR_RUNNING" in
-            *Install.sh)
-                cp -f "$CUR_RUNNING" /opt/gateway/Install.sh 2>/dev/null || true
-                chmod +x /opt/gateway/Install.sh 2>/dev/null || true
-                ;;
-        esac
-    fi
-    if [ -f "/opt/gateway/Install.sh" ] && [ ! -f "/opt/gateway/gateway.sh" ]; then
-        ln -sf /opt/gateway/Install.sh /usr/bin/gateway 2>/dev/null || true
-        ln -sf /opt/gateway/Install.sh /usr/bin/gw 2>/dev/null || true
+    if [ -f "/opt/gateway/gateway.sh" ]; then
+        ln -sf /opt/gateway/gateway.sh /usr/bin/gateway 2>/dev/null || true
+        ln -sf /opt/gateway/gateway.sh /usr/bin/gw 2>/dev/null || true
     fi
     if [ -d "/etc/profile.d" ] && [ ! -f "/etc/profile.d/00-gateway-motd.sh" ]; then
         cat << 'MOTD_EOF' > /etc/profile.d/00-gateway-motd.sh
@@ -91,23 +80,14 @@ HOMELAB_ENV="${SB_DIR}/homelab.env"
 HOMELAB_STATE="${HOMELAB_DIR}/modules.state"
 HOMELAB_LIB_DIR="/usr/lib/gateway"
 TORRENT_HOOK="${HOMELAB_LIB_DIR}/torrent-import-hook.sh"
-YTDLP_WEB_SCRIPT="${HOMELAB_LIB_DIR}/ytdlp-webui.py"
+METUBE_DIR="/opt/metube"
+METUBE_APP_DIR="${METUBE_DIR}/app"
 STORAGE_ROOT="/srv/storage"
 STORAGE_MUSIC="${STORAGE_ROOT}/Music"
 STORAGE_VIDEOS="${STORAGE_ROOT}/Videos"
-STORAGE_VIDEOS_MOVIES="${STORAGE_VIDEOS}/Movies"
-STORAGE_VIDEOS_SERIES="${STORAGE_VIDEOS}/Series"
 STORAGE_DOWNLOADS="${STORAGE_ROOT}/Downloads"
-STORAGE_DL_MUSIC="${STORAGE_DOWNLOADS}/Music"
-STORAGE_DL_VIDEOS="${STORAGE_DOWNLOADS}/Videos"
-STORAGE_DL_OTHER="${STORAGE_DOWNLOADS}/Other"
 STORAGE_INCOMPLETE="${STORAGE_DOWNLOADS}/Incomplete"
-STORAGE_INC_TORRENTS="${STORAGE_INCOMPLETE}/torrents"
-STORAGE_INC_YTDLP="${STORAGE_INCOMPLETE}/ytdlp"
 STORAGE_BACKUPS="${STORAGE_ROOT}/Backups"
-STORAGE_REPOS="${STORAGE_ROOT}/Git-Repos"
-STORAGE_CODE="${STORAGE_ROOT}/Workspace"
-STORAGE_PERSONAL="${STORAGE_ROOT}/Personal"
 LUKS_KEYFILE="/etc/sing-box/homelab/storage.luks.key"
 LUKS_MAPPER_NAME="homelab_storage"
 EXT_DISK_SCAN_CACHE="/tmp/gateway_disks.cache"
@@ -122,7 +102,6 @@ MEDIA_GROUP="media"
 MEDIA_GID="990"
 SMB_USER="homelab"
 SMB_PASS=""
-JELLYFIN_UNIFIED_MEDIA="yes"
 HOMELAB_DOMAIN_SUFFIX="lan"
 EXT_STORAGE_EXPECTED="no"
 EXT_STORAGE_UUID=""
@@ -133,20 +112,21 @@ EXT_STORAGE_FSTYPE="ext4"
 PORT_VAULTWARDEN="8222"
 PORT_FORGEJO="3001"
 PORT_CODE="8443"
-PORT_NAVIDROME="4533"
-PORT_JELLYFIN="8096"
 PORT_YTDLP="8081"
-PORT_TORRENT_WEB="8080"
+PORT_METUBE="8081"
+PORT_TORRENT_WEB="9091"
+PORT_TRANSMISSION_WEB="9091"
 PORT_TORRENT_PEER="51413"
+PORT_TRANSMISSION_PEER="51413"
 
 # Домены Homelab и панелей шлюза (Caddy HTTPS + AdGuard Home DNS Rewrites)
 DOM_VAULTWARDEN="vaultwarden.lan"
 DOM_FORGEJO="forgejo.lan"
 DOM_CODE="code.lan"
-DOM_NAVIDROME="music.lan"
-DOM_JELLYFIN="jellyfin.lan"
 DOM_YTDLP="downloads.lan"
+DOM_METUBE="downloads.lan"
 DOM_TORRENT="torrents.lan"
+DOM_TRANSMISSION="torrents.lan"
 DOM_CA="ca.lan"
 DOM_ADGUARD="adguard.lan"
 DOM_ZASHBOARD="zashboard.lan"

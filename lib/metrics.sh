@@ -87,9 +87,7 @@ check_and_recover_power_loss_state() {
     if command -v sqlite3 >/dev/null 2>&1; then
         for DB_FILE in \
             /var/lib/vaultwarden/db.sqlite3 \
-            /var/lib/forgejo/data/forgejo.db \
-            /var/lib/navidrome/navidrome.db \
-            /var/lib/jellyfin/data/jellyfin.db; do
+            /var/lib/forgejo/data/forgejo.db; do
             if [ -f "${DB_FILE}-wal" ] && [ -f "$DB_FILE" ]; then
                 sqlite3 "$DB_FILE" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
             fi
