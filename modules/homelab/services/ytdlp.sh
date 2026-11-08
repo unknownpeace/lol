@@ -96,6 +96,7 @@ export CUSTOM_DIRS="true"
 export CREATE_CUSTOM_DIRS="true"
 export OUTPUT_TEMPLATE="%(title)s.%(ext)s"
 export OUTPUT_TEMPLATE_PLAYLIST="%(playlist_title)s/%(title)s.%(ext)s"
+export ALLOW_PRIVATE_ADDRESSES="true"
 
 depend() {
     need net
