@@ -169,7 +169,7 @@ run_installer() {
         PRE_HL_SEL="${HOMELAB_MODULES:-none}"
         [ -z "$PRE_HL_SEL" ] || [ "$PRE_HL_SEL" = "0" ] || [ "$PRE_HL_SEL" = "none" ] && PRE_HL_SEL="__SKIP__"
         if [ "$PRE_HL_SEL" = "all" ] || [ "$PRE_HL_SEL" = "ALL" ]; then
-            PRE_HL_SEL="1 2 3 4 5 6 7 8 9"
+            PRE_HL_SEL="1 2 3 4 5 6 7"
         fi
 
         ANS_STORAGE_DISK="${STORAGE_DISK:-none}"
