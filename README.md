@@ -1,378 +1,143 @@
-# 🚀 Universal Sidecar Gateway & Homelab (2026.11 Edition): Sing-Box Extended + AdGuard Home + Zashboard + Homelab Stack
+# 🚀 Universal Sidecar Gateway & Homelab (2026 Edition)
+
+<p align="center">
+  <a href="README.ru.md"><b>🇷🇺 Версия на русском языке (README.ru.md)</b></a>
+</p>
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-Repository-blue?logo=github)](https://github.com/unknownpeace/lol)
 [![Sing-Box Extended](https://img.shields.io/badge/Sing--Box_Extended-v1.14.3-purple)](https://github.com/shtorm-7/sing-box-extended)
 [![AdGuard Home](https://img.shields.io/badge/AdGuard_Home-v0.107.56-green)](https://github.com/AdguardTeam/AdGuardHome)
 [![Zashboard](https://img.shields.io/badge/Zashboard-Dashboard-orange)](https://github.com/Zephyruso/zashboard)
 [![Vaultwarden](https://img.shields.io/badge/Vaultwarden-Bitwarden-blue)](https://github.com/dani-garcia/vaultwarden)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Полностью автоматизированный, отказоустойчивый комплекс установки и управления **Sidecar-шлюзом, модульным домашним сервером (Homelab & Media Stack) и легковесной виртуализацией LXC** для **однорукого роутера / LXC-контейнера / мини-ПК / ARM64-платы**, спроектированный специально под реалии работы ТСПУ и НСДИ в России по состоянию на **ноябрь 2026 года**.
+A high-performance, automated, zero-downtime appliance for deploying and managing a **Sidecar Network Gateway, Modular Homelab Suite, and Pure LXC Virtualization Platform** on minimal hardware: Single-Board Computers (Raspberry Pi, Orange Pi, NanoPi), Mini-PCs (Intel N100/N95), Proxmox VE LXC/VMs, or routers running **Alpine Linux 3.21–3.24+** (and OpenWrt 25.12+).
 
-Скрипт за одну минуту превращает чистую **Alpine Linux 3.21–3.24+** (или **OpenWrt 25.12+** в режиме шлюза) на базе Proxmox VE LXC / VM / Mini-PC N100 / NanoPi / Raspberry Pi / Orange Pi в защищённый сетевой шлюз уровня «поставил и забыл» с реактивным TUI-меню **`gateway`** (алиас **`gw`**), динамическим MOTD-баннером, полиморфной обфускацией **AmneziaWG + MASQUE**, защитой от **перехвата DNS на ТСПУ (НСДИ DNAT)**, поддержкой протоколов прорыва «белых списков» (**Call / TrustTunnel / Sudoku / XHTTP**), готовой экосистемой домашних сервисов (**Caddy HTTPS + Local PKI, Vaultwarden, Samba SMB3, MeTube, Transmission, Forgejo, VS Code Server**), встроенной **виртуализацией чистым LXC** и **тихой автоматической установкой по файлу ответов (Zero-Touch)**.
+---
 
-🔗 **Репозиторий проекта:** [`https://github.com/unknownpeace/lol`](https://github.com/unknownpeace/lol)
+## ⚡ Key Highlights
 
-## ⚡ Быстрая установка
+* **Pure Native Performance & Zero Docker Overhead:** All core and home services run via native OpenRC daemons and cgroups v2. Total idle memory consumption is **under 100 MB RAM**.
+* **Smart Traffic Routing & Multi-Protocol Core:** Powered by `sing-box-extended`, featuring automated upstream routing, latency-based node selection (`urltest`), split-tunnel rulesets, and fallback chains.
+* **DNS Privacy & Anti-Spoofing Architecture:** Dual-engine DNS with **AdGuard Home** (port `:53`) for ad-blocking, tracker suppression, and local `.lan` zone resolution, coupled with upstream encrypted **DoH** (DNS over HTTPS with strict TLS SNI verification) and **FakeIP (`198.18.0.0/15`)** in Sing-Box.
+* **Self-Contained Homelab Ecosystem:**
+  * **Caddy Reverse Proxy & Local PKI:** Automatic TLS certificate authority and single-click root CA installation portal (`http://ca.lan`).
+  * **Samba SMB3 + WSDD:** Seamless network folder sharing with instant auto-discovery on Windows 11 (24H2) and Linux.
+  * **Vaultwarden:** Bitwarden-compatible password manager with WebCrypto API and WebAssembly support.
+  * **MeTube:** Media downloader for video and audio based on `yt-dlp`.
+  * **Transmission:** Lightweight BitTorrent client with RPC Web UI.
+  * **Forgejo & Server-Code:** Local Git repository server and in-browser VS Code Web IDE.
+* **Encrypted Storage (LUKS2):** Full support for USB/SATA/NVMe storage formatting and mounting (`ext4`, `btrfs` with `zstd:3` compression, `f2fs`) protected by **LUKS2 (Argon2id PBKDF + AES-XTS 512-bit)** with safe unmount (`gw eject`) and automated boot unlocking.
+* **Lightweight LXC Virtualization:** Container engine without Docker daemon bloat. Official image downloads (Alpine, Debian, Ubuntu), snapshots, rollback, and container NAT with integrated smart gateway routing.
 
-Подключитесь к вашему устройству по SSH (`root`) и выполните одну из команд ниже. Скрипт автоматически проверит зависимости через `apk`, зарегистрирует системные команды **`gateway`** и **`gw`**, установит автодополнение команд по клавише Tab в Bash и запустит интерактивный мастер настройки шлюза и модулей Homelab.
+---
 
-### Вариант 1 (Рекомендуемый): Установка через Git (Модульная версия с автообновлением)
+## 🚀 Quick Start
+
+Connect to your Alpine Linux device via SSH as `root`:
+
+### Method 1: Git Installation (Recommended)
 ```sh
 apk add --no-cache git
 git clone https://github.com/unknownpeace/lol.git /opt/gateway
 cd /opt/gateway
 ./setup.sh
 ```
-> 🔄 **Обновление в будущем:** в любой момент выполняйте `gw update` (или `gw update check` для просмотра новых коммитов).
 
-### Вариант 2: Тихая установка без единого вопроса (Zero-Touch Answers)
+### Method 2: Zero-Touch Unattended Installation
 ```sh
-# Генерация файла ответов: gw answers template /root/answers.env
+# Generate template: gw answers template /root/answers.env
 gw install --answers /root/answers.env
 ```
 
-> 💡 После установки вызывать панель управления шлюзом и домашним сервером из терминала можно в любой момент командой:
-> ```sh
-> gw        # или gateway
-> ```
+After installation, access the management console at any time with:
+```sh
+gw        # or 'gateway'
+```
 
 ---
 
-## 🧩 Модульная архитектура проекта
-
-Репозиторий разделен на изолированные компоненты по принципу единой ответственности:
+## 🧩 Modular Architecture
 
 ```text
-Gateway/
-├── gateway.sh                  # Точка входа и оркестратор модулей
-├── setup.sh                    # Быстрая регистрация команд gateway/gw, MOTD и автодополнения в Bash
-├── config/                     # Примеры и шаблоны переменных окружения
-│   ├── gateway.env.example     # Сеть, Sing-Box, подписки, ключи
-│   ├── homelab.env.example     # Хранилище, Samba, параметры сервисов
-│   └── gateway_answers.env     # Шаблон файла ответов для тихой автоматической установки
-├── lib/                        # Базовые библиотеки ядра
-│   ├── constants.sh            # Глобальные пути и переменные
-│   ├── ui.sh                   # ASCII-интерфейс, неоновые цвета, прогресс-бары
-│   ├── core.sh                 # Атомарная запись конфигов, локи, детекция ОС
-│   ├── env.sh                  # Валидаторы и флаги окружения
-│   ├── env_store.sh            # Загрузка и сохранение параметров .env
-│   └── metrics.sh              # Метрики RAM, диска, защита от сбоев питания
-├── modules/                    # Изолированные сервисные модули
-│   ├── network/                # nftables, TProxy, Smart DHCP (dnsmasq), сканер LAN
-│   ├── singbox/                # Генератор config.json, подписки, WARP, ноды, диагностика
-│   ├── adguard/                # AdGuard Home: интеграция rewrites (*.lan) и DNS
-│   ├── storage/                # LUKS2 шифрование, ext4/btrfs, монтирование, перенос данных
-│   ├── caddy/                  # Caddy HTTPS, локальный Root CA PKI, домены *.lan
-│   ├── samba/                  # Файловый сервер SMB3, wsdd (Windows 11), avahi
-│   ├── homelab/                # Реестр модулей и прикладные сервисы:
-│   │   ├── services/           # Отдельный установщик под каждый сервис (Vaultwarden,
-│   │   │                       # Forgejo, Code-Server, MeTube, Transmission)
-│   │   └── selftest.sh         # Сводная таблица демонов OpenRC
-│   ├── lxc/                    # Чистый LXC: менеджер контейнеров, шаблоны images.linuxcontainers.org,
-│   │                           # снапшоты, сетевой мост lxcbr0 (10.0.3.1/24) и хранилище на /srv/storage/lxc
-│   └── tools/                  # Бэкап, Telegram-бот, Watchdog, Доктор шлюза, Git-самообновление
-└── ui/                         # TUI интерфейс
-    ├── wizard.sh               # Мастер первоначальной настройки и Zero-Touch движок
-    ├── menu.sh                 # Главное меню и подменю Homelab
-    ├── cli.sh                  # Маршрутизатор CLI команд (`gateway <cmd>` / `gw <cmd>`)
-    └── cli_utils.sh            # Логи, добавление прокси/доменов из консоли, справка
+/opt/gateway/
+├── gateway.sh                  # Main entrypoint and module loader
+├── setup.sh                    # Command registration (gw/gateway), bash completions, MOTD
+├── config/                     # Configuration templates
+│   ├── gateway.env.example     # Network, routing, and provider variables
+│   ├── homelab.env.example     # Storage root, Samba credentials, disk settings
+│   └── gateway_answers.env     # Template for Zero-Touch unattended installs
+├── lib/                        # Core runtime libraries
+│   ├── constants.sh            # Global paths and defaults
+│   ├── ui.sh                   # Modern TUI rendering, colors, and progress widgets
+│   ├── core.sh                 # Atomic file transactions, inter-process locks, OS detection
+│   ├── env.sh                  # Environment validators
+│   ├── env_store.sh            # Safe .env persistence
+│   └── metrics.sh              # Telemetry, memory limits, and power-loss recovery
+├── modules/                    # Isolated service controllers
+│   ├── network/                # nftables rules, TProxy, Smart DHCP (dnsmasq), LAN scanning
+│   ├── singbox/                # Core generator, subscriptions, routing groups, diagnostics
+│   ├── adguard/                # AdGuard Home rewrites (*.lan) and upstream DNS integration
+│   ├── storage/                # LUKS2 crypto-volumes, filesystem optimization, safe mount/umount
+│   ├── caddy/                  # HTTPS gateway, local PKI authority, portal ca.lan
+│   ├── samba/                  # SMB3 daemon, WSDD (Win11), Avahi mDNS
+│   ├── homelab/                # Application modules (Vaultwarden, Transmission, MeTube, etc.)
+│   ├── lxc/                    # Native LXC manager, container bridges, snapshots
+│   └── tools/                  # Backups, Telegram bot alerts, health watchdog, system doctor
+└── ui/                         # User Interface
+    ├── wizard.sh               # Initial setup wizard & unattended engine
+    ├── menu.sh                 # 16-section interactive TUI dashboard
+    ├── cli.sh                  # Non-interactive CLI dispatcher
+    └── cli_utils.sh            # Fast CLI shortcuts and helper screens
 ```
 
-## 🛡️ Архитектура шлюза под реалии РФ (Ноябрь 2026): чем эта сборка превосходит аналоги
+---
 
-### 1. Иммунитет к перехвату открытого DNS на ТСПУ (Анти-НСДИ DNAT)
-С конца августа 2026 года на сетях российских операторов применяется прозрачный перехват (DNAT) открытых UDP/53 запросов с перенаправлением на государственные резолверы НСДИ, откуда уже удалены домены YouTube, WhatsApp, Meta и ряда зарубежных CDN (возвращается поддельный `NXDOMAIN`).
-- **Как решено в шлюзе:** системный резолвер прямого контура (`dns_ru`, используемый в том числе как `default_domain_resolver` для подключения к вашим прокси-нодам по доменам) переведён с уязвимого открытого UDP/53 на **зашифрованный DoH (`https://77.88.8.8/dns-query` с TLS SNI `common.dot.dns.yandex.net`)** с локальным UDP-фоллбэком (`dns_ru_udp`). ТСПУ больше не может подменить DNS-ответ при старте туннеля.
-- **Двухконтурный Zero-Leak DNS + Локальная зона `*.lan`:** **AdGuard Home** на порту `:53` вырезает рекламу, трекеры и `AAAA` (IPv6) запросы, автоматически резолвит локальные домены домашнего сервера (`*.lan`, `vaultwarden.lan`, `ca.lan`, `zashboard.lan`, `adguard.lan`) на LAN IP вашего сервера и передаёт внешние запросы в **Sing-Box Extended** (`127.0.0.1:1053`). Зарубежные и заблокированные ресурсы мгновенно получают **FakeIP (`198.18.0.0/15`)**, а российские домены (`ru_domain`), банки, Госуслуги и торренты резолвятся напрямую без задержек.
-- **Блокировка обходных каналов утечки:** запросы типа `HTTPS` (Type 65 / ECH) и `SVCB` гасятся кодом `NOERROR`, а порт `853` (DoT/DoQ) жёстко отсекается в `nftables`, чтобы браузеры не обходили локальный DNS-фильтр.
+## 🏠 Homelab Service Directory
 
-### 2. Три независимых слота прокси (работают одновременно или по отдельности)
-- **Слот 1 [Удалённые подписки HTTP/HTTPS — Мульти-Саб]:**
-  * Поддержка одной или сразу нескольких подписок через пробел (`custom_sub`, `custom_sub_2`...);
-  * Автоматическая очистка несовместимых хвостов (`fmt=xray/v2ray/best`) и регулярный фильтр информационного мусора (`трафик`, `осталось`, `t.me/`, `тариф`).
-- **Слот 2 [Личные ключи URI — все протоколы 2026 года]:**
-  * Прямая вставка сырых ссылок в локальный провайдер `my_nodes.yaml` с поддержкой поштучного просмотра и удаления по номеру;
-  * Полная поддержка как классических протоколов (`vless://`, `vmess://`, `hy2://`, `tuic://`, `ss://`, `trojan://`, `wg://`, `anytls://`, `mieru://`, `xhttp://`, `splithttp://`), так и **новейших протоколов прорыва ТСПУ 2026 года**:
-    * `trusttunnel://` — обфусцированный VPN-протокол от AdGuard, неотличимый от обычного HTTPS/HTTP3 трафика;
-    * `sudoku://` — низкоэнтропийная обфускация потока на базе матриц Судоку 4×4;
-    * `call://` — **туннелирование трафика внутри легитимных видеозвонков (VK Звонки, Яндекс.Телемост, Dion, WBStream)** для сохранения связи при полных шатдаунах по «белым спискам»;
-    * `naive+https://` / `naive+quic://` — проксирование через сетевой стек Chromium Cronet.
-- **Слот 3 [Бесплатный гибридный пул `☁️ Amnezia WARP` — 4 UDP AWG + 1 TCP MASQUE]:**
-  * Автоматическая регистрация аккаунта Cloudflare WARP (с обходом блокировок API регистрации и поддержкой ключей **WARP+ Argo Priority**);
-  * Живой RTT-сканер Anycast-узлов Cloudflare напрямую через интерфейс провайдера;
-  * **Полиморфная генерация CPS-сигнатур `i1` (`/dev/urandom`):** в отличие от старых скриптов со статическим пакетом `yabs.yandex.ru` (который ТСПУ научился блокировать летом 2026 года по сигнатуре), скрипт при каждой генерации создаёт **4 криптографически уникальные полиморфные сигнатуры `<b ...><r ...><t>`** с разными окнами `jc` и `jmin`/`jmax` для каждой из 4 UDP-нод;
-  * **Бронебойный фоллбэк `☁️ WARP MASQUE (TCP/H2)` (`v1.14.3-extended-2.7.3`):** использует `CONNECT-IP` поверх HTTP/2 на порту 443 с активным `record_fragment: true`, `fragment: true` и `handshake_timeout: 10s`. Если провайдер полностью глушит UDP, трафик бесшовно уходит в TCP/H2 и сам регистрирует устройство внутри ядра Sing-Box.
+All services bind locally to `127.0.0.1` and are published through Caddy HTTPS:
 
-### 3. Режим «Белые списки / Анти-Шатдаун» в один клик
-В обычное время российские ноды (`🇷🇺 / Россия / Москва / СПб / Белые списки`) автоматически отфильтровываются из подписок, чтобы `urltest` (`⚡ Авто`) не переключал весь ваш трафик на каскадный сервер в Москве из-за пинга 2 мс. В случае введения в регионе фильтрации по «белым спискам» достаточно нажать одну кнопку в меню (`Пункт 2 -> 10`), и каскадные РФ-узлы мгновенно появятся во всех селекторах.
-
-### 4. Железобетонная надёжность (Zero-Corruption & Security Hardening)
-- **Криптографическая проверка `SHA-256` (`verify_github_asset_sha256`):** перед обновлением ядер `Sing-Box Extended` и `AdGuard Home` (особенно при загрузке через зеркала `gh-proxy`) скрипт сверяет контрольную сумму скачанного архива с эталонным дайджестом из GitHub API, исключая подмену бинарника.
-- **Атомарная запись конфигураций (`.final.$$`) и авто-откат:** рабочий `/etc/sing-box/config.json` никогда не перезаписывается «на лету» (никаких пустых файлов при сбое питания). При любой ошибке валидации или нестарте `singbox-tun` за 8 секунд система автоматически возвращает предыдущий рабочий слепок состояния.
-- **Межпроцессный мьютекс (`/tmp/gateway_op.lock`):** полностью исключена гонка процессов в `04:00` ночи между `cron autoupdate` и 5-минутным `watchdog`.
-- **Умный аппаратный Kill-Switch 2.0 и `input_protect`:** правила `nftables` блокируют утечку трафика мимо `singbox-tun` на **любой** внешний интерфейс (`oifname != { "singbox-tun", "lo" }`), но автоматически делают исключение для IP-адресов из вашего белого списка `bypass_devices.conf` (`DIRECT`), а цепочка `input_protect` разрешает доступ к сервисам шлюза и Homelab только из локальных подсетей (RFC1918 / Tailscale CGNAT), наглухо закрывая внутренние порты от доступа из внешней сети.
-
-## 🏠 Модульный стек домашнего сервера (Alpine Homelab & Media Stack)
-
-Прямо во время первичной установки (или в любой момент через **Пункт 13** главного меню) вы можете развернуть до **9 нативных модулей домашнего сервера** без оверхеда Docker — все сервисы работают через легковесные демоны `OpenRC`, слушают локальный интерфейс `127.0.0.1` и публикуются в домашнюю сеть через единый HTTPS-прокси **Caddy** с локальным центром сертификации:
-
-| ID модуля | Сервис и назначение | Локальный домен (HTTPS) | Внутренний порт |
+| Module | Service | Local Address | Internal Port |
 | :--- | :--- | :--- | :--- |
-| **`1` (`caddy`)** | **Caddy HTTPS Reverse Proxy & Local PKI** — автоматический выпуск локальных TLS-сертификатов для всех сервисов и веб-портал установки Root CA в 1 клик | `http://ca.lan` (`https://ca.lan`) | `:80` / `:443` |
-| **`2` (`samba`)** | **Samba SMB2/SMB3 + WSDD + Avahi** — единая сетевая папка `/srv/storage` с мгновенным обнаружением в «Сети» Проводника Windows 11 (24H2+) и файловых менеджерах Linux | `\\HOMELAB\storage` (`smb://<IP>/storage`) | `:445` (LAN) |
-| **`3` (`vaultwarden`)** | **Vaultwarden (Bitwarden Server + чистый Web Vault)** — локальный менеджер паролей с полной поддержкой WebCrypto API, WASM SDK, WebSockets и расширений Bitwarden | `https://vaultwarden.lan` *(админка: `/admin`)* | `127.0.0.1:8222` |
-| **`4` (`forgejo`)** | **Forgejo (Git Service)** — лёгкий локальный Git-хостинг с поддержкой Git LFS, SSH, Issues и Actions | `https://forgejo.lan` | `127.0.0.1:3001` |
-| **`5` (`code`)** | **Server-Code (VS Code Web IDE)** — официальный нативный `musl`-сервер Visual Studio Code в браузере (защищён BasicAuth) | `https://code.lan` | `127.0.0.1:8443` |
-| **`6` (`metube`)** | **MeTube Downloader** — удобная веб-панель загрузки видео (`/srv/storage/Videos`) и аудио (`/srv/storage/Music`) с YouTube и сотен других сайтов на базе yt-dlp | `https://downloads.lan` | `127.0.0.1:8081` |
-| **`7` (`torrent`)** | **Transmission Web UI** — надёжный и лёгкий BitTorrent-клиент с веб-интерфейсом | `https://torrents.lan` | `127.0.0.1:9091` *(Пиры: `:51413`)* |
+| **`1` (`caddy`)** | **Caddy HTTPS & Local PKI** | `http://ca.lan` (`https://ca.lan`) | `:80` / `:443` |
+| **`2` (`samba`)** | **Samba SMB3 + WSDD** | `\\HOMELAB\storage` | `:445` |
+| **`3` (`vaultwarden`)** | **Vaultwarden (Bitwarden Server)** | `https://vaultwarden.lan` | `127.0.0.1:8222` |
+| **`4` (`forgejo`)** | **Forgejo Git Service** | `https://forgejo.lan` | `127.0.0.1:3001` |
+| **`5` (`code`)** | **Server-Code (VS Code Web IDE)** | `https://code.lan` | `127.0.0.1:8443` |
+| **`6` (`metube`)** | **MeTube Downloader** | `https://downloads.lan` | `127.0.0.1:8081` |
+| **`7` (`torrent`)** | **Transmission Web UI** | `https://torrents.lan` | `127.0.0.1:9091` |
 
-> 🔒 **Чистая эталонная сборка Vaultwarden:** модуль `vaultwarden` устанавливает нетронутый официальный пакет `vaultwarden-web-vault`, автоматически очищает любые следы сторонних модификаций (`clean_vaultwarden_web_vault`), синхронизирует DNS Rewrites в AdGuard Home и отдаёт Web Vault через чистый профиль Caddy (`X-Forwarded-Proto`, `X-Real-IP`, поддержка WebSockets `/notifications/hub`), обеспечивая мгновенную инициализацию крипто-ядра WASM и WebCrypto API при установленном корневом сертификате с `http://ca.lan`.
+---
 
-### Единая архитектура хранилища `/srv/storage` и матрица прав (`media` + `setgid 2775` + `POSIX ACL`)
-Все сервисы медиаконвейера (`samba`, `metube`, `transmission`, `coder`) объединены в системную группу **`media` (`GID 990`)**:
-- Каталоги `/srv/storage/Music`, `/srv/storage/Videos` и `/srv/storage/Downloads` автоматически получают бит **`setgid` (`2775`)** и наследуемые правила **POSIX ACL**.
-- Любой файл, скачанный через **Transmission** или **MeTube**, либо скопированный по **Samba** с домашнего ПК, мгновенно доступен для чтения, индексации и удаления во всех остальных сервисах без конфликтов прав.
-- Встроенный **Аудитор прав доступа (`gateway homelab perms`)** проверяет фактические операции `Read / Write / Create / Delete / SQLite quick_check / Cross-Service Access` от имени каждого сервисного пользователя и при необходимости чинит всё дерево прав одной командой.
-
-## 🧭 Матрица маршрутизации и селекторы в панели Zashboard (`:9090/ui`)
-
-В веб-панели **Zashboard** (`https://zashboard.lan` или `http://<IP_ШЛЮЗА>:9090/ui`) автоматически формируются чистые тематические селекторы с учётом всех блокировок 2025–2026 годов (включая YouTube, Roblox, Discord Voice, WhatsApp, Meta и видеоплеер Twitch):
-
-| Группа в панели Zashboard | Что маршрутизирует | Поведение по умолчанию |
-| :--- | :--- | :--- |
-| **⚡ Авто (Самый быстрый)** | Автоматический `urltest` каждые 3 мин (`tolerance: 35ms`, `unified_delay`) | Держит самую быструю живую ноду из всех активных слотов |
-| **🤖 AI & Google** | OpenAI (ChatGPT / Codex), Claude, Gemini, Copilot, Grok, все сервисы Google | Через `⚡ Авто` (или ручная привязка к чистой локации US/EU) |
-| **🎮 Roblox** | Игровые серверы, студия и API Roblox (`roblox.srs`) | Через `⚡ Авто` (или `☁️ Amnezia WARP` с минимальным джиттером) |
-| **▶️ YouTube & Spotify** | Видеопоток YouTube (`googlevideo.com`), **Twitch (`twitch.srs`)** и музыка Spotify | Через `⚡ Авто` (с автоматическим подавлением проблемного UDP 443 QUIC) |
-| **💬 Мессенджеры & Discord** | Telegram, WhatsApp, **Instagram / Facebook (`meta.srs`)**, Discord + Голосовые порты UDP `50000:50100`, STUN (`3478, 5349, 19302`) и `discord-voice-ip-list.srs` | Через `⚡ Авто` (полная поддержка звонков и стримов без обрывов) |
-| **📺 Устройства (Full-VPN)** | *Появляется автоматически при добавлении IP приставки / Smart TV / PS5 / Quest в Пункте 8* | Весь трафик выбранных устройств идёт через туннель (с защитой от QUIC) |
-| **🌐 Остальной трафик** | Все заблокированные ресурсы (`ru_bundle`, `rknasnblock`), подсети Cloudflare и ваши домены из `user_proxy_domains.list` | Через `⚡ Авто` |
-| **☁️ Amnezia WARP** | *Появляется при включении Слота 3* (4 полиморфные UDP-ноды AWG + 1 TCP-нода MASQUE H2) | Автовыбор лучшего Anycast-узла Cloudflare или уход в TCP MASQUE |
-| **DIRECT (Напрямую)** | Локальная зона `*.lan`, домены `.ru / .рф`, банки, Госуслуги, маркетплейсы, торренты (`BitTorrent`), NTP и устройства из `bypass_devices.conf` | Напрямую через вашего провайдера на полной скорости тарифа |
-
-## 🛠 Обзор интерактивного TUI-меню (`gateway` / `gw`)
-
-При вводе команды `gw` или `gateway` мгновенно (за `0.01 сек` благодаря кэшированию в `/tmp`) открывается информативная приборная панель из **16 разделов**:
-
-1. **Статус служб, матрица пинга и рентген сайтов (`Self-Test 2.0`):**
-   * Отображает платформу, лимиты памяти `GOMEMLIMIT`, статус `Sing-Box Extended`, `AdGuard Home`, интерфейса `singbox-tun`, алгоритм `TCP BBR`, число сессий `conntrack`, активную ноду, реальный HTTP/TLS пинг до `ya.ru`, `Cloudflare`, `YouTube` и `OpenAI API`, а также сводку по всем активным модулям Homelab.
-2. **Управление прокси (3 слота) + SSH-пульт нод:**
-   * Добавление и замена основных и дополнительных подписок (**Мульти-Саб**);
-   * Управление личными ключами в `my_nodes.yaml` (просмотр таблицы, добавление пачкой, точечное удаление по номеру);
-   * Включение и перевыпуск гибридного **Amnezia WARP + MASQUE (TCP/H2)** с поддержкой ключей **WARP+**;
-   * Переключатель режима **«Белые списки»** (показ/скрытие каскадных нод РФ);
-   * **⚡ Мини-пульт управления селекторами и нодами прямо из SSH** (для работы со смартфона без браузера);
-   * **🩺 Поштучный доктор нод с молнией (`⚡`)** — поочередно тестирует и «будит» зависшие ноды через Clash API без перегрузки процессора роутера.
-3. **🔄 Полное обновление: скрипт шлюза (Git) + ядра (Sing-Box, AGH) + Homelab:**
-   * Автоматическая проверка новых коммитов в Git с защитой `git stash`, обновление ядер Sing-Box Extended и AdGuard Home (с проверкой SHA-256), обновление активных пакетов Homelab и мягкий рестарт служб.
-4. **Пересборка конфига и сброс кэша:**
-   * Принудительная регенерация `config.json`, синхронизация правил `nftables` и очистка таблицы `conntrack`.
-5. **Живые логи Sing-Box и служб сервера:**
-   * Вывод последних событий демонов (`sing-box`, `adguard`, `caddy`, `vaultwarden`, `samba` и др.).
-6. **Полная перенастройка сервера (Мастер установки):**
-   * Повторный проход по инсталлятору шлюза и выбору модулей Homelab с сохранением всех текущих настроек по нажатию `Enter`.
-7. **Свои списки доменов + 🕵️ Детектор сайта (Рентген маршрута):**
-   * Добавление любых сайтов в принудительный прокси или в `DIRECT` (можно вставлять полные URL вида `https://www.site.com/page` — скрипт сам очистит их до `+.site.com` и скомпилирует в JSON Rule-Set v3);
-   * **🕵️ Рентген маршрута домена:** показывает, является ли домен локальным сервисом Homelab (`*.lan`), в каком списке он числится, какой IP возвращает AdGuard Home (`Блок рекламы` / `FakeIP 198.18.x.x` / `Локальный Caddy HTTPS` / `Реальный IP`), сравнивает TLS Handshake через туннель и напрямую и позволяет переключить маршрут домена одной кнопкой.
-8. **Маршрутизация устройств по IP + 🔍 Авто-сканер LAN:**
-   * Сводит единую таблицу живых устройств вашей домашней сети из `ARP` и `DHCP Leases` с отображением их MAC-адресов, имён и текущего статуса (`[По правилам]`, `[В ОБХОДЕ: DIRECT]`, `[В FULL-VPN]`);
-   * Клавиша **`[s]`** запускает активный 1.5-секундный пинг-опрос всей подсети `/24`, чтобы разбудить спящие телевизоры, приставки Apple TV / Android TV и консоли PS5 / Xbox / Meta Quest;
-   * Перевод устройства в `DIRECT` или в `Full-VPN` выполняется просто вводом его порядкового номера из таблицы.
-9. **Сервисный режим, смена единого пароля и ☁️ Единый бэкап в Telegram:**
-   * Пауза проксирования в 1 клик (`mode: direct`) без остановки DNS;
-   * **Синхронная смена единого пароля** сразу для `Zashboard`, `AdGuard Home` (`bcrypt`), сетевой шары `Samba` (`passdb.tdb`), админ-панели `Vaultwarden` (`ADMIN_TOKEN`) и `BasicAuth` в `Caddy`;
-   * Создание консистентного архива `/root/gateway_backup.tar.gz` (включая горячие дампы `sqlite3 .backup` для Vaultwarden, Forgejo и корневой сертификат Caddy PKI) с **мгновенной отправкой файла бэкапа в ваш Telegram**.
-10. **Автообновление (`04:00`), Авто-Доктор (`Watchdog`) и Telegram:**
-    * Настройка ежедневного обновления в 04:00, фонового самоисцеления служб шлюза и активных модулей Homelab каждые 5 минут (с авто-ротацией логов) и уведомлений от бота в Telegram.
-11. **Аппаратный Kill-Switch 2.0 (`nftables`):**
-    * Строгая блокировка любого трафика из LAN мимо `singbox-tun` (с сохранением доступа для устройств из белого списка `bypass_devices.conf`).
-12. **Сетевые настройки и Умный DHCP Sidecar:**
-    * Безопасная смена IP-адреса самого сервера и IP главного роутера в фоновом потоке (с автоматическим обновлением всех DNS Rewrites `*.lan` в AdGuard Home и конфиге Sing-Box) и управление встроенным DHCP-сервером.
-13. **🏠 Управление домашним сервером (`Homelab & Media Stack`):**
-    * Полноценный центр управления: доустановка, обновление и удаление модулей, просмотр логов, управление хранилищем `/srv/storage`, настройка Samba (`WSDD` + `Avahi`), выпуск сертификатов `http://ca.lan`, единый бэкап, **Аудитор прав доступа (`Permissions Audit`)** и **глубокая диагностика и починка `Vaultwarden`**.
-14. **📦 Управление контейнерами LXC (Linux Containers):**
-    * Загрузка официальных шаблонов дистрибутивов из `images.linuxcontainers.org` (Alpine, Debian, Ubuntu, AlmaLinux, Arch...), создание снапшотов (снимков), мгновенный откат, сетевые режимы (NAT через `lxcbr0` с обходом блокировок через Sing-Box или прямой Macvlan), настройка автозапуска при загрузке сервера и консольный вход (`gw lxc attach`).
-15. **🩺 Авто-Доктор одной кнопкой (`gateway doctor` / `gw doctor`):**
-    * 6-стадийный протокол самоисцеления: починка баз SQLite после аварийного отключения питания, сброс PID-блокировок, проверка ядерных модулей и sysctl, регенерация правил файрвола nftables, проверка LUKS2 и прав хранилища `/srv/storage`, валидация конфигов Sing-Box, AdGuard Home, Conntrack, LXC моста и всех сервисов Homelab.
-16. **⚡ Безопасное выключение / перезагрузка сервера или разблокировка LUKS2:**
-    * Разблокировка и блокировка внешних накопителей LUKS2 (`gw unlock`, `gw lock`/`eject`), безопасная перезагрузка (`gw safe-reboot`) и отключение питания (`gw safe-poweroff`) с автоматической корректной парковкой баз SQLite и файловых систем.
-
-## 🌐 Три способа подключить домашние устройства к шлюзу и доменам `*.lan`
-
-Допустим, ваш основной роутер имеет адрес `192.168.1.1`, а серверу вы назначили адрес `192.168.1.2`.
-
-### Способ А: Через DHCP на основном роутере (Рекомендуемый — сразу для всего дома)
-Откройте настройки **LAN / DHCP-сервер** вашего главного роутера (Keenetic, ASUS, Mikrotik, Xiaomi, TP-Link, OpenWrt) и пропишите IP шлюза (`192.168.1.2`) в двух полях:
-- **Основной шлюз (Default Gateway / DHCP Option 3):** `192.168.1.2`
-- **Основной DNS-сервер (DNS Server / DHCP Option 6):** `192.168.1.2`
-
-Переподключите Wi-Fi на смартфонах и ПК — все устройства в доме автоматически начнут работать через шлюз, без рекламы и получат прямой доступ ко всем локальным доменам `https://*.lan`.
-
-### Способ Б: Режим «Умный DHCP Sidecar» (Для залоченных операторских роутеров Ростелеком / МТС / МГТС / Дом.ру)
-Если прошивка роутера провайдера не позволяет изменить шлюз и DNS по умолчанию в настройках DHCP:
-1. Введите в терминале сервера `gateway` -> выберите пункт **12** -> нажмите **«4) ВКЛЮЧИТЬ Умный DHCP-сервер на шлюзе»**.
-2. В веб-панели роутера провайдера просто **отключите DHCP-сервер** (снимите галочку).
-Сервер сам начнёт раздавать IP-адреса в диапазоне `.100–.239` со шлюзом и DNS `192.168.1.2`.
-
-### Способ В: Точечно на отдельных устройствах (Без изменения настроек роутера)
-В сетевых настройках нужного устройства (ПК, iPhone, Android, Smart TV, PlayStation, Meta Quest) переключите настройку IPv4 с «DHCP» на **«Вручную (Статический)»**:
-- **IP-адрес:** любой свободный адрес вашей подсети (например, `192.168.1.50`)
-- **Маска подсети:** `255.255.255.0` (или префикс `24`)
-- **Шлюз (Маршрутизатор):** `192.168.1.2`
-- **DNS-сервер:** `192.168.1.2`
-
-## 🔒 Установка корневого сертификата HTTPS (`http://ca.lan`) в 1 клик
-
-Чтобы браузеры и приложения Bitwarden безоговорочно доверяли вашим локальным доменам `https://*.lan` (включая `window.crypto.subtle` / WebCrypto API для `https://vaultwarden.lan`), установите локальный корневой сертификат сервера:
-
-- **Веб-портал в браузере (для любых ОС и телефонов):** откройте **`http://ca.lan`** (или `http://<IP_ШЛЮЗА>`) и нажмите кнопку скачивания `.crt` / `.cer`.
-- **Windows 10 / 11 (PowerShell от имени Администратора — одной строкой):**
-  ```powershell
-  Invoke-WebRequest -Uri "http://ca.lan/homelab-root-ca.crt" -OutFile "$env:TEMP\homelab-ca.crt"; Import-Certificate -FilePath "$env:TEMP\homelab-ca.crt" -CertStoreLocation Cert:\LocalMachine\Root
-  ```
-- **Linux (Debian / Ubuntu / Mint / Arch / Fedora):**
-  ```sh
-  sudo curl -fsSL http://ca.lan/homelab-root-ca.crt -o /usr/local/share/ca-certificates/homelab-ca.crt && sudo update-ca-certificates
-  ```
-
-## 🖥 Веб-панели и команды быстрого вызова
-
-После завершения установки вам доступны:
-
-- 🎛 **Веб-панель маршрутизации Zashboard:** `https://zashboard.lan` / `https://singbox.lan` (или `http://<IP_ШЛЮЗА>:9090/ui`) *(единый пароль из мастера установки)*
-- 🛡 **Веб-панель фильтрации AdGuard Home:** `https://adguard.lan` (или `http://<IP_ШЛЮЗА>:3000`) *(логин из мастера установки и тот же единый пароль)*
-- 🔐 **Менеджер паролей Vaultwarden:** `https://vaultwarden.lan` *(админ-панель: `https://vaultwarden.lan/admin`)*
-- ⬇️ **Загрузчик MeTube & Торренты Transmission:** `https://downloads.lan` и `https://torrents.lan`
-- 💻 **Git-сервер Forgejo & VS Code в браузере:** `https://forgejo.lan` и `https://code.lan`
-- 📁 **Сетевая папка Samba (SMB3):** `\\HOMELAB\storage` или `\\<IP_ШЛЮЗА>\storage` (`smb://<IP_ШЛЮЗА>/storage`)
-- 🔌 **Локальный Mixed-прокси (HTTP + SOCKS5):** `<IP_ШЛЮЗА>:7890` *(для точечных расширений браузера или приложений)*
-
-### Команды CLI для терминала и автоматизации:
-
-Шлюз поддерживает короткий глобальный алиас **`gw`** (или полную команду **`gateway`**) с автодополнением по клавише Tab:
+## 🛠️ Essential CLI Commands
 
 ```sh
-# Базовое управление
-gw                                  # Открыть главное интерактивное TUI-меню (Шлюз + Homelab + LXC)
-gw motd                             # Показать системный баннер (ОЗУ, диск, сеть, статус служб, обновления)
-gw status (или gw test)             # Запустить рентген и матрицу здоровья (Self-Test 2.0 + Ping Matrix)
-gw doctor (или gw fix)              # Автоматическая починка сети, БД, файрвола, диска и контейнеров
-gw passwd [новый_пароль]            # Синхронная смена единого пароля (Sing-Box, AdGuard, Samba, Vaultwarden)
-gw restart                          # Пересобрать конфиг Sing-Box, сбросить conntrack и перезапустить службы
-gw update (или gw update check)     # Полное атомарное обновление из Git + ядра Sing-Box/AGH + Homelab
-gw links (или gw urls)              # Сводная карточка веб-адресов https://*.lan, CA-сертификата и шары
-gw logs [служба]                    # Просмотр живых логов (sing-box|adguard|caddy|vaultwarden|samba|...)
+# General & Health
+gw                           # Open main interactive dashboard
+gw status                    # Run Self-Test health matrix & ping benchmarks
+gw doctor                    # Automated one-click system & database healing
+gw update                    # Complete 5-stage atomic update from Git
+gw links                     # Print full list of *.lan domains and access credentials
 
-# Виртуализация чистым LXC
-gw lxc list                         # Таблица контейнеров (Имя, Статус, IP, ОЗУ, Автозапуск, Снимки)
-gw lxc create                       # Интерактивный мастер создания контейнера (Alpine, Debian, Ubuntu, Arch...)
-gw lxc start|stop|restart <имя>     # Запуск, остановка и перезапуск контейнера
-gw lxc attach <имя>                 # Вход в консоль контейнера root (lxc-attach)
-gw lxc snap <имя> create            # Создать снимок (снапшот) контейнера
-gw lxc snap <имя> list              # Посмотреть список снимков контейнера
-gw lxc snap <имя> restore <снимок>  # Мгновенно откатить контейнер к выбранному снимку
-gw lxc autostart <имя> [on|off]     # Включить/выключить автозапуск контейнера при загрузке сервера
+# Routing & Proxy Controls
+gw proxy add <url|key|warp>  # Register subscription or node URI
+gw domain direct <domain>    # Force domain to route directly via WAN
+gw domain proxy <domain>     # Force domain through smart proxy group
 
-# Тихая автоматическая установка (Zero-Touch Answers)
-gw answers template [файл.env]      # Сгенерировать подробный шаблон файла ответов
-gw answers verify <файл.env>        # Проверить синтаксис и валидность файла ответов
-gw install --answers <файл.env>     # Запустить 100% тихую автоматическую установку без единого вопроса
+# Storage & Crypto
+gw unlock                    # Unlock and mount LUKS2 encrypted disk
+gw lock                      # Safely stop services, flush buffers, and close LUKS2
+gw safe-reboot               # Graceful reboot with clean DB checkpointing
+gw safe-poweroff             # Graceful poweroff with storage parking
 
-# Управление дисками LUKS2 и питанием
-gw unlock                           # Быстрая разблокировка и монтирование зашифрованного диска LUKS2
-gw lock (или gw eject)              # Безопасная остановка медиасервисов, sync, umount и закрытие LUKS2
-gw disk                             # Интерактивный менеджер внешних дисков (форматирование, LUKS2, миграция)
-gw safe-reboot                      # Безопасная перезагрузка сервера с парковкой БД и криптодиска
-gw safe-poweroff                    # Безопасное выключение сервера с корректной парковкой накопителя
-
-# Быстрое управление прокси и маршрутизацией
-gw proxy add <url|key|warp>         # Добавить подписку в Слот 1, ключ URI в Слот 2 или включить WARP
-gw domain direct <домен>            # Направить домен всегда напрямую (в обход туннеля)
-gw domain proxy <домен>             # Направить домен принудительно в прокси (через туннель)
-
-# Модули Homelab и резервное копирование
-gw homelab                          # Открыть подменю управления домашним сервером
-gw homelab status                   # Проверить статус всех установленных модулей Homelab
-gw homelab perms                    # Запустить аудит прав доступа всех сервисов и /srv/storage
-gw homelab fix-perms                # Автоматически восстановить права media, setgid 2775 и ACL
-gw backup create (или full)         # Создать консистентный бэкап (дампы SQLite, Caddy PKI, конфиги)
-gw backup telegram                  # Создать бэкап и мгновенно отправить архив в Telegram-бота
+# Pure LXC Virtualization
+gw lxc list                  # List running containers, IPs, and RAM usage
+gw lxc create                # Interactive container wizard (Alpine, Debian, Ubuntu)
+gw lxc snap <name> create    # Create instant snapshot
+gw lxc snap <name> restore   # Restore container from snapshot
 ```
 
 ---
 
-## 📦 Встроенная виртуализация чистым LXC (Linux Containers)
-
-В отличие от тяжелого Docker daemon (`dockerd + containerd + docker-proxy`), потребляющего 150–250 МБ ОЗУ вхолостую, подсистема **чистого LXC** в шлюзе работает **напрямую с пространствами имен ядра (namespaces) и cgroups v2**:
-- **Ультралегковесность:** холостой запущенный контейнер Alpine Linux в LXC потребляет всего **~2–4 МБ ОЗУ**, а полноценный Debian 12 — около **20–30 МБ ОЗУ**. На компактном микро-сервере с 1–2 ГБ RAM можно держать десятки изолированных сред.
-- **Официальный репозиторий образов (`images.linuxcontainers.org`):** поддержка прямой загрузки официальных чистых rootfs-образов:
-  * **Alpine Linux 3.24 / 3.23** (микросервисы, минимальный вес);
-  * **Debian 12 Bookworm** (стандартный glibc-стек для приложений, не поддерживающих musl);
-  * **Ubuntu 24.04 LTS Noble / 22.04 LTS Jammy**;
-  * **AlmaLinux 9 / Rocky Linux 9** (RHEL-совместимый корпоративный Linux);
-  * **Arch Linux** (свежайшие rolling-release пакеты).
-- **Сетевая интеграция с защитой от ТСПУ:**
-  * **Режим NAT (`lxcbr0`, `10.0.3.1/24`):** контейнеры получают IP по DHCP (`10.0.3.X`), их DNS направляется в **AdGuard Home**, а интернет-трафик заворачивается в **Sing-Box TUN** — весь домашний обход блокировок работает внутри контейнеров автоматически.
-  * **Режим Macvlan:** контейнер подключается напрямую к домашней сети (`eth0`), получает реальный IP от квартирного роутера (`192.168.1.X`) и виден в локальной сети как отдельный физический компьютер.
-- **Мгновенные снимки (Снапшоты) и откат:** создание снимка контейнера одной командой (`gw lxc snap <имя> create`) и мгновенный откат в случае неудачного эксперимента или сбоя (`gw lxc snap <имя> restore snap0`).
-- **Хранение на внешнем диске:** контейнеры автоматически сохраняются в `/srv/storage/lxc` на подключенном или зашифрованном LUKS2 накопителе, не перегружая корневой раздел хоста.
-- **Отказоустойчивость при сбоях питания:** контейнеры с флагом `autostart` автоматически поднимаются службой `lxc` в OpenRC сразу после восстановления питания.
-
----
-
-## 🤖 Автоматическая тихая установка по файлу ответов (Zero-Touch)
-
-Для массового развертывания или автоматизации в шлюз встроен движок тихой установки без интерактивных вопросов:
-
-1. **Генерация шаблона ответов:**
-   ```sh
-   gw answers template /root/answers.env
-   ```
-2. **Заполнение параметров в файле:**
-   ```env
-   INSTALL_MODE="full"               # gateway_only | full
-   LAN_IP="192.168.1.147"           # Статический IP шлюза в домашней сети
-   ROUTER_IP="192.168.1.1"          # IP главного роутера
-   SUB_URL="https://sub.example..." # Ссылка на подписку (Слот 1)
-   ENABLE_WARP="yes"                # Активировать Amnezia WARP + MASQUE H2 (Слот 3)
-   ADMIN_USER="admin"
-   ADMIN_PASS="SuperSecretPass123"  # Единый пароль администратора
-   HOMELAB_MODULES="all"            # caddy,samba,vaultwarden,metube,torrent...
-   STORAGE_DISK="/dev/sdb"          # Внешний диск для хранилища /srv/storage
-   STORAGE_ACTION="mount"           # mount (без форматирования) | format_ext4 | luks2
-   SSL_TYPE="local"                 # local (*.lan) | duckdns (*.sub.duckdns.org)
-   ```
-3. **Проверка файла и запуск установки:**
-   ```sh
-   gw answers verify /root/answers.env
-   gw install --answers /root/answers.env
-   ```
-
----
-
-## 🔄 Атомарное Git-самообновление комплекса (`gw update`)
-
-Шлюз непрерывно отслеживает актуальность собственной кодовой базы через встроенный движок проверки версий:
-- **Неблокирующий опрос:** фоновый легковесный `git fetch` с кэшированием на 2 часа и таймаутом 4 секунды (не создает сетевых задержек).
-- **Динамический бейдж в MOTD и меню:** при наличии новых коммитов в репозитории шлюз выводит желтое уведомление при входе по SSH:
-  ```text
-  ║  • Обновление:   🔔 Доступно обновление (2 комм.) ➔ gw update
-  ```
-- **5-стадийный конвейер `gw update`:**
-  1. Автоматический `git stash` локальных изменений и безопасный `git pull --ff-only` из ветки `main`.
-  2. Проверка и обновление бинарных ядер `Sing-Box Extended`, `AdGuard Home` и панели `Zashboard` со сверкой контрольных сумм `SHA-256`.
-  3. Проверка обновлений установленных модулей Homelab через `apk`.
-  4. Пересборка конфигурации `config.json`, сброс таблиц Conntrack и мягкий перезапуск служб.
-  5. Проверка статуса, вывод итогового отчета и плавный ре-экзек в системный баннер MOTD со статусом `[актуальна ●]`.
-
-## 📋 Системные требования и подготовка окружения
-
-- **Операционная система:**
-  * **Alpine Linux 3.21 / 3.22 / 3.23 / 3.24+** (`apk`, `OpenRC`, `nftables`) — полная поддержка сетевого шлюза и всех 9 модулей стека Homelab;
-  * **OpenWrt 25.12+** (с пакетным менеджером `apk` и файрволом `fw4` / `nftables`) — режим классического сетевого шлюза.
-- **Архитектура процессора:** `x86_64 (amd64)` или `aarch64 (arm64)`.
-- **Оперативная память (RAM):**
-  * **Только сетевой шлюз + лёгкие сервисы (Caddy, Vaultwarden, Samba, Transmission, MeTube):** минимум **256–512 МБ** (скрипт автоматически масштабирует `GOMEMLIMIT` и таблицы `nf_conntrack_max` под доступный объём RAM);
-  * **Полный стек (с VS Code Server / Forgejo):** рекомендуется **1–2 ГБ RAM**.
-- **Для контейнеров Proxmox VE 8 / 9 LXC (Alpine Linux):**
-  * Контейнер должен иметь доступ к `/dev/net/tun` и праву `NET_ADMIN` (для привилегированных контейнеров включено из коробки; при необходимости скрипт сам создаёт ноду `mknod /dev/net/tun c 10 200` и подгружает модули ядра).
+## 📄 License
+This project is open-source software licensed under the [MIT License](LICENSE).
