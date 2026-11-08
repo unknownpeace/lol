@@ -82,9 +82,6 @@
 │       ├── password.sh        # Ротация единого пароля (Sing-Box + AdGuard + Samba + Homelab)
 │       ├── selftest.sh        # Экспресс-тест ядра шлюза и сетевых портов
 │       └── telegram.sh        # Оповещения в Telegram бот
-├── scripts/
-│   ├── bundle.sh              # Сборщик модулей в единый Install.sh (sh)
-│   └── bundle.py              # Сборщик модулей в единый Install.sh (python)
 └── ui/
     ├── cli.sh                 # Обработка аргументов командной строки `gw <команда>`
     ├── cli_utils.sh           # Хелперы вывода форматированного текста и карточек
