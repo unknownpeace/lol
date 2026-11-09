@@ -52,10 +52,7 @@ build_pki_portal() {
         update-ca-certificates >/dev/null 2>&1 || true
     fi
 
-    if [ -f "${GATEWAY_DIR}/ui/dashboard.html" ]; then
-        cp -f "${GATEWAY_DIR}/ui/dashboard.html" "${PKI_PORTAL_DIR}/index.html"
-    else
-        cat << HTML_EOF > "${PKI_PORTAL_DIR}/index.html"
+    cat << HTML_EOF > "${PKI_PORTAL_DIR}/index.html"
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -81,10 +78,41 @@ build_pki_portal() {
       <a class="btn" href="/homelab-root-ca.cer" download>📱 Скачать для Android / iOS (.cer)</a>
     </p>
   </div>
+
+  <div class="card">
+    <h2>🪟 Windows 11 / 10 (Автоматически через PowerShell от Администратора)</h2>
+    <pre>Invoke-WebRequest -Uri "http://ca.lan/homelab-root-ca.crt" -OutFile "\$env:TEMP\homelab-ca.crt"; Import-Certificate -FilePath "\$env:TEMP\homelab-ca.crt" -CertStoreLocation Cert:\LocalMachine\Root</pre>
+  </div>
+
+  <div class="card">
+    <h2>🐧 Linux (Debian / Ubuntu / Mint / Arch / Fedora)</h2>
+    <pre>sudo curl -fsSL http://ca.lan/homelab-root-ca.crt -o /usr/local/share/ca-certificates/homelab-ca.crt &amp;&amp; sudo update-ca-certificates</pre>
+  </div>
+
+  <div class="card">
+    <h2>🤖 Android (Установка вручную)</h2>
+    <ol>
+      <li>Нажмите кнопку <b>«Скачать для Android (.cer)»</b> выше.</li>
+      <li>Откройте <b>Настройки &rarr; Безопасность и конфиденциальность &rarr; Другие настройки безопасности &rarr; Шифрование и учетные данные</b>.</li>
+      <li>Выберите <b>Установка сертификата &rarr; Сертификат CA &rarr; Все равно установить</b> и укажите скачанный файл <code>homelab-root-ca.cer</code>.</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <h2>🏠 Все сервисы вашего домашнего сервера</h2>
+    <ul>
+      <li><a href="https://${DOM_ZASHBOARD}/ui/">https://${DOM_ZASHBOARD}</a> (или <a href="https://${DOM_SINGBOX}/ui/">https://${DOM_SINGBOX}</a>) — Панель Sing-Box (Zashboard)</li>
+      <li><a href="https://${DOM_ADGUARD}">https://${DOM_ADGUARD}</a> — Панель AdGuard Home</li>
+      <li><a href="https://${DOM_VAULTWARDEN}">https://${DOM_VAULTWARDEN}</a> — Vaultwarden (Пароли)</li>
+      <li><a href="https://${DOM_YTDLP}">https://${DOM_YTDLP}</a> — MeTube (Загрузчик видео/аудио)</li>
+      <li><a href="https://${DOM_TORRENT}">https://${DOM_TORRENT}</a> — Transmission (Торренты)</li>
+      <li><a href="https://${DOM_FORGEJO}">https://${DOM_FORGEJO}</a> — Forgejo (Git-сервер)</li>
+      <li><a href="https://${DOM_CODE}">https://${DOM_CODE}</a> — Server-Code (VS Code в браузере)</li>
+    </ul>
+  </div>
 </body>
 </html>
 HTML_EOF
-    fi
     chmod 644 "${PKI_PORTAL_DIR}/index.html" 2>/dev/null || true
     chown -R caddy:caddy "$PKI_PORTAL_DIR" 2>/dev/null || true
     return 0
@@ -97,28 +125,8 @@ sync_caddy_main_config() {
     chmod 755 /etc/caddy "$CADDY_CONFD" 2>/dev/null || true
     CUR_LIP_CDY=$(get_current_lan_ip)
     LE_MAIN_BLOCKS=""
-    LAN_SERVICES_BLOCKS=""
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        # Публичный доверенный режим Let's Encrypt (без самоподписных *.lan)
-        LE_MAIN_BLOCKS="https://ca.${SSL_DOMAIN} {
-    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
-    @api path /api/*
-    handle @api {
-        reverse_proxy 127.0.0.1:8080 {
-            transport http {
-                response_header_timeout 300s
-            }
-        }
-    }
-    handle {
-        root * ${PKI_PORTAL_DIR}
-        header /homelab-root-ca.cer Content-Type \"application/x-x509-ca-cert\"
-        header /homelab-root-ca.crt Content-Type \"application/x-x509-ca-cert\"
-        file_server
-    }
-}
-
-https://adguard.${SSL_DOMAIN} {
+        LE_MAIN_BLOCKS="https://adguard.${SSL_DOMAIN} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
     encode zstd gzip
     reverse_proxy 127.0.0.1:3000 {
@@ -129,45 +137,6 @@ https://adguard.${SSL_DOMAIN} {
 
 https://zashboard.${SSL_DOMAIN}, https://singbox.${SSL_DOMAIN} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
-    encode zstd gzip
-    @root_ui path /
-    redir @root_ui /ui/ 302
-    reverse_proxy 127.0.0.1:9090 {
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-    }
-}"
-    else
-        # Локальный оффлайн режим Local PKI (*.lan)
-        LAN_SERVICES_BLOCKS="https://${DOM_CA} {
-    tls internal
-    @api path /api/*
-    handle @api {
-        reverse_proxy 127.0.0.1:8080 {
-            transport http {
-                response_header_timeout 300s
-            }
-        }
-    }
-    handle {
-        root * ${PKI_PORTAL_DIR}
-        header /homelab-root-ca.cer Content-Type \"application/x-x509-ca-cert\"
-        header /homelab-root-ca.crt Content-Type \"application/x-x509-ca-cert\"
-        file_server
-    }
-}
-
-https://${DOM_ADGUARD} {
-    tls internal
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:3000 {
-        header_up Host {host}
-        header_up X-Real-IP {remote_host}
-    }
-}
-
-https://${DOM_ZASHBOARD}, https://${DOM_SINGBOX} {
-    tls internal
     encode zstd gzip
     @root_ui path /
     redir @root_ui /ui/ 302
@@ -197,14 +166,6 @@ https://${DOM_ZASHBOARD}, https://${DOM_SINGBOX} {
 http://${DOM_CA}, http://${CUR_LIP_CDY}, http://*.lan {
     @pki_portal host ${DOM_CA} ${CUR_LIP_CDY}
     handle @pki_portal {
-        @api path /api/*
-        handle @api {
-            reverse_proxy 127.0.0.1:8080 {
-                transport http {
-                    response_header_timeout 300s
-                }
-            }
-        }
         root * ${PKI_PORTAL_DIR}
         header /homelab-root-ca.cer Content-Type "application/x-x509-ca-cert"
         header /homelab-root-ca.crt Content-Type "application/x-x509-ca-cert"
@@ -215,7 +176,34 @@ http://${DOM_CA}, http://${CUR_LIP_CDY}, http://*.lan {
     }
 }
 
-${LAN_SERVICES_BLOCKS}
+https://${DOM_CA} {
+    tls internal
+    root * ${PKI_PORTAL_DIR}
+    header /homelab-root-ca.cer Content-Type "application/x-x509-ca-cert"
+    header /homelab-root-ca.crt Content-Type "application/x-x509-ca-cert"
+    file_server
+}
+
+https://${DOM_ADGUARD} {
+    tls internal
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+
+https://${DOM_ZASHBOARD}, https://${DOM_SINGBOX} {
+    tls internal
+    encode zstd gzip
+    @root_ui path /
+    redir @root_ui /ui/ 302
+    reverse_proxy 127.0.0.1:9090 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+    }
+}
+
 ${LE_MAIN_BLOCKS}
 
 import ${CADDY_CONFD}/*.caddy
@@ -340,13 +328,8 @@ ${AUTH_BLOCK}
         fi
     fi
 
-    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        # При активном Let's Encrypt самоподписные *.lan отключаются
-        cat << LE_ONLY_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
-${LE_SITE_BLOCK}
-LE_ONLY_EOF
-    elif [ "$SITE_MOD" = "vaultwarden" ]; then
-        # Чистый эталонный профиль проксирования для Vaultwarden (Local PKI)
+    if [ "$SITE_MOD" = "vaultwarden" ]; then
+        # Чистый эталонный профиль проксирования для Vaultwarden
         cat << VW_SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
 ${LAN_DOM_HEADER} {
     tls internal
@@ -369,6 +352,7 @@ ${LAN_DOM_HEADER} {
         header_up X-Forwarded-Proto https
     }
 }
+${LE_SITE_BLOCK}
 VW_SITE_EOF
     else
         cat << SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
@@ -381,6 +365,7 @@ ${AUTH_BLOCK}
         header_up X-Real-IP {remote_host}
     }
 }
+${LE_SITE_BLOCK}
 SITE_EOF
     fi
     chmod 644 "${CADDY_CONFD}/${SITE_MOD}.caddy" 2>/dev/null || true

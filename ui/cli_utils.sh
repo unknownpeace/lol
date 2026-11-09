@@ -125,62 +125,6 @@ cli_domain_rule_add() {
     return $?
 }
 
-# Быстрое удаление домена из списков маршрутизации: `gateway domain del <url|domain>`
-cli_domain_rule_del() {
-    RAW_D_ARG=$(clean_clipboard_line "${1:-}")
-    if [ -z "$RAW_D_ARG" ]; then
-        ui_warn_box "Не указан домен для удаления." "Пример: gateway domain del example.com"
-        return 1
-    fi
-    CLEAN_D=$(sanitize_domain_entry "$RAW_D_ARG" || true)
-    if [ -z "$CLEAN_D" ]; then
-        ui_warn_box "Некорректный формат домена: ${RAW_D_ARG}"
-        return 1
-    fi
-    backup_gateway_state
-    load_gateway_env
-    init_user_lists
-    awk -v d="$CLEAN_D" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.chatgpt.com"}' "$USER_PROXY_FILE" > "${USER_PROXY_FILE}.tmp.$$"
-    atomic_commit_tmp "${USER_PROXY_FILE}.tmp.$$" "$USER_PROXY_FILE" 0644 "root:root" || true
-    awk -v d="$CLEAN_D" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.localdomain"}' "$USER_DIRECT_FILE" > "${USER_DIRECT_FILE}.tmp.$$"
-    atomic_commit_tmp "${USER_DIRECT_FILE}.tmp.$$" "$USER_DIRECT_FILE" 0644 "root:root" || true
-    apply_and_verify_singbox "CLI: Удаление домена ${CLEAN_D} из маршрутизации"
-    return $?
-}
-
-# Удаление прокси/слота из CLI: `gateway proxy del <sub|warp|key-number|all>`
-cli_proxy_del() {
-    TARGET="${1:-}"
-    load_gateway_env
-    case "$TARGET" in
-        sub|subscription)
-            echo "" > "$USER_SUB_LIST"
-            SUBSCRIPTION_URL=""
-            save_gateway_env
-            apply_and_verify_singbox "CLI: Очистка подписок (Слот 1)"
-            ;;
-        warp|amnezia)
-            DISABLE_WARP="true"
-            save_gateway_env
-            apply_and_verify_singbox "CLI: Отключение Amnezia WARP (Слот 3)"
-            ;;
-        all|keys)
-            echo "proxies: []" > "$CUSTOM_NODES_FILE"
-            apply_and_verify_singbox "CLI: Очистка всех личных ключей (Слот 2)"
-            ;;
-        [0-9]*)
-            delete_my_node_by_index "$TARGET"
-            apply_and_verify_singbox "CLI: Удаление личного ключа #${TARGET} (Слот 2)"
-            ;;
-        *)
-            ui_warn_box "Укажите, что удалить: sub, warp, номер ключа [1..N] или all." \
-                        "Примеры: gateway proxy del sub  ИЛИ  gateway proxy del 1"
-            return 1
-            ;;
-    esac
-    return $?
-}
-
 # Генерация подробного шаблона файла автоматических ответов (Answers Template)
 generate_answers_template() {
     OUT_F="${1:-}"

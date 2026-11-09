@@ -295,6 +295,7 @@ show_menu() {
                                 backup_gateway_state
                                 load_gateway_env
                                 apply_subscription_input "$NEW_SUB"
+                                save_gateway_env
                                 [ "${USE_INITIAL_WARP:-no}" = "yes" ] && generate_amnezia_warp || true
                                 apply_and_verify_singbox "Обновление подписки (Слот 1)" || true
                             fi
@@ -311,6 +312,7 @@ show_menu() {
                                     load_gateway_env
                                     CLEAN_EXTRA=$(sanitize_sub_url_list "$EXTRA_SUB")
                                     SUB_URL="${SUB_URL:+${SUB_URL} }${CLEAN_EXTRA}"
+                                    save_gateway_env
                                     apply_and_verify_singbox "Добавление дополнительной подписки в Слот 1" || true
                                     ;;
                                 *) ui_warn_box "Ссылка подписки должна начинаться с http:// или https://" "Для добавления отдельного URI-ключа (vless://) выберите пункт 5." ;;
@@ -322,6 +324,7 @@ show_menu() {
                             backup_gateway_state
                             load_gateway_env
                             SUB_URL=""
+                            save_gateway_env
                             apply_and_verify_singbox "Очистка подписок по ссылке (Слот 1)" || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
@@ -385,6 +388,7 @@ show_menu() {
                             load_gateway_env
                             echo '{"outbounds": []}' > "$WARP_NODES_FILE"
                             WARP_LICENSE=""
+                            save_gateway_env
                             apply_and_verify_singbox "Отключение Amnezia WARP 2.0 (Слот 3)" || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
