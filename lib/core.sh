@@ -138,6 +138,10 @@ calc_hardware_limits() {
         SYS_CONNTRACK_MAX="262144"
         SYS_BUF_MAX="67108864"
     fi
+    if (is_openwrt 2>/dev/null || [ -f /etc/openwrt_release ]) && [ "$TOTAL_RAM_MB" -ge 1500 ]; then
+        SB_GOMEMLIMIT="off"
+        AGH_GOMEMLIMIT="off"
+    fi
     return 0
 }
 

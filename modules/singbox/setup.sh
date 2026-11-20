@@ -157,6 +157,17 @@ setup_init_scripts() {
     ACT_CORE_S=$(get_active_core)
 
     if is_openwrt 2>/dev/null; then
+        if [ -z "${SB_GOMEMLIMIT:-}" ] || [ "$SB_GOMEMLIMIT" = "off" ]; then
+            SB_ENV_LINE="procd_set_param env GOGC=100"
+        else
+            SB_ENV_LINE="procd_set_param env GOGC=50 GOMEMLIMIT=${SB_GOMEMLIMIT}"
+        fi
+        if [ -z "${AGH_GOMEMLIMIT:-}" ] || [ "$AGH_GOMEMLIMIT" = "off" ]; then
+            AGH_ENV_LINE="procd_set_param env GOGC=100"
+        else
+            AGH_ENV_LINE="procd_set_param env GOGC=50 GOMEMLIMIT=${AGH_GOMEMLIMIT}"
+        fi
+
         cat << INIT_SB_OWRT > /etc/init.d/sing-box
 #!/bin/sh /etc/rc.common
 START=95
@@ -168,7 +179,7 @@ start_service() {
     [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
     procd_open_instance
     procd_set_param command /bin/sh -c ": > '${SB_LOG_FILE}'; exec /usr/bin/sing-box run -c /etc/sing-box/config.json -D /etc/sing-box >>'${SB_LOG_FILE}' 2>&1"
-    procd_set_param env GOGC=50 GOMEMLIMIT=${SB_GOMEMLIMIT}
+    ${SB_ENV_LINE}
     procd_set_param limits nofile="65535 65535"
     procd_set_param respawn 3600 3 10
     procd_close_instance
@@ -188,7 +199,7 @@ start_service() {
     mkdir -p /etc/AdGuardHome/data
     procd_open_instance
     procd_set_param command /usr/bin/AdGuardHome -c /etc/AdGuardHome/AdGuardHome.yaml -w /etc/AdGuardHome --no-check-update
-    procd_set_param env GOGC=50 GOMEMLIMIT=${AGH_GOMEMLIMIT}
+    ${AGH_ENV_LINE}
     procd_set_param limits nofile="65535 65535"
     procd_set_param respawn 3600 3 10
     procd_close_instance

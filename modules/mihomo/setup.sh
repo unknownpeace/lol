@@ -53,6 +53,11 @@ setup_mihomo_init_script() {
     chmod 700 "$MIHOMO_DIR" 2>/dev/null || true
 
     if is_openwrt 2>/dev/null; then
+        if [ -z "${SB_GOMEMLIMIT:-}" ] || [ "$SB_GOMEMLIMIT" = "off" ]; then
+            MH_ENV_LINE="procd_set_param env GOGC=100 SAFE_PATHS=${SB_DIR}:${MIHOMO_DIR}"
+        else
+            MH_ENV_LINE="procd_set_param env GOGC=50 GOMEMLIMIT=${SB_GOMEMLIMIT} SAFE_PATHS=${SB_DIR}:${MIHOMO_DIR}"
+        fi
         cat << INIT_MH_OWRT > /etc/init.d/mihomo
 #!/bin/sh /etc/rc.common
 START=95
@@ -64,7 +69,7 @@ start_service() {
     [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
     procd_open_instance
     procd_set_param command /bin/sh -c ": > '${MIHOMO_LOG_FILE}'; exec /usr/bin/mihomo -d '${MIHOMO_DIR}' -f '${MIHOMO_CONF}' >>'${MIHOMO_LOG_FILE}' 2>&1"
-    procd_set_param env GOGC=50 GOMEMLIMIT=${SB_GOMEMLIMIT} SAFE_PATHS=${SB_DIR}:${MIHOMO_DIR}
+    ${MH_ENV_LINE}
     procd_set_param limits nofile="65535 65535"
     procd_set_param respawn 3600 3 10
     procd_close_instance
