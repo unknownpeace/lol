@@ -47,9 +47,13 @@ is_telegram_configured() {
     [ -n "${TG_BOT_TOKEN:-}" ] && [ -n "${TG_CHAT_ID:-}" ]
 }
 
-# Проверка состояния аппаратного Kill-Switch в /etc/nftables.nft
+# Проверка состояния аппаратного Kill-Switch в конфигурации nftables
 is_killswitch_enabled() {
-    [ -f "$ALPINE_NFT_CONF" ] && grep -q "#KILLSWITCH_ACTIVE" "$ALPINE_NFT_CONF" 2>/dev/null
+    if is_openwrt 2>/dev/null; then
+        [ -f "$OPENWRT_NFT_CONF" ] && grep -q "#KILLSWITCH_ACTIVE" "$OPENWRT_NFT_CONF" 2>/dev/null
+    else
+        [ -f "$ALPINE_NFT_CONF" ] && grep -q "#KILLSWITCH_ACTIVE" "$ALPINE_NFT_CONF" 2>/dev/null
+    fi
 }
 
 # Проверка состояния DHCP-сервера на шлюзе (AdGuard Home)

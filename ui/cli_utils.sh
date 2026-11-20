@@ -14,6 +14,15 @@ resolve_homelab_module_id() {
     return 0
 }
 
+require_alpine_feature() {
+    FEAT_LABEL="${1:-Эта функция}"
+    if is_openwrt 2>/dev/null; then
+        echo "${C_YEL}[i] Функция «${FEAT_LABEL}» доступна только на Alpine Linux (на OpenWrt активны только шлюз и AdGuard Home).${C_RES}"
+        return 1
+    fi
+    return 0
+}
+
 # Быстрое просмотр логов любой службы из CLI: `gateway logs [service]`
 show_service_logs_cli() {
     SVC_Q=$(printf "%s" "${1:-core}" | tr 'A-Z' 'a-z' | tr -d ' \t\r\n')
@@ -32,6 +41,8 @@ show_service_logs_cli() {
         adguard|adguardhome|agh)
             if [ -f /var/log/messages ]; then
                 grep -i "AdGuardHome" /var/log/messages 2>/dev/null | tail -n "$LINES_Q" || echo "  (записей пока нет)"
+            elif command -v logread >/dev/null 2>&1; then
+                logread 2>/dev/null | grep -i "AdGuardHome" | tail -n "$LINES_Q" || echo "  (записей пока нет)"
             fi
             ;;
         caddy|https|pki)
@@ -256,42 +267,48 @@ print_gateway_cli_help() {
     ui_box_row "${C_CYN}gw${C_RES} (или ${C_CYN}gateway${C_RES})             — Главное интерактивное TUI-меню с телеметрией"
     ui_box_row "${C_CYN}gw motd${C_RES}                     — Быстрый системный баннер (ОЗУ, диск, сеть, службы)"
     ui_box_row "${C_CYN}gw status${C_RES} (или ${C_CYN}gw test${C_RES})        — Полный рентген и матрица здоровья (Self-Test 2.0 + Ping Matrix)"
-    ui_box_row "${C_CYN}gw doctor${C_RES} (или ${C_CYN}gw fix${C_RES})         — Умная авто-починка одной командой (модули, DNS, nftables, БД, диск)"
-    ui_box_row "${C_CYN}gw passwd [новый_пароль]${C_RES}   — Ротация единого пароля (Sing-Box, AdGuard, Samba, Vaultwarden)"
+    ui_box_row "${C_CYN}gw doctor${C_RES} (или ${C_CYN}gw fix${C_RES})         — Умная авто-починка одной командой (ядро, DNS, nftables)"
+    ui_box_row "${C_CYN}gw passwd [новый_пароль]${C_RES}   — Ротация единого пароля администратора"
     ui_box_row "${C_CYN}gw restart${C_RES}                  — Быстрая пересборка конфига, сброс conntrack и перезапуск шлюза"
-    ui_box_row "${C_CYN}gw update${C_RES} (или ${C_CYN}check${C_RES})        — Полное обновление: скрипты Git + ядра Sing-Box/AGH + Homelab"
-    ui_box_row "${C_CYN}gw links${C_RES} (или ${C_CYN}gw urls${C_RES})         — Карточка всех веб-адресов https://*.lan, сертификата и шары Samba"
-    ui_box_row "${C_CYN}gw logs [служба]${C_RES}            — Живые логи (core|sing-box|mihomo|adguard|caddy|vaultwarden|...)"
+    ui_box_row "${C_CYN}gw update${C_RES} (или ${C_CYN}check${C_RES})        — Обновление: скрипты Git + ядра Sing-Box/Mihomo/AGH"
+    ui_box_row "${C_CYN}gw links${C_RES} (или ${C_CYN}gw urls${C_RES})         — Карточка всех веб-адресов и доступов"
+    ui_box_row "${C_CYN}gw logs [служба]${C_RES}            — Живые логи (core|sing-box|mihomo|adguard|autoupdate)"
     ui_box_row "${C_CYN}gw core [singbox|mihomo]${C_RES}    — Горячее переключение ядра (Sing-Box Extended ⇄ Mihomo)"
     ui_box_row "${C_CYN}gw ui [zashboard|metacubexd]${C_RES}— Смена веб-панели (:9090/ui) без перезапуска ядра"
     ui_box_sep "🤖 АВТОМАТИЧЕСКАЯ УСТАНОВКА И ФАЙЛЫ ОТВЕТОВ (ZERO-TOUCH)"
-    ui_box_row "${C_CYN}gw install --answers <файл>${C_RES} — Полная тихая установка шлюза и сервисов без единого вопроса"
+    ui_box_row "${C_CYN}gw install --answers <файл>${C_RES} — Полная тихая установка шлюза без единого вопроса"
     ui_box_row "${C_CYN}gw answers template [файл]${C_RES}  — Сгенерировать подробный шаблон файла ответов (Answers File)"
     ui_box_row "${C_CYN}gw answers verify [файл]${C_RES}    — Проверить корректность заполнения файла ответов перед установкой"
-    ui_box_sep "🔐 ЗАЩИТА ПИТАНИЯ, ДИСКИ LUKS2 И БЕЗОПАСНОЕ ВЫКЛЮЧЕНИЕ"
-    ui_box_row "${C_GRN}gw unlock${C_RES}                   — Быстрая разблокировка LUKS2-накопителя после ребута + старт Homelab"
-    ui_box_row "${C_YEL}gw lock${C_RES} (или ${C_YEL}gw eject${C_RES})         — Безопасная остановка медиа-сервисов, sync, umount и закрытие LUKS2"
-    ui_box_row "${C_CYN}gw disk${C_RES}                     — Интерактивный менеджер внешних дисков (LUKS2 / ext4 / btrfs / f2fs)"
-    ui_box_row "${C_CYN}gw safe-reboot${C_RES}              — Корректная перезагрузка с остановкой БД/торрентов, sync и закрытием LUKS"
-    ui_box_row "${C_CYN}gw safe-poweroff${C_RES}            — Безопасное отключение питания сервера с полной парковкой хранилища"
+    if ! is_openwrt 2>/dev/null; then
+        ui_box_sep "🔐 ЗАЩИТА ПИТАНИЯ, ДИСКИ LUKS2 И БЕЗОПАСНОЕ ВЫКЛЮЧЕНИЕ"
+        ui_box_row "${C_GRN}gw unlock${C_RES}                   — Быстрая разблокировка LUKS2-накопителя после ребута + старт Homelab"
+        ui_box_row "${C_YEL}gw lock${C_RES} (или ${C_YEL}gw eject${C_RES})         — Безопасная остановка медиа-сервисов, sync, umount и закрытие LUKS2"
+        ui_box_row "${C_CYN}gw disk${C_RES}                     — Интерактивный менеджер внешних дисков (LUKS2 / ext4 / btrfs / f2fs)"
+    fi
+    ui_box_row "${C_CYN}gw safe-reboot${C_RES}              — Корректная перезагрузка с остановкой служб и sync"
+    ui_box_row "${C_CYN}gw safe-poweroff${C_RES}            — Безопасное отключение питания устройства"
     ui_box_sep "🌐 БЫСТРОЕ УПРАВЛЕНИЕ ПРОКСИ И ДОМЕНАМИ НА ЛЕТУ"
     ui_box_row "${C_CYN}gw proxy add <url|key|warp>${C_RES} — Добавить подписку (Слот 1), ключ URI (Слот 2) или включить WARP"
     ui_box_row "${C_CYN}gw domain direct <url|dom>${C_RES}  — Направить сайт/домен всегда НАПРЯМУЮ (в обход туннеля)"
     ui_box_row "${C_CYN}gw domain proxy <url|dom>${C_RES}   — Направить сайт/домен принудительно В ПРОКСИ (через туннель)"
     ui_box_row "${C_CYN}gw killswitch [on|off|status]${C_RES}— Аппаратный Kill-Switch (nftables: блокировка мимо TUN)"
-    ui_box_sep "📦 УПРАВЛЕНИЕ КОНТЕЙНЕРАМИ LXC И СНАПШОТАМИ"
-    ui_box_row "${C_CYN}gw lxc${C_RES} (или ${C_CYN}gw lxc list${C_RES})    — Таблица контейнеров (статус, IP, память, автозапуск, снапшоты)"
-    ui_box_row "${C_CYN}gw lxc create${C_RES}               — Интерактивный мастер создания контейнера (Alpine, Debian, Ubuntu, Arch...)"
-    ui_box_row "${C_CYN}gw lxc start|stop|restart <имя>${C_RES} — Управление состоянием контейнера"
-    ui_box_row "${C_CYN}gw lxc attach <имя>${C_RES}         — Открыть сессию терминала root внутри контейнера (lxc-attach)"
-    ui_box_row "${C_CYN}gw lxc snap <имя> [create|list|restore|delete]${C_RES} — Управление мгновенными снимками (снапшотами)"
-    ui_box_row "${C_CYN}gw lxc autostart <имя> [on|off]${C_RES} — Настройка автозапуска контейнера при включении сервера"
-    ui_box_row "${C_CYN}gw lxc fix-net <имя>${C_RES}         — Автоисправление сети контейнера (DHCP/resolv.conf)"
-    ui_box_row "${C_CYN}gw lxc menu${C_RES}                 — Интерактивное TUI-меню LXC виртуализации"
-    ui_box_sep "🏠 МОДУЛИ HOMELAB И ЕДИНЫЙ БЭКАП"
-    ui_box_row "${C_CYN}gw homelab${C_RES}                  — Открыть интерактивное меню управления домашним сервером (Пункт 13)"
-    ui_box_row "${C_CYN}gw homelab install <1-7>${C_RES}    — Установить модуль (caddy|samba|vaultwarden|forgejo|code|metube|torrent)"
-    ui_box_row "${C_CYN}gw homelab restart <1-7>${C_RES}    — Перезапустить выбранный модуль Homelab"
+    if ! is_openwrt 2>/dev/null; then
+        ui_box_sep "📦 УПРАВЛЕНИЕ КОНТЕЙНЕРАМИ LXC И СНАПШОТАМИ"
+        ui_box_row "${C_CYN}gw lxc${C_RES} (или ${C_CYN}gw lxc list${C_RES})    — Таблица контейнеров (статус, IP, память, автозапуск, снапшоты)"
+        ui_box_row "${C_CYN}gw lxc create${C_RES}               — Интерактивный мастер создания контейнера (Alpine, Debian, Ubuntu, Arch...)"
+        ui_box_row "${C_CYN}gw lxc start|stop|restart <имя>${C_RES} — Управление состоянием контейнера"
+        ui_box_row "${C_CYN}gw lxc attach <имя>${C_RES}         — Открыть сессию терминала root внутри контейнера (lxc-attach)"
+        ui_box_row "${C_CYN}gw lxc snap <имя> [create|list|restore|delete]${C_RES} — Управление мгновенными снимками (снапшотами)"
+        ui_box_row "${C_CYN}gw lxc autostart <имя> [on|off]${C_RES} — Настройка автозапуска контейнера при включении сервера"
+        ui_box_row "${C_CYN}gw lxc fix-net <имя>${C_RES}         — Автоисправление сети контейнера (DHCP/resolv.conf)"
+        ui_box_row "${C_CYN}gw lxc menu${C_RES}                 — Интерактивное TUI-меню LXC виртуализации"
+        ui_box_sep "🏠 МОДУЛИ HOMELAB И ЕДИНЫЙ БЭКАП"
+        ui_box_row "${C_CYN}gw homelab${C_RES}                  — Открыть интерактивное меню управления домашним сервером (Пункт 13)"
+        ui_box_row "${C_CYN}gw homelab install <1-7>${C_RES}    — Установить модуль (caddy|samba|vaultwarden|forgejo|code|metube|torrent)"
+        ui_box_row "${C_CYN}gw homelab restart <1-7>${C_RES}    — Перезапустить выбранный модуль Homelab"
+    else
+        ui_box_sep "📦 РЕЗЕРВНОЕ КОПИРОВАНИЕ КОНФИГУРАЦИИ"
+    fi
     ui_box_row "${C_CYN}gw backup [create|full|restore|telegram]${C_RES} — Управление резервными копиями и отправка в Telegram"
     ui_box_bottom
     return 0

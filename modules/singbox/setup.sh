@@ -150,11 +150,83 @@ VC_EOF
     return 0
 }
 
-# Создание системных служб автозапуска Alpine OpenRC (с защитой сетевого шлюза от OOM-killer)
+# Создание системных служб автозапуска (Alpine OpenRC / OpenWrt procd) и загрузочного Boot Guard
 setup_init_scripts() {
     calc_hardware_limits
     load_gateway_env || true
     ACT_CORE_S=$(get_active_core)
+
+    if is_openwrt 2>/dev/null; then
+        cat << INIT_SB_OWRT > /etc/init.d/sing-box
+#!/bin/sh /etc/rc.common
+START=95
+STOP=10
+USE_PROCD=1
+
+start_service() {
+    mkdir -p /dev/net
+    [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
+    procd_open_instance
+    procd_set_param command /bin/sh -c ": > '${SB_LOG_FILE}'; exec /usr/bin/sing-box run -c /etc/sing-box/config.json -D /etc/sing-box >>'${SB_LOG_FILE}' 2>&1"
+    procd_set_param env GOGC=50 GOMEMLIMIT=${SB_GOMEMLIMIT}
+    procd_set_param limits nofile="65535 65535"
+    procd_set_param respawn 3600 3 10
+    procd_close_instance
+}
+INIT_SB_OWRT
+        chmod +x /etc/init.d/sing-box
+
+        setup_mihomo_init_script
+
+        cat << INIT_AGH_OWRT > /etc/init.d/adguardhome
+#!/bin/sh /etc/rc.common
+START=96
+STOP=10
+USE_PROCD=1
+
+start_service() {
+    mkdir -p /etc/AdGuardHome/data
+    procd_open_instance
+    procd_set_param command /usr/bin/AdGuardHome -c /etc/AdGuardHome/AdGuardHome.yaml -w /etc/AdGuardHome --no-check-update
+    procd_set_param env GOGC=50 GOMEMLIMIT=${AGH_GOMEMLIMIT}
+    procd_set_param limits nofile="65535 65535"
+    procd_set_param respawn 3600 3 10
+    procd_close_instance
+}
+INIT_AGH_OWRT
+        chmod +x /etc/init.d/adguardhome
+
+        if [ "$ACT_CORE_S" = "mihomo" ]; then
+            service_ctl sing-box stop
+            service_ctl sing-box disable
+            service_ctl mihomo enable
+            service_ctl mihomo restart
+        else
+            service_ctl mihomo stop
+            service_ctl mihomo disable
+            service_ctl sing-box enable
+            service_ctl sing-box restart
+        fi
+        sleep 2
+        service_ctl adguardhome enable
+        service_ctl adguardhome restart
+
+        mkdir -p /etc
+        [ -f /etc/rc.local ] || printf "# Put your custom commands here\n\nexit 0\n" > /etc/rc.local
+        if ! grep -q "gateway watchdog" /etc/rc.local 2>/dev/null; then
+            awk 'BEGIN { added=0 }
+                /^[[:space:]]*exit[[:space:]]+0/ && !added {
+                    print "[ -x /usr/bin/gateway ] && /usr/bin/gateway watchdog >/dev/null 2>&1 &"
+                    added=1
+                }
+                { print }
+                END {
+                    if (!added) print "[ -x /usr/bin/gateway ] && /usr/bin/gateway watchdog >/dev/null 2>&1 &"
+                }' /etc/rc.local > "/etc/rc.local.tmp.$$" && mv -f "/etc/rc.local.tmp.$$" /etc/rc.local
+        fi
+        chmod +x /etc/rc.local 2>/dev/null || true
+        return 0
+    fi
 
     cat << INIT_SB_ALP > /etc/init.d/sing-box
 #!/sbin/openrc-run

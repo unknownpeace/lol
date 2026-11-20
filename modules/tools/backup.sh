@@ -1,12 +1,16 @@
 #!/bin/sh
 create_unified_backup() {
     INCLUDE_MEDIA="${1:-no}"
+    detect_os >/dev/null 2>&1 || true
     STAGE_DIR="/var/lib/gateway_backup_stage"
     rm -rf "$STAGE_DIR"
-    mkdir -p "${STAGE_DIR}/sqlite_dumps"
-    chmod 700 "$STAGE_DIR" 2>/dev/null || true
-
-    echo "${C_CYN}[*] Подготовка консистентной резервной копии (Шлюз + Homelab)...${C_RES}"
+    if ! is_openwrt; then
+        mkdir -p "${STAGE_DIR}/sqlite_dumps"
+        chmod 700 "$STAGE_DIR" 2>/dev/null || true
+        echo "${C_CYN}[*] Подготовка консистентной резервной копии (Шлюз + Homelab)...${C_RES}"
+    else
+        echo "${C_CYN}[*] Подготовка консистентной резервной копии (Шлюз + AdGuard Home + OpenWrt)...${C_RES}"
+    fi
 
     # 1. Горячее безопасное резервное копирование всех баз SQLite через sqlite3 .backup
     if command -v sqlite3 >/dev/null 2>&1; then
@@ -16,11 +20,18 @@ create_unified_backup() {
             sqlite3 /var/lib/forgejo/data/forgejo.db ".backup '${STAGE_DIR}/sqlite_dumps/forgejo.sqlite3'" 2>/dev/null || true
     fi
 
-    # 2. Сбор всех конфигурационных директорий, секретов и локального CA Caddy
+    # 2. Сбор всех конфигурационных директорий и секретов
     BACKUP_PATHS="/etc/sing-box"
     [ -d "$MIHOMO_DIR" ] && BACKUP_PATHS="$BACKUP_PATHS $MIHOMO_DIR"
     [ -f "$AGH_CONF" ] && BACKUP_PATHS="$BACKUP_PATHS $AGH_CONF"
-    [ -f "$ALPINE_NFT_CONF" ] && BACKUP_PATHS="$BACKUP_PATHS $ALPINE_NFT_CONF"
+    if is_openwrt; then
+        [ -f "$OPENWRT_NFT_CONF" ] && BACKUP_PATHS="$BACKUP_PATHS $OPENWRT_NFT_CONF"
+        for _ow_cfg in /etc/config/network /etc/config/dhcp /etc/config/firewall; do
+            [ -f "$_ow_cfg" ] && BACKUP_PATHS="$BACKUP_PATHS $_ow_cfg"
+        done
+    else
+        [ -f "$ALPINE_NFT_CONF" ] && BACKUP_PATHS="$BACKUP_PATHS $ALPINE_NFT_CONF"
+    fi
     [ -d /etc/caddy ] && BACKUP_PATHS="$BACKUP_PATHS /etc/caddy"
     [ -d /etc/ssl/caddy ] && BACKUP_PATHS="$BACKUP_PATHS /etc/ssl/caddy"
     [ -d /root/.acme.sh ] && BACKUP_PATHS="$BACKUP_PATHS /root/.acme.sh"
@@ -38,7 +49,10 @@ create_unified_backup() {
     TAR_ERR="/tmp/gw_backup_tar.err.$$"
     TAR_RC=0
     # shellcheck disable=SC2086
-    tar --exclude='*cache.db*' --exclude='*.db-wal' --exclude='*.db-shm' --exclude='*/msg.sock*' --exclude='*.sock' --exclude='*.pid' -czf "${BACKUP_ARCHIVE}.tmp.$$" $BACKUP_PATHS "$STAGE_DIR" 2>"$TAR_ERR" || TAR_RC=$?
+    if ! is_openwrt && [ -d "$STAGE_DIR" ]; then
+        BACKUP_PATHS="$BACKUP_PATHS $STAGE_DIR"
+    fi
+    tar --exclude='*cache.db*' --exclude='*.db-wal' --exclude='*.db-shm' --exclude='*/msg.sock*' --exclude='*.sock' --exclude='*.pid' -czf "${BACKUP_ARCHIVE}.tmp.$$" $BACKUP_PATHS 2>"$TAR_ERR" || TAR_RC=$?
     if [ "$TAR_RC" -gt 1 ] || [ ! -s "${BACKUP_ARCHIVE}.tmp.$$" ] || ! tar -tzf "${BACKUP_ARCHIVE}.tmp.$$" >/dev/null 2>&1; then
         echo "${C_RED}[X] Ошибка создания архива резервной копии (код tar: ${TAR_RC})!${C_RES}"
         [ -s "$TAR_ERR" ] && tail -n 5 "$TAR_ERR" || true
@@ -78,11 +92,16 @@ restore_unified_backup() {
         return 1
     fi
 
-    echo "${C_CYN}[*] Восстановление конфигурации шлюза и сервисов Homelab из ${TARGET_BAK}...${C_RES}"
+    detect_os >/dev/null 2>&1 || true
+    if is_openwrt; then
+        echo "${C_CYN}[*] Восстановление конфигурации шлюза, AdGuard Home и OpenWrt из ${TARGET_BAK}...${C_RES}"
+    else
+        echo "${C_CYN}[*] Восстановление конфигурации шлюза и сервисов Homelab из ${TARGET_BAK}...${C_RES}"
+    fi
     service_ctl sing-box stop
     service_ctl mihomo stop
     service_ctl adguardhome stop
-    if [ -f "$HOMELAB_STATE" ]; then
+    if ! is_openwrt && [ -f "$HOMELAB_STATE" ]; then
         while IFS='|' read -r M_ID M_EN M_SVC _REST; do
             case "$M_ID" in ''|\#*) continue ;; esac
             [ "$M_EN" = "yes" ] && [ -n "$M_SVC" ] && service_ctl "$M_SVC" stop || true
@@ -106,11 +125,18 @@ restore_unified_backup() {
         rm -rf "/var/lib/gateway_backup_stage" 2>/dev/null || true
     fi
 
-    chmod 600 "$SB_CONF" "$SB_ENV" "$HOMELAB_ENV" "$AGH_CONF" 2>/dev/null || true
+    chmod 600 "$SB_CONF" "$SB_ENV" "$AGH_CONF" 2>/dev/null || true
+    if ! is_openwrt; then
+        chmod 600 "$HOMELAB_ENV" 2>/dev/null || true
+    fi
     umask 022
 
     load_gateway_env
-    sync_all_homelab_permissions >/dev/null 2>&1 || true
+    if is_openwrt; then
+        prepare_openwrt_dnsmasq_for_adguard >/dev/null 2>&1 || true
+    else
+        sync_all_homelab_permissions >/dev/null 2>&1 || true
+    fi
     sync_user_domain_rulesets >/dev/null 2>&1 || true
     sync_dns_firewall "yes" "keep" >/dev/null 2>&1 || true
     setup_init_scripts >/dev/null 2>&1 || service_ctl "$(get_active_core_service)" start || true
@@ -127,7 +153,7 @@ restore_unified_backup() {
     core_reload_api >/dev/null 2>&1 || true
 
     # Перезапуск активных модулей Homelab после восстановления
-    if [ -f "$HOMELAB_STATE" ]; then
+    if ! is_openwrt && [ -f "$HOMELAB_STATE" ]; then
         while IFS='|' read -r M_ID M_EN M_SVC _REST; do
             case "$M_ID" in ''|\#*) continue ;; esac
             if [ "$M_EN" = "yes" ] && [ -x "/etc/init.d/${M_SVC}" ]; then
@@ -145,7 +171,11 @@ restore_unified_backup() {
             service_ctl avahi-daemon restart || true
         fi
     fi
-    build_pki_portal >/dev/null 2>&1 || true
-    echo "${C_GRN}[✓] Система (Шлюз + Homelab + БД SQLite + локальный CA Caddy) успешно восстановлена!${C_RES}"
+    if is_openwrt; then
+        echo "${C_GRN}[✓] Система (Шлюз + AdGuard Home + OpenWrt) успешно восстановлена!${C_RES}"
+    else
+        build_pki_portal >/dev/null 2>&1 || true
+        echo "${C_GRN}[✓] Система (Шлюз + Homelab + БД SQLite + локальный CA Caddy) успешно восстановлена!${C_RES}"
+    fi
     return 0
 }

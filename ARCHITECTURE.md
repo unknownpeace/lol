@@ -1,23 +1,27 @@
-# 🏛️ Архитектура проекта: Gateway & Homelab Suite (Alpine Linux)
+# 🏛️ Архитектура проекта: Universal Sidecar Gateway (Alpine Linux & OpenWrt >= 25.12.6)
 
-> **Актуальность:** 20 ноября 2026 года (целевая платформа — исключительно **Alpine Linux** + OpenRC + `apk`; `opkg`, OpenWrt и Docker не используются).
+> **Актуальность:** 21 ноября 2026 года (поддерживаемые платформы — **Alpine Linux 3.21–3.24+** на базе OpenRC + `apk` и **OpenWrt `>= 25.12.6`** на базе `procd` + `fw4` + `apk-tools`; legacy `opkg` и Docker не используются).
 
-Документ описывает внутреннее устройство, структуру каталогов, сетевую топологию, логику маршрутизации двойного ядра (**Sing-Box Extended v1.14.3** ⇄ **Mihomo v1.19.34**) и принципы модульности проекта.
+Документ описывает внутреннее устройство, структуру каталогов, сетевую топологию, логику маршрутизации двойного ядра (**Sing-Box Extended v1.14.3** ⇄ **Mihomo v1.19.34**) и разделение профилей для Alpine Linux и OpenWrt.
 
 ---
 
 ## 📌 1. Концепция и сетевая топология
 
-1. **Модульная архитектура (`gateway.sh`):**
-   Все компоненты разбиты по независимым файлам в `lib/`, `modules/`, `ui/`. Проект клонируется в `/opt/gateway` и регистрируется глобальными командами `gw` и `gateway`.
+1. **Модульная архитектура (`gateway.sh`) и единый слой ОС (`lib/core.sh`):**
+   - Все компоненты разбиты по независимым файлам в `lib/`, `modules/`, `ui/`. Проект размещается в `/opt/gateway` и регистрируется глобальными командами `gw` и `gateway`.
+   - `detect_os()` + `is_openwrt()` + `version_ge()` определяют платформу: поддерживаются **Alpine Linux** и **OpenWrt `>= 25.12.6`** с менеджером пакетов `apk` (версии `< 25.12.6` и системы без `apk` отклоняются).
+   - `service_ctl()` унифицирует управление службами между OpenRC (Alpine) и `procd` (OpenWrt, с маппингом `cron` и fallback по `pgrep`).
 
-2. **Схема Sidecar-шлюза (Z83II + Основной роутер `192.168.1.5`):**
-   - Основной роутер (`192.168.1.5`) остаётся DHCP-сервером локальной сети и раздаёт клиентам в качестве Default Gateway и DNS-сервера локальный IP сервера на Alpine Linux (например, мини-ПК Z83II, подключённый по Ethernet).
-   - Сама система Alpine Linux использует `192.168.1.5` как свой шлюз в интернет (`GW_IP`).
-   - Для корректной однопортовой маршрутизации на физическом интерфейсе `${LAN_IF}` применяются `rp_filter=0`, `send_redirects=0`, `accept_redirects=0`, `secure_redirects=0`, `nf_conntrack_tcp_be_liberal=1`, `fq_codel` + `BBR`, а `nftables` настраивает `masquerade persistent` (с автоматическим откатом на `masquerade` при отсутствии поддержки в ядре), принудительный редирект LAN DNS `:53`, drop IPv6 и reject DoT/DoQ `:853`.
+2. **Два целевых профиля эксплуатации:**
+   - **Alpine Linux (Полный Sidecar + Homelab + LUKS2 + LXC):** однопортовый сервер за основным роутером (`192.168.1.5`, например Z83II) раздаёт маршрутизацию и AdGuard Home, а также локальные сервисы Homelab за Caddy HTTPS, шифрование внешних дисков LUKS2 и контейнеры LXC.
+   - **OpenWrt `>= 25.12.6` (Только шлюз + AdGuard Home):** облегчённая установка строго без Homelab, Caddy/PKI, LUKS2 и LXC (`require_alpine_feature` защищает CLI/TUI, `backup.sh`, `password.sh` и `doctor.sh`). `dnsmasq` переводится в пассивный режим (`port='0'`, `dhcp.lan.ignore='1'`), передавая DNS `:53` в **AdGuard Home** и сохраняя веб-интерфейс LuCI (`uhttpd :80`).
 
-3. **Автономность и отсутствие Docker:**
-   Все службы (Sing-Box Extended `v1.14.3-extended-2.7.3` или Mihomo `v1.19.34`, AdGuard Home `v1.0.0`, Zashboard `v3.30.0` / MetaCubeXD `v1.275.2`, Caddy, Samba, Vaultwarden, Forgejo, MeTube, Transmission, Server-Code) работают нативно через OpenRC. Оба ядра шлюза поднимают унифицированный интерфейс `gateway-tun` (`MTU 1400`, `stack: system`, `auto_redirect: true`) и слушают `:1053` (DNS), `:7890` (Mixed Proxy) и `:9090` (Clash API + Web UI).
+3. **Сетевой стек, фаервол и отсутствие Docker:**
+   - На `${LAN_IF}` (`eth0` на Alpine, `br-lan` на OpenWrt) применяются `rp_filter=0`, `send_redirects=0`, `accept_redirects=0`, `secure_redirects=0`, `nf_conntrack_tcp_be_liberal=1`, `fq_codel` + `BBR`.
+   - На Alpine правила пишутся в `/etc/nftables.nft`; на OpenWrt — в `/etc/nftables.d/90-gateway.nft` (цепочки без обёртки `table inet fw4`, т.к. `fw4` подключает include внутрь `table inet fw4`) с валидацией `fw4 check` / `fw4 reload` и поддержкой `masquerade persistent` (или fallback на `masquerade`).
+   - Boot Guard располагается в `/etc/local.d/50-gateway-boot-guard.start` (Alpine) и `/etc/rc.local` (OpenWrt).
+   - Оба ядра (**Sing-Box Extended `v1.14.3-extended-2.7.3`** и **Mihomo `v1.19.34`**) поднимают унифицированный интерфейс `gateway-tun` (`MTU 1400`, `stack: system`, `auto_redirect: true`) и слушают `:1053` (DNS), `:7890` (Mixed Proxy) и `:9090` (Clash API + Web UI).
 
 ---
 
@@ -33,29 +37,29 @@
 │   ├── gateway.env.example     # Пример конфигурации шлюза (GW_IP="192.168.1.5")
 │   └── homelab.env.example     # Хранилище, пользователи, диски
 ├── lib/
-│   ├── constants.sh            # Глобальные пути, CORE_TUN_IF="gateway-tun", фильтры подписок, DEFAULT_ROUTER_IP="192.168.1.5"
-│   ├── core.sh                 # Атомарная запись, lock-файлы, service_ctl, get_lan_ifname, get_default_router_ip
+│   ├── constants.sh            # Глобальные пути, CORE_TUN_IF="gateway-tun", OPENWRT_NFT_CONF, OPENWRT_MIN_VERSION="25.12.6"
+│   ├── core.sh                 # detect_os/is_openwrt/version_ge, service_ctl (OpenRC + procd), lock-файлы, сетевые хелперы
 │   ├── routing_rules.sh        # Единый источник правды списков доменов (ИИ, Game CDN, Bootstrap, DDR, Homelab .lan)
 │   ├── env.sh                  # Валидация конфигов (sing-box check и mihomo -t) и проверки состояний
 │   ├── env_store.sh            # Безопасное сохранение/чтение gateway.env (вкл. CORE_ENGINE, WEB_UI) и homelab.env
 │   ├── metrics.sh              # Метрики ОЗУ/диска и восстановление после сбоя питания
 │   └── ui.sh                   # Цвета ANSI, рамки, прогресс-бары и баннеры
 ├── modules/
-│   ├── adguard/adguard.sh      # Синхронизация *.lan rewrites (поддержка flow/block YAML) и bootstrap_dns
-│   ├── caddy/                  # Reverse Proxy, Local PKI (ca.lan) и Let's Encrypt DuckDNS
+│   ├── adguard/adguard.sh      # Синхронизация *.lan rewrites (gateway-only на OpenWrt), prepare_openwrt_dnsmasq_for_adguard
+│   ├── caddy/                  # Reverse Proxy, Local PKI (ca.lan) и Let's Encrypt DuckDNS (только Alpine)
 │   ├── core/engine.sh          # Диспетчер ядер (singbox ⇄ mihomo) и веб-панелей (zashboard ⇄ metacubexd)
-│   ├── homelab/                # Реестр, диспетчер, self-test и 5 прикладных OpenRC-сервисов
-│   ├── lxc/lxc.sh              # Контейнеры LXC (lxcbr0 10.0.3.x / macvlan со шлюзом на Z83II)
+│   ├── homelab/                # Реестр, диспетчер, self-test и 5 прикладных OpenRC-сервисов (только Alpine)
+│   ├── lxc/lxc.sh              # Контейнеры LXC (только Alpine)
 │   ├── mihomo/                 # Установка Mihomo (amd64-v1/v3, arm64) и генератор config.yaml (.mrs)
 │   ├── network/
-│   │   ├── dhcp.sh             # DHCP-сервер AdGuard Home с проверкой стороннего DHCP (без dnsmasq)
-│   │   ├── firewall.sh         # nftables: Kill-Switch 2.0 (gateway-tun), DNS :53 redirect, DoT :853 reject, masquerade persistent
+│   │   ├── dhcp.sh             # DHCP-сервер AdGuard Home, check_ip_conflict_on_lan, UCI-статика OpenWrt
+│   │   ├── firewall.sh         # nftables (Alpine) / fw4 include 90-gateway.nft (OpenWrt): Kill-Switch 2.0, DNS :53, DoT :853, NAT
 │   │   └── lan.sh              # Сканирование ARP + AdGuard leases.json
-│   ├── samba/samba.sh          # SMB2/SMB3, WSDD (Windows 11) и Avahi mDNS
+│   ├── samba/samba.sh          # SMB2/SMB3, WSDD (Windows 11) и Avahi mDNS (только Alpine)
 │   ├── singbox/                # Генератор config.json, rule-sets (.srs), WARP 2.0 + MASQUE H2, диагностика нод
-│   ├── storage/                # Монтирование дисков (ext4/btrfs/f2fs) и LUKS2
+│   ├── storage/                # Монтирование дисков (ext4/btrfs/f2fs) и LUKS2 (только Alpine)
 │   └── tools/                  # Бэкапы, cron, doctor, maintenance, password, selftest, telegram
-└── ui/                         # CLI диспетчер, TUI меню (16 разделов) и мастер установки
+└── ui/                         # CLI диспетчер (require_alpine_feature), TUI меню и мастер установки
 ```
 
 ---

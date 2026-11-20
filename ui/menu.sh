@@ -190,30 +190,53 @@ show_menu() {
     detect_os
     check_and_recover_power_loss_state
     init_user_lists
-    init_homelab_registry
+    is_openwrt || init_homelab_registry
     refresh_remote_versions "no"
     while true; do
         clear
-        ui_banner "UNIVERSAL SIDECAR GATEWAY & HOMELAB // ALPINE LINUX EDITION"
+        if is_openwrt; then
+            ui_banner "UNIVERSAL SIDECAR GATEWAY // ${OS_NAME} EDITION"
+        else
+            ui_banner "UNIVERSAL SIDECAR GATEWAY & HOMELAB // ALPINE LINUX EDITION"
+        fi
         print_gateway_header
-        ui_box_top "🎛️ ГЛАВНОЕ МЕНЮ УПРАВЛЕНИЯ СЕРВЕРОМ [0-16 / u / d]"
-        ui_box_row "${C_CYN}1)${C_RES}  📊 Статус служб, матрица пинга и рентген сайтов (Self-Test 2.0)"
-        ui_box_row "${C_CYN}2)${C_RES}  🌐 Прокси, Ядро ($(get_active_core_name)) и Панель ($(get_active_ui_name)) + ${C_GRN}⚡ SSH-пульт${C_RES}"
-        ui_box_row "${C_CYN}3)${C_RES}  🔄 Полное обновление: скрипт шлюза (Git) + ядра (SB/Mihomo, AGH) + Homelab"
-        ui_box_row "${C_CYN}4)${C_RES}  ♻️  Перезапустить службы + пересобрать конфиг и сбросить conntrack"
-        ui_box_row "${C_CYN}5)${C_RES}  📜 Посмотреть живые логи ядра шлюза и служб сервера"
-        ui_box_row "${C_CYN}6)${C_RES}  🛠️  Полная перенастройка сервера (Мастер установки)"
-        ui_box_row "${C_CYN}7)${C_RES}  🧭 Свои домены (В прокси / Напрямую) + ${C_GRN}🕵️ Детектор сайта${C_RES}"
-        ui_box_row "${C_CYN}8)${C_RES}  📱 Маршрутизация устройств по IP + ${C_GRN}🔍 Авто-поиск в LAN${C_RES}"
-        ui_box_row "${C_CYN}9)${C_RES}  🔐 Сервисный режим, смена пароля и ${C_GRN}☁️ Единый бэкап в Telegram${C_RES}"
-        ui_box_row "${C_CYN}10)${C_RES} ⏰ Автообновление (04:00), Авто-Доктор (Watchdog) и Telegram"
-        ui_box_row "${C_CYN}11)${C_RES} 🛡️  Аппаратный Kill-Switch (защита от утечек при падении Sing-Box)"
-        ui_box_row "${C_CYN}12)${C_RES} 🖧  Сетевые настройки: IP сервера / роутера + DHCP AdGuard Home"
-        ui_box_row "${C_CYN}13)${C_RES} ${C_GRN}🏠 Управление домашним сервером (Homelab & Media Stack + Диски LUKS2)${C_RES}"
-        ui_box_row "${C_CYN}14)${C_RES} ${C_MAG}📦 Управление контейнерами LXC (Alpine, Debian, Ubuntu, Снапшоты)${C_RES}"
-        ui_box_row "${C_CYN}15)${C_RES} ${C_YEL}🩺 Авто-Доктор одной кнопкой (gateway doctor — починка сети, БД и диска)${C_RES}"
-        ui_box_row "${C_CYN}16)${C_RES} ${C_CYN}⚡ Безопасное выключение / перезагрузка сервера или разблокировка LUKS2${C_RES}"
-        ui_box_row "${C_CYN}u)${C_RES}  🔗 Показать все веб-ссылки (https://*.lan), сетевые папки и доступы"
+        if is_openwrt; then
+            ui_box_top "🎛️ ГЛАВНОЕ МЕНЮ УПРАВЛЕНИЯ ШЛЮЗОМ (${OS_NAME}) [0-16 / u]"
+            ui_box_row "${C_CYN}1)${C_RES}  📊 Статус служб, матрица пинга и рентген сайтов (Self-Test 2.0)"
+            ui_box_row "${C_CYN}2)${C_RES}  🌐 Прокси, Ядро ($(get_active_core_name)) и Панель ($(get_active_ui_name)) + ${C_GRN}⚡ SSH-пульт${C_RES}"
+            ui_box_row "${C_CYN}3)${C_RES}  🔄 Полное обновление: скрипт шлюза (Git) + ядра (SB/Mihomo, AGH)"
+            ui_box_row "${C_CYN}4)${C_RES}  ♻️  Перезапустить службы + пересобрать конфиг и сбросить conntrack"
+            ui_box_row "${C_CYN}5)${C_RES}  📜 Посмотреть живые логи ядра шлюза и служб"
+            ui_box_row "${C_CYN}6)${C_RES}  🛠️  Полная перенастройка шлюза (Мастер установки)"
+            ui_box_row "${C_CYN}7)${C_RES}  🧭 Свои домены (В прокси / Напрямую) + ${C_GRN}🕵️ Детектор сайта${C_RES}"
+            ui_box_row "${C_CYN}8)${C_RES}  📱 Маршрутизация устройств по IP + ${C_GRN}🔍 Авто-поиск в LAN${C_RES}"
+            ui_box_row "${C_CYN}9)${C_RES}  🔐 Сервисный режим, смена пароля и ${C_GRN}☁️ Единый бэкап в Telegram${C_RES}"
+            ui_box_row "${C_CYN}10)${C_RES} ⏰ Автообновление (04:00), Авто-Доктор (Watchdog) и Telegram"
+            ui_box_row "${C_CYN}11)${C_RES} 🛡️  Аппаратный Kill-Switch (защита от утечек через fw4)"
+            ui_box_row "${C_CYN}12)${C_RES} 🖧  Сетевые настройки: IP шлюза / роутера + DHCP AdGuard Home"
+            ui_box_row "${C_CYN}15)${C_RES} ${C_YEL}🩺 Авто-Доктор одной кнопкой (gateway doctor — починка сети и служб)${C_RES}"
+            ui_box_row "${C_CYN}16)${C_RES} ${C_CYN}⚡ Перезагрузка / безопасное выключение роутера${C_RES}"
+            ui_box_row "${C_CYN}u)${C_RES}  🔗 Показать адреса панелей (Zashboard, AdGuard Home, LuCI) и доступы"
+        else
+            ui_box_top "🎛️ ГЛАВНОЕ МЕНЮ УПРАВЛЕНИЯ СЕРВЕРОМ [0-16 / u / d]"
+            ui_box_row "${C_CYN}1)${C_RES}  📊 Статус служб, матрица пинга и рентген сайтов (Self-Test 2.0)"
+            ui_box_row "${C_CYN}2)${C_RES}  🌐 Прокси, Ядро ($(get_active_core_name)) и Панель ($(get_active_ui_name)) + ${C_GRN}⚡ SSH-пульт${C_RES}"
+            ui_box_row "${C_CYN}3)${C_RES}  🔄 Полное обновление: скрипт шлюза (Git) + ядра (SB/Mihomo, AGH) + Homelab"
+            ui_box_row "${C_CYN}4)${C_RES}  ♻️  Перезапустить службы + пересобрать конфиг и сбросить conntrack"
+            ui_box_row "${C_CYN}5)${C_RES}  📜 Посмотреть живые логи ядра шлюза и служб сервера"
+            ui_box_row "${C_CYN}6)${C_RES}  🛠️  Полная перенастройка сервера (Мастер установки)"
+            ui_box_row "${C_CYN}7)${C_RES}  🧭 Свои домены (В прокси / Напрямую) + ${C_GRN}🕵️ Детектор сайта${C_RES}"
+            ui_box_row "${C_CYN}8)${C_RES}  📱 Маршрутизация устройств по IP + ${C_GRN}🔍 Авто-поиск в LAN${C_RES}"
+            ui_box_row "${C_CYN}9)${C_RES}  🔐 Сервисный режим, смена пароля и ${C_GRN}☁️ Единый бэкап в Telegram${C_RES}"
+            ui_box_row "${C_CYN}10)${C_RES} ⏰ Автообновление (04:00), Авто-Доктор (Watchdog) и Telegram"
+            ui_box_row "${C_CYN}11)${C_RES} 🛡️  Аппаратный Kill-Switch (защита от утечек при падении Sing-Box)"
+            ui_box_row "${C_CYN}12)${C_RES} 🖧  Сетевые настройки: IP сервера / роутера + DHCP AdGuard Home"
+            ui_box_row "${C_CYN}13)${C_RES} ${C_GRN}🏠 Управление домашним сервером (Homelab & Media Stack + Диски LUKS2)${C_RES}"
+            ui_box_row "${C_CYN}14)${C_RES} ${C_MAG}📦 Управление контейнерами LXC (Alpine, Debian, Ubuntu, Снапшоты)${C_RES}"
+            ui_box_row "${C_CYN}15)${C_RES} ${C_YEL}🩺 Авто-Доктор одной кнопкой (gateway doctor — починка сети, БД и диска)${C_RES}"
+            ui_box_row "${C_CYN}16)${C_RES} ${C_CYN}⚡ Безопасное выключение / перезагрузка сервера или разблокировка LUKS2${C_RES}"
+            ui_box_row "${C_CYN}u)${C_RES}  🔗 Показать все веб-ссылки (https://*.lan), сетевые папки и доступы"
+        fi
         ui_box_row "${C_CYN}0)${C_RES}  Выход"
         ui_box_bottom
         printf "Выберите действие [0-16 / u]: "
@@ -227,7 +250,12 @@ show_menu() {
                 read -r _ < /dev/tty || true
                 ;;
             14)
-                lxc_interactive_menu
+                if require_alpine_feature "Виртуализация LXC"; then
+                    lxc_interactive_menu
+                else
+                    printf "\nНажмите Enter для возврата в меню..."
+                    read -r _ < /dev/tty || true
+                fi
                 ;;
             15|d|D)
                 echo ""
@@ -237,27 +265,45 @@ show_menu() {
                 ;;
             16)
                 echo ""
-                ui_box_top "⚡ УПРАВЛЕНИЕ ПИТАНИЕМ И КРИПТОКОНТЕЙНЕРОМ LUKS2"
-                ui_box_row "1) 🔓 Разблокировать и смонтировать внешний диск LUKS2 (gateway unlock)"
-                ui_box_row "2) ⏏️ Безопасно извлечь и заблокировать внешний диск LUKS2 (gateway eject)"
-                ui_box_row "3) 🔄 Безопасная перезагрузка сервера с парковкой БД и LUKS2 (gateway safe-reboot)"
-                ui_box_row "4) 🛑 Безопасное выключение сервера с парковкой БД и LUKS2 (gateway safe-poweroff)"
-                ui_box_row "0) Отмена"
-                ui_box_bottom
-                printf "Выбор [0-4]: "
-                read -r PWR_CH < /dev/tty || true
-                case "$PWR_CH" in
-                    1) unlock_external_storage_cli || true; printf "\nНажмите Enter..." ; read -r _ < /dev/tty || true ;;
-                    2) unmount_external_storage_safe || true; printf "\nНажмите Enter..." ; read -r _ < /dev/tty || true ;;
-                    3) safe_power_action "reboot" ;;
-                    4) safe_power_action "poweroff" ;;
-                esac
+                if is_openwrt; then
+                    ui_box_top "⚡ УПРАВЛЕНИЕ ПИТАНИЕМ (${OS_NAME})"
+                    ui_box_row "1) 🔄 Перезагрузить устройство (gateway safe-reboot)"
+                    ui_box_row "2) 🛑 Безопасно выключить питание (gateway safe-poweroff)"
+                    ui_box_row "0) Отмена"
+                    ui_box_bottom
+                    printf "Выбор [0-2]: "
+                    read -r PWR_CH < /dev/tty || true
+                    case "$PWR_CH" in
+                        1) safe_power_action "reboot" ;;
+                        2) safe_power_action "poweroff" ;;
+                    esac
+                else
+                    ui_box_top "⚡ УПРАВЛЕНИЕ ПИТАНИЕМ И КРИПТОКОНТЕЙНЕРОМ LUKS2"
+                    ui_box_row "1) 🔓 Разблокировать и смонтировать внешний диск LUKS2 (gateway unlock)"
+                    ui_box_row "2) ⏏️ Безопасно извлечь и заблокировать внешний диск LUKS2 (gateway eject)"
+                    ui_box_row "3) 🔄 Безопасная перезагрузка сервера с парковкой БД и LUKS2 (gateway safe-reboot)"
+                    ui_box_row "4) 🛑 Безопасное выключение сервера с парковкой БД и LUKS2 (gateway safe-poweroff)"
+                    ui_box_row "0) Отмена"
+                    ui_box_bottom
+                    printf "Выбор [0-4]: "
+                    read -r PWR_CH < /dev/tty || true
+                    case "$PWR_CH" in
+                        1) unlock_external_storage_cli || true; printf "\nНажмите Enter..." ; read -r _ < /dev/tty || true ;;
+                        2) unmount_external_storage_safe || true; printf "\nНажмите Enter..." ; read -r _ < /dev/tty || true ;;
+                        3) safe_power_action "reboot" ;;
+                        4) safe_power_action "poweroff" ;;
+                    esac
+                fi
                 ;;
             1)
                 echo ""
                 run_self_test
                 ui_box_top "🔌 АКТИВНЫЕ СЕТЕВЫЕ ПОРТЫ СЕРВЕРА"
-                ss -tulpn 2>/dev/null | grep -E ':(53|80|443|445|1053|3000|3001|7890|8081|8222|8443|9090|9091)\b' || true
+                if command -v ss >/dev/null 2>&1; then
+                    ss -tulpn 2>/dev/null | grep -E ':(53|80|443|445|1053|3000|3001|7890|8081|8222|8443|9090|9091)\b' || true
+                else
+                    netstat -tulnp 2>/dev/null | grep -E ':(53|80|443|1053|3000|7890|9090)\b' || true
+                fi
                 ui_box_bottom
                 printf "Нажмите Enter для возврата в меню (или введите 'd' для рентгена любого сайта): "
                 read -r ST_ACT < /dev/tty || true
@@ -938,7 +984,12 @@ show_menu() {
                 done
                 ;;
             13)
-                show_homelab_menu
+                if require_alpine_feature "Модули Homelab и LUKS2"; then
+                    show_homelab_menu
+                else
+                    printf "\nНажмите Enter для возврата в меню..."
+                    read -r _ < /dev/tty || true
+                fi
                 ;;
             0)
                 exit 0

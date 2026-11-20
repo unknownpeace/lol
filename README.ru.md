@@ -2,7 +2,7 @@
 
 # 🚀 Universal Sidecar Gateway & Homelab
 
-### Превратите любой мини-ПК с одним Ethernet-портом в бесшумный сетевой шлюз, отказоустойчивое домашнее облако и платформу LXC на базе чистого Alpine Linux
+### Превратите любой мини-ПК на Alpine Linux или роутер OpenWrt >= 25.12.6 в бесшумный сетевой шлюз с DNS-фильтрацией рекламы и (на Alpine) модульным домашним сервером
 
 <p>
   <a href="README.md"><img src="https://img.shields.io/badge/🇬🇧_English_Version-README.md-1f6feb?style=for-the-badge" alt="English README"></a>
@@ -12,7 +12,8 @@
 
 [![CI Status](https://github.com/unknownpeace/lol/actions/workflows/ci.yml/badge.svg)](https://github.com/unknownpeace/lol/actions/workflows/ci.yml)
 [![Alpine Linux](https://img.shields.io/badge/Alpine_Linux-3.21--3.24%2B-0D597F?logo=alpinelinux&logoColor=white)](https://alpinelinux.org)
-[![OpenRC Native](https://img.shields.io/badge/Init-OpenRC_Native_%28Zero_Docker%29-2ea043)](https://wiki.alpinelinux.org/wiki/OpenRC)
+[![OpenWrt](https://img.shields.io/badge/OpenWrt-%E2%89%A525.12.6_(apk%2Ffw4)-00B5E2?logo=openwrt&logoColor=white)](https://openwrt.org)
+[![OpenRC / procd](https://img.shields.io/badge/Init-OpenRC_%7C_procd_(Zero_Docker)-2ea043)](https://wiki.alpinelinux.org/wiki/OpenRC)
 [![Sing-Box Extended](https://img.shields.io/badge/Core_1-Sing--Box_Extended_v1.14.3-8957e5)](https://github.com/shtorm-7/sing-box-extended)
 [![Mihomo](https://img.shields.io/badge/Core_2-Mihomo_v1.19.34-1f6feb)](https://github.com/MetaCubeX/mihomo)
 [![AdGuard Home](https://img.shields.io/badge/DNS-AdGuard_Home_v1.0.0-68bc71)](https://github.com/AdguardTeam/AdGuardHome)
@@ -22,7 +23,19 @@
 
 </div>
 
-> **Редакция от 20 ноября 2026 г.** · Нативный стек **Alpine Linux + OpenRC + `apk`** — без Docker, без Snap, без `opkg` и лишних прослоек. Создано для мини-ПК (**Z83II**, Intel N100/N95), одноплатников (**Raspberry Pi**, **Orange Pi**, **NanoPi**) и виртуальных машин.
+> **Редакция от 21 ноября 2026 г.** · Нативный стек **`apk`-only** для **Alpine Linux 3.21–3.24+ (OpenRC)** и **OpenWrt `>= 25.12.6` (`procd` + `fw4`)** — без Docker, без Snap и без устаревшего `opkg`. Создано для мини-ПК (**Z83II**, Intel N100/N95), одноплатников (**Raspberry Pi**, **Orange Pi**, **NanoPi**), x86/ARM64 роутеров и виртуальных машин.
+
+---
+
+## 🎯 Два сфокусированных профиля платформ
+
+| Возможность | Alpine Linux (`3.21 – 3.24+`, OpenRC) | OpenWrt (`>= 25.12.6`, `procd` + `fw4` + `apk`) |
+|---|---|---|
+| **Сетевой шлюз** (`Sing-Box Extended ⇄ Mihomo`, `Zashboard ⇄ MetaCubeXD`, WARP 2.0) | ✅ Полностью | ✅ Полностью |
+| **DNS и фильтрация рекламы** (`AdGuard Home` `:53`/`:3000`, авто-rewrites `*.lan`) | ✅ Полностью | ✅ Полностью (`dnsmasq` аккуратно уступает `:53`; **LuCI `:80` сохранён**) |
+| **Отказоустойчивость и защита** (`Kill-Switch`, `Doctor`, `Watchdog`, `SelfTest`, `passwd`, `backup`) | ✅ Нативный `nftables` | ✅ Нативный `fw4` (`/etc/nftables.d/90-gateway.nft`) + защита от конфликта IP |
+| **Homelab, Caddy PKI/SSL, шифрование LUKS2 и LXC** | ✅ Полностью | ⛔ Исключено по дизайну (ничего лишнего на роутере) |
+| **Устаревшие сборки `< 25.12.6` / `opkg`** | — | ❌ Отклоняются при проверке ОС |
 
 ---
 
@@ -32,7 +45,7 @@
 
 | | Возможность | Что это даёт на практике |
 |---|---|---|
-| ⚡ | **~130–200 МБ ОЗУ в работе** | Все службы работают как нативные демоны OpenRC с контролем `cgroups v2` и адаптивным `GOMEMLIMIT` |
+| ⚡ | **~130–200 МБ ОЗУ в работе** | Все службы работают как нативные демоны OpenRC / `procd` с адаптивным `GOMEMLIMIT` |
 | 🔌 | **Single-NIC Sidecar из коробки** | Безопасное подключение в существующую LAN через 1 Ethernet-кабель без замены основного роутера и без конфликта DHCP |
 | 🔄 | **Двойное ядро + Двойной Web UI** | Горячее переключение **Sing-Box Extended ⇄ Mihomo** (с авто-валидацией и откатом) и **Zashboard ⇄ MetaCubeXD** (без рестарта ядра) |
 | 🎮 | **Игровой режим и QoS-маршрутизация** | Игры по умолчанию идут напрямую (`DIRECT`), игровые патчи CDN — всегда напрямую, `masquerade persistent` для Open NAT |
@@ -161,11 +174,17 @@ flowchart TB
 
 ## ⚡ Быстрый старт за 2 минуты
 
-Подключитесь по SSH к чистому **Alpine Linux** под пользователем `root`:
+Подключитесь по SSH к **Alpine Linux** (`3.21–3.24+`) или **OpenWrt** (`>= 25.12.6` с `apk`) под пользователем `root`:
 
 ### Способ 1: Интерактивный мастер (рекомендуется)
 ```sh
+# Для Alpine Linux:
 apk add --no-cache git
+
+# Для OpenWrt >= 25.12.6:
+apk update && apk add git git-http
+
+# Клонирование и запуск (на Alpine — полный стек; на OpenWrt — только шлюз + AdGuard Home):
 git clone https://github.com/unknownpeace/lol.git /opt/gateway
 cd /opt/gateway
 ./setup.sh
@@ -250,12 +269,11 @@ gw answers [template|verify]      # Шаблон и проверка конфи�
 
 ## 💻 Системные требования и документация
 
-| Параметр | Минимум | Рекомендуется для полного Homelab |
+| Параметр | Alpine Linux (`3.21 – 3.24+`, полный стек) | OpenWrt (`>= 25.12.6`, только Шлюз + AdGuard) |
 |---|---|---|
-| **ОС** | **Alpine Linux 3.21 – 3.24+** (x86_64 / aarch64) | Alpine Linux 3.24+ (Standard / Extended) |
-| **Процессор** | 1–2 ядра x86_64 или ARM64 | Intel Atom Z8350 (Z83II), Intel N100/N95, ARMv8 |
-| **Память (RAM)** | 512 МБ *(только шлюз + DNS)* | 1.5–4 ГБ *(шлюз + весь Homelab + LXC)* |
-| **Диск (ОС + Логи)** | 2 ГБ *(проверено с журналом и кэшем)* | 16 ГБ+ eMMC/SSD + внешний диск под LUKS2 |
+| **ОС / Init** | **Alpine Linux 3.21–3.24+** (`OpenRC` + `apk`, `x86_64`/`aarch64`) | **OpenWrt `>= 25.12.6`** (`procd` + `fw4` + `apk-tools`, `x86_64`/`aarch64`) |
+| **Память (RAM)** | 512 МБ *(шлюз + DNS)* · 1.5–4 ГБ *(весь Homelab + LXC)* | 256–512 МБ+ *(ядро маршрутизации + AdGuard Home + базы правил)* |
+| **Хранилище** | От 2 ГБ rootfs *(рекомендуется 16 ГБ+ и внешний диск LUKS2)* | От ~150 МБ свободного Overlay/extroot *(бинарники и `.srs`/`.mrs`)* |
 
 * 📘 Подробная архитектура модулей и контракты ядра описаны в [ARCHITECTURE.md](ARCHITECTURE.md).
 * 🤖 Руководство для разработчиков и автоматизированной поддержки — в [AGENTS.md](AGENTS.md).
@@ -264,7 +282,7 @@ gw answers [template|verify]      # Шаблон и проверка конфи�
 
 ## ⚖️ Правовая оговорка
 
-> Данный репозиторий представляет собой **открытый инструментарий для администрирования локальной сети, DNS-фильтрации, QoS-маршрутизации трафика, шифрования накопителей и оркестрации собственного домашнего сервера (Homelab)** на базе Alpine Linux.
+> Данный репозиторий представляет собой **открытый инструментарий для администрирования локальной сети, DNS-фильтрации, QoS-маршрутизации трафика, шифрования накопителей и оркестрации собственного домашнего сервера (Homelab)** на базе Alpine Linux и OpenWrt `>= 25.12.6`.
 >
 > * В состав проекта **не входят** какие-либо сторонние серверы, прокси-ноды, учётные записи, подписки, ключи доступа или инструкции по преодолению каких-либо законодательных ограничений.
 > * Пользователь самостоятельно настраивает источники подключения и правила маршрутизации в рамках своей частной или корпоративной инфраструктуры и несёт полную единоличную ответственность за законность и цели использования программного обеспечения в соответствии с применимым законодательством своей страны.

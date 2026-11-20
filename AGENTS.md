@@ -1,20 +1,23 @@
 # 🤖 Памятка для AI-Ассистентов и Разработчиков (AGENTS.md)
 
-> **Актуализировано:** 20 ноября 2026 года.
+> **Актуализировано:** 21 ноября 2026 года.
 
 Документ содержит критические инварианты репозитория для LLM и разработчиков.
 
 ## ⚡ Инварианты платформы и сети
 
-1. **Только Alpine Linux + OpenRC + `apk`:**
-   - Целевая ОС — **исключительно Alpine Linux** (musl libc, busybox `sh`, OpenRC `/etc/init.d/<name>`).
-   - **OpenWrt, `opkg`, `uci`, `procd`, `fw4` и fallback-и на `dnsmasq` не поддерживаются и запрещены.**
-   - Docker **не используется**. Все скрипты обязаны иметь переводы строк **LF (`\n`)** и проходить `sh -n`.
+1. **Поддерживаемые ОС (`apk-only`, без Docker и без `opkg`):**
+   - **Alpine Linux 3.21–3.24+ (`OpenRC` + `apk-tools`):** полная редакция (Шлюз + AdGuard Home + Homelab + LUKS2 + LXC).
+   - **OpenWrt `>= 25.12.6` (`procd` + `fw4` + `apk-tools`):** облегчённая редакция **strictly Gateway + AdGuard Home** (Sing-Box Extended ⇄ Mihomo, Zashboard ⇄ MetaCubeXD, WARP 2.0, Kill-Switch, DNS-фильтрация, Doctor/Watchdog/SelfTest/Backup/Passwd). Модули Homelab, Caddy/PKI, LUKS2 и LXC на OpenWrt отключены и защищены гардами (`require_alpine_feature`).
+   - Сборки OpenWrt `< 25.12.6` и системы с `opkg` вместо `apk` не поддерживаются и отклоняются в `detect_os()`.
+   - На OpenWrt нет `bash`, `ss`, `stat`, `base64`, а пакет `jq` собран без Oniguruma (`test`/`match`/`sub` в jq запрещены), `free -m` выводит KiB (использовать `/proc/meminfo`), для `htpasswd` ставится `apache-utils` (с немедленным `disable_apache_daemon`), cron-служба называется `cron`, `dnsmasq` переводится на `port='0'` при активном AdGuard Home (`0.0.0.0:53`) с сохранением LuCI (`uhttpd :80`).
+   - На OpenWrt правила `nftables` пишутся в `/etc/nftables.d/90-gateway.nft` (цепочки без обёртки `table inet fw4`, т.к. `fw4` подключает файл внутрь `table inet fw4`) и проверяются через `fw4 check` / `fw4 reload`.
+   - Docker **не используется**. Все скрипты обязаны иметь переводы строк **LF (`\n`)**, проходить `sh -n` и `ShellCheck -S error`.
 
-2. **Типовая топология домашней сети (Z83II Sidecar):**
-   - Основной роутер с DHCP: по умолчанию `DEFAULT_ROUTER_IP="192.168.1.5"` (`get_default_router_ip`).
-   - Сервер Alpine Linux (Z83II) подключён к роутеру по Ethernet, выступает как **шлюз (Default Gateway) и DNS-сервер** для клиентов LAN.
-   - DHCP на AdGuard Home выключен по умолчанию (Sidecar); включение блокируется при обнаружении DHCP роутера (`detect_external_dhcp_server`).
+2. **Типовая топология домашней сети (Sidecar / OpenWrt):**
+   - **Alpine Sidecar:** основной роутер с DHCP (`DEFAULT_ROUTER_IP="192.168.1.5"`) выдаёт LAN IP сервера Alpine (например, Z83II) в качестве шлюза и DNS.
+   - **OpenWrt `>= 25.12.6`:** поддерживается как LAN/Sidecar (`br-lan`) с сохранением `uhttpd` LuCI; защита от конфликта IP (`check_ip_conflict_on_lan`), `dhcp.lan.ignore='1'` при передаче `:53` AdGuard Home.
+   - DHCP на AdGuard Home выключен по умолчанию; включение блокируется при обнаружении стороннего DHCP (`detect_external_dhcp_server`).
    - Обязателен per-interface sysctl тюнинг в `/etc/sysctl.d/99-gateway-forward.conf`: `rp_filter=0`, `send_redirects=0`, `accept_redirects=0`, `secure_redirects=0` на `${LAN_IF_INIT}` + `nf_conntrack_tcp_be_liberal=1`.
 
 3. **Версии ядер, панелей и схемы (на 20.11.2026):**

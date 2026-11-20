@@ -2,6 +2,17 @@
 
 All notable changes to **Universal Sidecar Gateway & Homelab** are documented in this file.
 
+## [v2026.11.1] — 2026-11-21
+
+### OpenWrt >= 25.12.6 Support (Dedicated Gateway + AdGuard Home Mode)
+- **Dual-OS Platform Detection (`lib/core.sh`):** Added `detect_os()`, `is_openwrt()`, and `version_ge()` enforcing **OpenWrt `>= 25.12.6`** with `apk-tools 3.x`, rejecting older `< 25.12.6` or legacy `opkg` builds cleanly.
+- **Native `procd`, `fw4`, `uci` & `cron` Integration:**
+  - Unified `service_ctl` for both Alpine `OpenRC` and OpenWrt `procd` (`/etc/init.d/sing-box`, `/etc/init.d/mihomo`, `/etc/init.d/adguardhome`, `/etc/init.d/cron`), plus Boot Guard in `/etc/rc.local`.
+  - Native `fw4` nftables ruleset written to `/etc/nftables.d/90-gateway.nft` (chains inside `table inet fw4`) with `fw4 check` validation and automatic rollback/fallback.
+  - Non-disruptive `dnsmasq` handoff (`dhcp.@dnsmasq[0].port='0'`, `dhcp.lan.ignore='1'`) so **AdGuard Home** owns `:53` while **LuCI** (`uhttpd :80`) stays online.
+  - Added LAN IP conflict guard (`check_ip_conflict_on_lan`) and `br-lan` UCI static network persistence.
+- **Focused OpenWrt Scope (Zero Bloat):** Strictly installs only the routing cores (**Sing-Box Extended ⇄ Mihomo**), **Zashboard ⇄ MetaCubeXD**, **WARP 2.0 + MASQUE H2**, Kill-Switch, and **AdGuard Home** — Homelab services, Caddy/PKI, LUKS2 storage, and LXC are excluded and guarded via `require_alpine_feature` in CLI/TUI, `backup.sh`, `password.sh`, `doctor.sh`, and `selftest.sh` (fixed `/proc/meminfo` RAM reporting for BusyBox and `.last_good_state` sync in `gw passwd`).
+
 ## [v2026.11] — 2026-11-20
 
 ### Highlights

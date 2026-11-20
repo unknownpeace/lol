@@ -6,6 +6,23 @@ get_agh_admin_user() {
     return 0
 }
 
+# Освобождение порта 53 и отключение DHCPv4/v6/RA в OpenWrt dnsmasq/odhcpd для передачи DNS в AdGuard Home
+prepare_openwrt_dnsmasq_for_adguard() {
+    is_openwrt 2>/dev/null || return 0
+    if command -v uci >/dev/null 2>&1; then
+        uci set dhcp.@dnsmasq[0].port='0' 2>/dev/null || true
+        uci set dhcp.lan.ignore='1' 2>/dev/null || true
+        uci set dhcp.lan.dhcpv4='disabled' 2>/dev/null || true
+        uci set dhcp.lan.dhcpv6='disabled' 2>/dev/null || true
+        uci set dhcp.lan.ra='disabled' 2>/dev/null || true
+        uci commit dhcp 2>/dev/null || true
+    fi
+    service_ctl odhcpd stop
+    service_ctl odhcpd disable
+    service_ctl dnsmasq restart || service_ctl dnsmasq stop || true
+    return 0
+}
+
 # Автоматическая синхронизация DNS Rewrites (*.lan -> LAN_IP с enabled: true) в AdGuardHome.yaml
 sync_agh_homelab_rewrites() {
     [ -z "${SSL_TYPE:-}" ] && load_gateway_env || true
@@ -14,12 +31,16 @@ sync_agh_homelab_rewrites() {
     AGH_WAS_RUNNING="no"
     if pgrep AdGuardHome >/dev/null 2>&1; then
         AGH_WAS_RUNNING="yes"
-        rc-service adguardhome stop >/dev/null 2>&1 || /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
+        service_ctl adguardhome stop
     fi
 
-    DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan vaultwarden.lan forgejo.lan downloads.lan torrents.lan code.lan"
-    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN} vaultwarden.${SSL_DOMAIN} forgejo.${SSL_DOMAIN} downloads.${SSL_DOMAIN} torrents.${SSL_DOMAIN} code.${SSL_DOMAIN} adguard.${SSL_DOMAIN} zashboard.${SSL_DOMAIN} singbox.${SSL_DOMAIN} mihomo.${SSL_DOMAIN} panel.${SSL_DOMAIN}"
+    if is_openwrt 2>/dev/null; then
+        DOMS_STR="adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan"
+    else
+        DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan vaultwarden.lan forgejo.lan downloads.lan torrents.lan code.lan"
+        if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+            DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN} vaultwarden.${SSL_DOMAIN} forgejo.${SSL_DOMAIN} downloads.${SSL_DOMAIN} torrents.${SSL_DOMAIN} code.${SSL_DOMAIN} adguard.${SSL_DOMAIN} zashboard.${SSL_DOMAIN} singbox.${SSL_DOMAIN} mihomo.${SSL_DOMAIN} panel.${SSL_DOMAIN}"
+        fi
     fi
 
     awk -v lip="$TARGET_LAN_IP" -v dom_list="$DOMS_STR" '
@@ -95,7 +116,7 @@ sync_agh_homelab_rewrites() {
     atomic_commit_tmp "${AGH_CONF}.tmp.$$" "$AGH_CONF" 0600 "root:root" || true
 
     if [ "$AGH_WAS_RUNNING" = "yes" ]; then
-        rc-service adguardhome start >/dev/null 2>&1 || /etc/init.d/adguardhome start >/dev/null 2>&1 || true
+        service_ctl adguardhome start || true
     fi
     return 0
 }
@@ -108,7 +129,7 @@ update_agh_gateway_ip() {
     AGH_WAS_RUNNING="no"
     if pgrep AdGuardHome >/dev/null 2>&1; then
         AGH_WAS_RUNNING="yes"
-        rc-service adguardhome stop >/dev/null 2>&1 || /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
+        service_ctl adguardhome stop
     fi
     awk -v gw="$NEW_GW" '
         /^[[:space:]]*bootstrap_dns:/ {
@@ -126,7 +147,7 @@ update_agh_gateway_ip() {
     atomic_commit_tmp "${AGH_CONF}.tmp.$$" "$AGH_CONF" 0600 "root:root" || true
     sync_agh_homelab_rewrites "$NEW_LAN"
     if [ "$AGH_WAS_RUNNING" = "yes" ]; then
-        rc-service adguardhome start >/dev/null 2>&1 || /etc/init.d/adguardhome start >/dev/null 2>&1 || true
+        service_ctl adguardhome start || true
     fi
     return 0
 }

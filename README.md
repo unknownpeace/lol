@@ -2,7 +2,7 @@
 
 # 🚀 Universal Sidecar Gateway & Homelab
 
-### Turn any single-NIC mini-PC or SBC into a silent Alpine Linux network gateway, encrypted private cloud, and pure LXC host
+### Turn any single-NIC mini-PC, SBC, or OpenWrt 25.12.6+ router into a high-efficiency network gateway, ad-filtering DNS appliance, and (on Alpine Linux) encrypted Homelab
 
 <p>
   <a href="README.ru.md"><img src="https://img.shields.io/badge/🇷🇺_Версия_на_русском-README.ru.md-1f6feb?style=for-the-badge" alt="Russian README"></a>
@@ -12,7 +12,8 @@
 
 [![CI Status](https://github.com/unknownpeace/lol/actions/workflows/ci.yml/badge.svg)](https://github.com/unknownpeace/lol/actions/workflows/ci.yml)
 [![Alpine Linux](https://img.shields.io/badge/Alpine_Linux-3.21--3.24%2B-0D597F?logo=alpinelinux&logoColor=white)](https://alpinelinux.org)
-[![OpenRC Native](https://img.shields.io/badge/Init-OpenRC_Native_%28Zero_Docker%29-2ea043)](https://wiki.alpinelinux.org/wiki/OpenRC)
+[![OpenWrt](https://img.shields.io/badge/OpenWrt-%E2%89%A525.12.6_(apk%2Ffw4)-00B5E2?logo=openwrt&logoColor=white)](https://openwrt.org)
+[![OpenRC / procd](https://img.shields.io/badge/Init-OpenRC_%7C_procd_(Zero_Docker)-2ea043)](https://wiki.alpinelinux.org/wiki/OpenRC)
 [![Sing-Box Extended](https://img.shields.io/badge/Core_1-Sing--Box_Extended_v1.14.3-8957e5)](https://github.com/shtorm-7/sing-box-extended)
 [![Mihomo](https://img.shields.io/badge/Core_2-Mihomo_v1.19.34-1f6feb)](https://github.com/MetaCubeX/mihomo)
 [![AdGuard Home](https://img.shields.io/badge/DNS-AdGuard_Home_v1.0.0-68bc71)](https://github.com/AdguardTeam/AdGuardHome)
@@ -22,7 +23,19 @@
 
 </div>
 
-> **Documentation revision: November 20, 2026.** Strictly built on **Alpine Linux + OpenRC + `apk`** — zero Docker, zero Snap, zero `opkg` or OpenWrt dependencies. Engineered for compact mini-PCs (**Z83II**, Intel N100/N95), SBCs (**Raspberry Pi**, **Orange Pi**, **NanoPi**), and VMs.
+> **Documentation revision: November 21, 2026.** Native **`apk`-only** architecture across **Alpine Linux 3.21–3.24+ (OpenRC)** and **OpenWrt >= 25.12.6 (`procd` + `fw4`)** — zero Docker, zero Snap, zero legacy `opkg` dependencies. Engineered for mini-PCs (**Z83II**, Intel N100/N95), SBCs (**Raspberry Pi**, **Orange Pi**, **NanoPi**), x86/ARM64 OpenWrt routers, and VMs.
+
+---
+
+## 🎯 Two Focused Platform Profiles
+
+| Capability | Alpine Linux (`3.21 – 3.24+`, OpenRC) | OpenWrt (`>= 25.12.6`, `procd` + `fw4` + `apk`) |
+|---|---|---|
+| **Routing Gateway** (`Sing-Box Extended ⇄ Mihomo`, `Zashboard ⇄ MetaCubeXD`, WARP 2.0) | ✅ Full | ✅ Full |
+| **DNS & Ad Filtering** (`AdGuard Home` `:53`/`:3000`, `*.lan` rewrites) | ✅ Full | ✅ Full (`dnsmasq` gracefully handed off; **LuCI `:80` preserved**) |
+| **Network Hardening** (`Kill-Switch`, `Doctor`, `Watchdog`, `SelfTest`, `gw passwd`, `gw backup`) | ✅ Native `nftables` | ✅ Native `fw4` (`/etc/nftables.d/90-gateway.nft`) + LAN IP-conflict guard |
+| **Homelab, Caddy PKI/SSL, LUKS2 Storage & LXC** | ✅ Full | ⛔ Excluded by design (keeps router clean & minimal) |
+| **Legacy `< 25.12.6` / `opkg` builds** | — | ❌ Rejected cleanly during install |
 
 ---
 
@@ -32,7 +45,7 @@ Most homelab stacks either consume gigabytes of RAM running nested Docker contai
 
 | | Highlight | Real-World Benefit |
 |---|---|---|
-| ⚡ | **~130–200 MB Idle RAM** | Native OpenRC daemons tuned with `cgroups v2` limits and adaptive `GOMEMLIMIT` |
+| ⚡ | **~130–200 MB Idle RAM** | Native OpenRC / `procd` daemons tuned with adaptive `GOMEMLIMIT` |
 | 🔌 | **Zero-Friction Single-NIC Sidecar** | Plugs into your router via a single Ethernet port with automatic `detect_external_dhcp_server` collision protection |
 | 🔄 | **Hot-Swappable Dual-Core & Dual-UI** | Switch live between **Sing-Box Extended ⇄ Mihomo** (auto-verified with instant rollback) and **Zashboard ⇄ MetaCubeXD** (0 core restarts) |
 | 🎮 | **Latency-First Gaming QoS** | Game storefronts & P2P stay `DIRECT` with real IP resolution (no FakeIP breaking anti-cheats/NAT), `masquerade persistent` Open NAT, and direct CDN downloads |
@@ -161,11 +174,17 @@ Manage lightweight system containers (Alpine, Debian, Ubuntu, Arch, etc.) with `
 
 ## ⚡ Quick Start in 2 Minutes
 
-SSH into your fresh **Alpine Linux** system as `root`:
+SSH into your **Alpine Linux** (`3.21–3.24+`) or **OpenWrt** (`>= 25.12.6` with `apk`) host as `root`:
 
 ### Option 1: Interactive Installer (Recommended)
 ```sh
+# Alpine Linux:
 apk add --no-cache git
+
+# OpenWrt >= 25.12.6:
+apk update && apk add git git-http
+
+# Clone & launch (installs full suite on Alpine; Gateway + AdGuard Home only on OpenWrt):
 git clone https://github.com/unknownpeace/lol.git /opt/gateway
 cd /opt/gateway
 ./setup.sh
@@ -250,12 +269,11 @@ gw answers [template|verify]      # Generate or validate unattended install answ
 
 ## 💻 Requirements & Further Docs
 
-| Component | Minimum | Recommended (Full Gateway + Homelab) |
+| Component | Alpine Linux (`3.21 – 3.24+`, Full Suite) | OpenWrt (`>= 25.12.6`, Gateway + AdGuard Only) |
 |---|---|---|
-| **OS** | **Alpine Linux 3.21 – 3.24+** (`x86_64` / `aarch64`) | Alpine Linux 3.24+ (Standard / Extended) |
-| **CPU** | 1–2 cores (`x86_64` or ARM64) | Intel Atom Z8350 (Z83II), Intel N100/N95, ARMv8 |
-| **Memory** | 512 MB RAM *(Gateway + DNS)* | 1.5–4 GB RAM *(Gateway + all Homelab modules + LXC)* |
-| **Disk** | 2 GB free rootfs | 16 GB+ eMMC/SSD + dedicated external drive for LUKS2 |
+| **OS / Init** | **Alpine Linux 3.21–3.24+** (`OpenRC` + `apk`, `x86_64`/`aarch64`) | **OpenWrt `>= 25.12.6`** (`procd` + `fw4` + `apk-tools`, `x86_64`/`aarch64`) |
+| **Memory** | 512 MB *(Gateway+DNS)* · 1.5–4 GB *(Homelab + LXC)* | 256–512 MB+ *(Gateway core + AdGuard Home + rule sets)* |
+| **Storage** | 2 GB min rootfs *(16 GB+ + external LUKS2 drive rec.)* | ~150 MB+ free Overlay/extroot *(binaries + `.srs`/`.mrs` databases)* |
 
 * 📘 Architecture overview and module contracts: [ARCHITECTURE.md](ARCHITECTURE.md).
 * 🤖 Contributor and automation conventions: [AGENTS.md](AGENTS.md).
@@ -264,7 +282,7 @@ gw answers [template|verify]      # Generate or validate unattended install answ
 
 ## ⚖️ Legal Disclaimer
 
-> This repository provides an **open-source automation suite for local network administration, DNS hygiene, policy-based traffic routing, LUKS2 disk encryption, and self-hosted Homelab orchestration** on Alpine Linux.
+> This repository provides an **open-source automation suite for local network administration, DNS filtering, policy-based traffic routing, LUKS2 disk encryption, and self-hosted Homelab orchestration** on Alpine Linux and OpenWrt `>= 25.12.6`.
 >
 > * This project **does not** bundle, distribute, or endorse any third-party servers, proxy credentials, subscription links, or instructions intended to evade applicable legal or regulatory restrictions.
 > * Operators are solely responsible for configuring their own endpoints, rules, and self-hosted services and for ensuring full compliance with all applicable local and international laws.

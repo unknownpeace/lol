@@ -81,10 +81,10 @@ run_self_test() {
                 [ -n "$G_NOW" ] && ui_box_row "▸ ${GRP_T}: ${C_CYN}${C_BLD}${G_NOW}${C_RES}"
             done
         fi
-        DNS_AI_IP=$(nslookup chatgpt.com 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 !~ /^127\./ {print $2; exit}')
-        DNS_RU_IP=$(nslookup ya.ru 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 !~ /^127\./ {print $2; exit}')
-        DNS_DDR_IP=$(nslookup -type=A _dns.resolver.arpa 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 !~ /^127\./ {print $2; exit}')
-        DNS_DOH_IP=$(nslookup -type=A use-application-dns.net 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 !~ /^127\./ {print $2; exit}')
+        DNS_AI_IP=$(nslookup chatgpt.com 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
+        DNS_RU_IP=$(nslookup ya.ru 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
+        DNS_DDR_IP=$(nslookup -type=A _dns.resolver.arpa 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
+        DNS_DOH_IP=$(nslookup -type=A use-application-dns.net 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
         if [ -z "$DNS_DDR_IP" ] && [ -z "$DNS_DOH_IP" ] && ! nslookup -type=A -port=1053 _dns.resolver.arpa 127.0.0.1 >/dev/null 2>&1; then
             DNS_DDR_TXT="${C_GRN}OK${C_RES}"
         else
@@ -109,7 +109,7 @@ run_self_test() {
     fi
     ui_box_bottom
 
-    if [ "$(count_enabled_homelab_modules)" -gt 0 ]; then
+    if ! is_openwrt && [ "$(count_enabled_homelab_modules)" -gt 0 ]; then
         run_homelab_self_test
     fi
     return 0
@@ -136,26 +136,35 @@ run_gateway_quick_check() {
         ui_box_row "${C_YEL}[▲] ${CUR_C_NAME} Config:  НЕ НАЙДЕН (${CUR_C_CONF})${C_RES}"
     fi
 
-    # 2. Синтаксис Caddy
-    if [ -x /usr/sbin/caddy ] && [ -s "$CADDY_CONF" ]; then
-        if su -s /bin/sh caddy -c "XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/var/lib/caddy HOME=/var/lib/caddy /usr/sbin/caddy validate --config '$CADDY_CONF' --adapter caddyfile" >/dev/null 2>&1 || \
-           /usr/sbin/caddy validate --config "$CADDY_CONF" --adapter caddyfile >/dev/null 2>&1; then
-            ui_box_row "${C_GRN}[✔]${C_RES} Caddyfile & PKI:      ${C_GRN}КОРРЕКТЕН${C_RES} (${CADDY_CONF})"
+    # 2. Firewall4 / Caddy / SSL
+    if is_openwrt; then
+        if [ -s "$OPENWRT_NFT_CONF" ] && fw4 check >/dev/null 2>&1; then
+            ui_box_row "${C_GRN}[✔]${C_RES} Firewall4 & Gateway:    ${C_GRN}КОРРЕКТЕН${C_RES} (${OPENWRT_NFT_CONF})"
         else
-            ui_box_row "${C_RED}[✖] Caddyfile & PKI:      ОШИБКА ВАЛИДАЦИИ CADDYFILE${C_RES}"
+            ui_box_row "${C_RED}[✖] Firewall4 & Gateway:    ОШИБКА ПРОВЕРКИ FW4 ИЛИ ОТСУТСТВУЕТ ${OPENWRT_NFT_CONF}${C_RES}"
+        fi
+    else
+        if [ -x /usr/sbin/caddy ] && [ -s "$CADDY_CONF" ]; then
+            if su -s /bin/sh caddy -c "XDG_DATA_HOME=/var/lib/caddy XDG_CONFIG_HOME=/var/lib/caddy HOME=/var/lib/caddy /usr/sbin/caddy validate --config '$CADDY_CONF' --adapter caddyfile" >/dev/null 2>&1 || \
+               /usr/sbin/caddy validate --config "$CADDY_CONF" --adapter caddyfile >/dev/null 2>&1; then
+                ui_box_row "${C_GRN}[✔]${C_RES} Caddyfile & PKI:      ${C_GRN}КОРРЕКТЕН${C_RES} (${CADDY_CONF})"
+            else
+                ui_box_row "${C_RED}[✖] Caddyfile & PKI:      ОШИБКА ВАЛИДАЦИИ CADDYFILE${C_RES}"
+            fi
+        fi
+
+        if is_letsencrypt_ssl_active 2>/dev/null; then
+            ui_box_row "${C_GRN}[✔]${C_RES} SSL/TLS Сертификат:   ${C_GRN}Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
+        else
+            ui_box_row "${C_CYN}[✔]${C_RES} SSL/TLS Сертификат:   Локальный PKI (*.lan)"
         fi
     fi
 
-    # 2.5. Статус SSL/TLS
-    if is_letsencrypt_ssl_active 2>/dev/null; then
-        ui_box_row "${C_GRN}[✔]${C_RES} SSL/TLS Сертификат:   ${C_GRN}Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
-    else
-        ui_box_row "${C_CYN}[✔]${C_RES} SSL/TLS Сертификат:   Локальный PKI (*.lan)"
-    fi
-
     # 3. AdGuard Home DNS (:53)
-    if nc -z -u -w 1 127.0.0.1 53 >/dev/null 2>&1 || pgrep AdGuardHome >/dev/null 2>&1; then
+    if pgrep AdGuardHome >/dev/null 2>&1 && (netstat -ulnp 2>/dev/null | grep -q ':53 ' || nc -z -u -w 1 127.0.0.1 53 >/dev/null 2>&1); then
         ui_box_row "${C_GRN}[✔]${C_RES} AdGuard Home DNS:     ${C_GRN}АКТИВЕН${C_RES} (127.0.0.1:53 слушает запросы)"
+    elif pgrep AdGuardHome >/dev/null 2>&1; then
+        ui_box_row "${C_GRN}[✔]${C_RES} AdGuard Home DNS:     ${C_GRN}ЗАПУЩЕН${C_RES} (процесс активен)"
     else
         ui_box_row "${C_RED}[✖] AdGuard Home DNS:     НЕ ОТВЕЧАЕТ НА ПОРТУ 53${C_RES}"
     fi
@@ -190,10 +199,12 @@ run_gateway_quick_check() {
 # или вручную по команде `gw motd` / `gateway motd`
 # ==============================================================================
 print_gateway_motd() {
+    detect_os >/dev/null 2>&1 || true
     load_gateway_env
     [ -f "$HOMELAB_ENV" ] && . "$HOMELAB_ENV" 2>/dev/null || true
 
-    HN=$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "alpine")
+    HN=$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "gateway")
+    [ -z "$HN" ] && [ -f /proc/sys/kernel/hostname ] && HN=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "gateway")
     ARCH_INFO=$(uname -m 2>/dev/null || echo "x86_64")
     UPTIME_RAW=$(uptime 2>/dev/null || echo "")
     UPTIME_STR=$(printf "%s" "$UPTIME_RAW" | sed -E 's/.*up[[:space:]]+([^,]+),.*/\1/' | sed 's/^[[:space:]]*//' || echo "online")
@@ -204,11 +215,24 @@ print_gateway_motd() {
     ROUTER_IP="${GW_IP:-$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -n 1)}"
 
     # ОЗУ
-    RAM_LINE=$(free -m 2>/dev/null | awk '/Mem:/ {if ($2>0) printf "%d МБ / %d МБ (%.0f%%)", $3, $2, ($3/$2)*100; else print "N/A"}')
+    RAM_LINE=$(awk '
+        /^MemTotal:/ { t=$2 }
+        /^MemAvailable:/ { a=$2 }
+        END {
+            if (t > 0) {
+                tm = int(t / 1024);
+                um = int((t - a) / 1024);
+                if (um < 0) um = 0;
+                printf "%d МБ / %d МБ (%.0f%%)", um, tm, (um / tm) * 100;
+            } else {
+                print "N/A";
+            }
+        }
+    ' /proc/meminfo 2>/dev/null)
     [ -z "$RAM_LINE" ] && RAM_LINE="${TOTAL_RAM_MB:-2048} МБ"
 
     # Хранилище
-    if is_external_storage_mounted 2>/dev/null; then
+    if ! is_openwrt && is_external_storage_mounted 2>/dev/null; then
         ST_LINE=$(df -h "$STORAGE_ROOT" 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
         ST_SRC=$(findmnt -n -o SOURCE "$STORAGE_ROOT" 2>/dev/null || true)
         ST_FS=$(blkid -s TYPE -o value "$ST_SRC" 2>/dev/null || echo "ext4")
@@ -220,7 +244,11 @@ print_gateway_motd() {
         ST_INFO="${STORAGE_ROOT}: ${ST_LINE}${ST_TAG}"
     else
         ST_ROOT_LINE=$(df -h / 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
-        ST_INFO="Локальный системный раздел: ${ST_ROOT_LINE} (диск не подключен)"
+        if is_openwrt; then
+            ST_INFO="OpenWrt Overlay (/): ${ST_ROOT_LINE}"
+        else
+            ST_INFO="Локальный системный раздел: ${ST_ROOT_LINE} (диск не подключен)"
+        fi
     fi
 
     # Статус ядер шлюза
@@ -231,41 +259,43 @@ print_gateway_motd() {
     TUN_ST="${C_RED}○${C_RES}"
     ip link show "$CORE_TUN_IF" >/dev/null 2>&1 && TUN_ST="${C_GRN}●${C_RES}"
 
-    # SSL / Домен
-    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        SSL_INFO="Let's Encrypt Wildcard (*.${SSL_DOMAIN})"
-    else
-        SSL_INFO="Локальный доверенный CA (*.lan)"
-    fi
-
-    # Homelab сервисы
-    HL_SUMMARY=""
-    if [ -f "$HOMELAB_STATE" ]; then
-        while IFS='|' read -r M_ID M_EN M_SVC _REST; do
-            case "$M_ID" in ''|\#*) continue ;; esac
-            if [ "$M_EN" = "yes" ]; then
-                if [ -n "$M_SVC" ] && rc-service "$M_SVC" status >/dev/null 2>&1; then
-                    DOT="${C_GRN}●${C_RES}"
-                else
-                    DOT="${C_RED}○${C_RES}"
-                fi
-                HL_SUMMARY="${HL_SUMMARY} ${M_ID}[${DOT}]"
-            fi
-        done < "$HOMELAB_STATE"
-    fi
-    [ -z "$HL_SUMMARY" ] && HL_SUMMARY="только сетевой шлюз"
-
     echo ""
     echo "${C_BLU}╔══════════════════════════════════════════════════════════════════════════════╗${C_RES}"
-    echo "${C_BLU}║${C_RES}  ${C_CYN}🚀 UNIVERSAL SIDECAR GATEWAY & HOMELAB // ALPINE LINUX${C_RES}"
+    if is_openwrt; then
+        echo "${C_BLU}║${C_RES}  ${C_CYN}🚀 UNIVERSAL SIDECAR GATEWAY // ${OS_NAME}${C_RES}"
+    else
+        echo "${C_BLU}║${C_RES}  ${C_CYN}🚀 UNIVERSAL SIDECAR GATEWAY & HOMELAB // ALPINE LINUX${C_RES}"
+    fi
     echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Хост / ОС:${C_RES}    %-24s │ Uptime: %-10s │ Load: %s\n" "${HN} (${ARCH_INFO})" "$UPTIME_STR" "$LOAD_STR"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Сеть:${C_RES}         LAN: %s (%s) │ Роутер: %s\n" "$LAN_IP_CUR" "$LAN_DEV_CUR" "$ROUTER_IP"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Память (RAM):${C_RES} %s\n" "$RAM_LINE"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Хранилище:${C_RES}    %s\n" "$ST_INFO"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Ядро шлюза:${C_RES}   %s [%b] │ AdGuard Home (:53) [%b] │ %s [%b] │ UI: %s\n" "$(get_active_core_name)" "$SB_ST" "$AGH_ST" "$CORE_TUN_IF" "$TUN_ST" "$(get_active_ui_name)"
-    printf "${C_BLU}║${C_RES}  ${C_BLD}• Homelab:${C_RES}     %s\n" "$HL_SUMMARY"
-    printf "${C_BLU}║${C_RES}  ${C_BLD}• SSL / Домен:${C_RES}  %s\n" "$SSL_INFO"
+    if ! is_openwrt; then
+        if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+            SSL_INFO="Let's Encrypt Wildcard (*.${SSL_DOMAIN})"
+        else
+            SSL_INFO="Локальный доверенный CA (*.lan)"
+        fi
+        HL_SUMMARY=""
+        if [ -f "$HOMELAB_STATE" ]; then
+            while IFS='|' read -r M_ID M_EN M_SVC _REST; do
+                case "$M_ID" in ''|\#*) continue ;; esac
+                if [ "$M_EN" = "yes" ]; then
+                    if [ -n "$M_SVC" ] && rc-service "$M_SVC" status >/dev/null 2>&1; then
+                        DOT="${C_GRN}●${C_RES}"
+                    else
+                        DOT="${C_RED}○${C_RES}"
+                    fi
+                    HL_SUMMARY="${HL_SUMMARY} ${M_ID}[${DOT}]"
+                fi
+            done < "$HOMELAB_STATE"
+        fi
+        [ -z "$HL_SUMMARY" ] && HL_SUMMARY="только сетевой шлюз"
+        printf "${C_BLU}║${C_RES}  ${C_BLD}• Homelab:${C_RES}     %s\n" "$HL_SUMMARY"
+        printf "${C_BLU}║${C_RES}  ${C_BLD}• SSL / Домен:${C_RES}  %s\n" "$SSL_INFO"
+    fi
     UPDATE_BADGE=$(get_gateway_update_badge 2>/dev/null || echo "")
     if [ -n "$UPDATE_BADGE" ]; then
         printf "${C_BLU}║${C_RES}  ${C_BLD}• Обновление:${C_RES}   %b\n" "$UPDATE_BADGE"

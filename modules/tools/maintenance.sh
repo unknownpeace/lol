@@ -138,15 +138,17 @@ self_update_gateway() {
     ui_step_progress 2 5 "Обновление ядер $(get_active_core_name), AdGuard Home и панели $(get_active_ui_name)..."
     update_cores_only "yes"
 
-    # 3. Обновление активных модулей Homelab
-    ui_step_progress 3 5 "Проверка обновлений для активных модулей Homelab..."
-    if [ -f "$HOMELAB_STATE" ]; then
+    # 3. Обновление активных модулей Homelab (только Alpine Linux)
+    if ! is_openwrt && [ -f "$HOMELAB_STATE" ]; then
+        ui_step_progress 3 5 "Проверка обновлений для активных модулей Homelab..."
         while IFS='|' read -r M_ID M_EN _REST; do
             case "$M_ID" in ''|\#*) continue ;; esac
             if [ "$M_EN" = "yes" ]; then
                 homelab_module_dispatch "$M_ID" "update" 2>/dev/null || true
             fi
         done < "$HOMELAB_STATE"
+    else
+        ui_step_progress 3 5 "Модули Homelab не используются в режиме ${OS_NAME} (пропуск)..."
     fi
 
     # 4. Пересборка конфига, сброс conntrack и перезапуск

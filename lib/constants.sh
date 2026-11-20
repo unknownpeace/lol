@@ -84,6 +84,8 @@ METACUBEXD_FALLBACK_TAR_URL="https://github.com/MetaCubeX/metacubexd/archive/ref
 UI_ZIP_URL="${ZASHBOARD_ZIP_URL}"
 AGH_CONF="/etc/AdGuardHome/AdGuardHome.yaml"
 ALPINE_NFT_CONF="/etc/nftables.nft"
+OPENWRT_NFT_CONF="/etc/nftables.d/90-gateway.nft"
+OPENWRT_MIN_VERSION="25.12.6"
 AGH_LEASES_JSON="/etc/AdGuardHome/data/leases.json"
 DEFAULT_ROUTER_IP="192.168.1.5"
 

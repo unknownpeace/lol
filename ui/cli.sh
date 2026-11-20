@@ -3,6 +3,7 @@
 # Маршрутизация аргументов командной строки (CLI: `gateway <command>`)
 # ==============================================================================
 gateway_cli_dispatch() {
+    detect_os >/dev/null 2>&1 || true
     load_gateway_env >/dev/null 2>&1 || true
     case "${1:-}" in
     autoupdate)
@@ -21,9 +22,11 @@ gateway_cli_dispatch() {
         run_gateway_doctor
         ;;
     unlock|luks-open)
+        require_alpine_feature "Функция LUKS2 (unlock)" || return 0
         unlock_external_storage_cli
         ;;
     lock|eject|unmount|luks-close)
+        require_alpine_feature "Функция LUKS2 (lock)" || return 0
         unmount_external_storage_safe
         ;;
     safe-reboot|reboot-safe)
@@ -115,6 +118,7 @@ gateway_cli_dispatch() {
         esac
         ;;
     ssl|cert|certs|tls)
+        require_alpine_feature "Подсистема Caddy SSL/PKI" || return 0
         case "${2:-}" in
             status)
                 show_ssl_status
@@ -167,12 +171,14 @@ gateway_cli_dispatch() {
         esac
         ;;
     disk|disks|storage)
+        require_alpine_feature "Управление внешними дисками (LUKS2)" || return 0
         manage_external_disks_menu
         ;;
     install|--answers*|-a|-f|--unattended)
         run_installer "$@"
         ;;
     homelab)
+        require_alpine_feature "Модули Homelab" || return 0
         case "${2:-}" in
             status|test)        run_homelab_self_test ;;
             links|urls)         print_quick_access_card ;;
@@ -187,6 +193,7 @@ gateway_cli_dispatch() {
         esac
         ;;
     lxc|container|containers)
+        require_alpine_feature "Виртуализация LXC" || return 0
         case "${2:-list}" in
             list|ls)
                 lxc_list_containers

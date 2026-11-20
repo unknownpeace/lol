@@ -177,22 +177,34 @@ run_installer() {
             *) ENABLE_AU="no" ;;
         esac
 
-        PRE_HL_SEL="${HOMELAB_MODULES:-none}"
-        [ -z "$PRE_HL_SEL" ] || [ "$PRE_HL_SEL" = "0" ] || [ "$PRE_HL_SEL" = "none" ] && PRE_HL_SEL="__SKIP__"
-        if [ "$PRE_HL_SEL" = "all" ] || [ "$PRE_HL_SEL" = "ALL" ]; then
-            PRE_HL_SEL="1 2 3 4 5 6 7"
-        fi
+        if is_openwrt; then
+            PRE_HL_SEL="__SKIP__"
+            ANS_STORAGE_DISK="none"
+            ANS_STORAGE_ACTION="mount"
+            ANS_STORAGE_FS="ext4"
+            ANS_STORAGE_LUKS="no"
+            ANS_STORAGE_LUKS_PASS=""
+            ANS_SSL_TYPE="local"
+            ANS_DUCK_SUB=""
+            ANS_DUCK_TOK=""
+        else
+            PRE_HL_SEL="${HOMELAB_MODULES:-none}"
+            [ -z "$PRE_HL_SEL" ] || [ "$PRE_HL_SEL" = "0" ] || [ "$PRE_HL_SEL" = "none" ] && PRE_HL_SEL="__SKIP__"
+            if [ "$PRE_HL_SEL" = "all" ] || [ "$PRE_HL_SEL" = "ALL" ]; then
+                PRE_HL_SEL="1 2 3 4 5 6 7"
+            fi
 
-        ANS_STORAGE_DISK="${STORAGE_DISK:-none}"
-        ANS_STORAGE_ACTION="${STORAGE_ACTION:-mount}"
-        ANS_STORAGE_FS="${STORAGE_FS:-ext4}"
-        ANS_STORAGE_LUKS="${STORAGE_LUKS:-no}"
-        ANS_STORAGE_LUKS_PASS="${STORAGE_LUKS_PASS:-$ADMIN_PASS}"
-        ANS_SSL_TYPE="${SSL_TYPE:-local}"
-        ANS_DUCK_SUB="${DUCKDNS_SUBDOMAIN:-}"
-        ANS_DUCK_TOK="${DUCKDNS_TOKEN:-}"
+            ANS_STORAGE_DISK="${STORAGE_DISK:-none}"
+            ANS_STORAGE_ACTION="${STORAGE_ACTION:-mount}"
+            ANS_STORAGE_FS="${STORAGE_FS:-ext4}"
+            ANS_STORAGE_LUKS="${STORAGE_LUKS:-no}"
+            ANS_STORAGE_LUKS_PASS="${STORAGE_LUKS_PASS:-$ADMIN_PASS}"
+            ANS_SSL_TYPE="${SSL_TYPE:-local}"
+            ANS_DUCK_SUB="${DUCKDNS_SUBDOMAIN:-}"
+            ANS_DUCK_TOK="${DUCKDNS_TOKEN:-}"
+        fi
     else
-        ui_banner "INSTALLER WIZARD // МАСТЕР УСТАНОВКИ ШЛЮЗА И HOMELAB"
+        ui_banner "INSTALLER WIZARD // МАСТЕР УСТАНОВКИ ШЛЮЗА (${OS_NAME})"
         echo "Система: ${OS_NAME} [${ARCH_RAW} -> ${SB_ARCH}]"
         echo "Память:  ${TOTAL_RAM_MB} МБ RAM (Лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
         ui_box_sep
@@ -352,22 +364,30 @@ run_installer() {
             *) WEB_UI="zashboard" ;;
         esac
 
-        # 5. Запрос выбора модулей Homelab сразу на старте (чтобы установка шла полностью без остановок)
-        echo ""
-        ui_box_top "Выбор модулей домашнего сервера (Homelab & Media Stack)"
-        echo " Вы можете сразу выбрать нужные домашние сервисы (логин/пароль Samba и сервисов = ${AGH_USER}):"
-        echo "  ${C_CYN}[1]${C_RES} caddy       — Центральный HTTPS Reverse Proxy & Локальный CA (*.lan)"
-        echo "  ${C_CYN}[2]${C_RES} samba       — Общая сетевая папка SMB2/3 + автообнаружение Windows 11 / Linux"
-        echo "  ${C_CYN}[3]${C_RES} vaultwarden — Менеджер паролей Bitwarden (https://vaultwarden.lan)"
-        echo "  ${C_CYN}[4]${C_RES} forgejo     — Локальный Git-сервер (https://forgejo.lan)"
-        echo "  ${C_CYN}[5]${C_RES} code        — VS Code в браузере Server-Code (https://code.lan)"
-        echo "  ${C_CYN}[6]${C_RES} ytdlp       — MeTube загрузка видео и музыки yt-dlp (https://downloads.lan)"
-        echo "  ${C_CYN}[7]${C_RES} torrent     — Торрент-клиент Transmission (https://torrents.lan)"
-        ui_box_sep
-        printf "Введите номера через пробел (например: 1 2 3 6 7), 'all' для всех или Enter (только шлюз): "
-        read -r PRE_HL_SEL < /dev/tty || true
-        PRE_HL_SEL=$(printf "%s" "$PRE_HL_SEL" | tr ',' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        [ -z "$PRE_HL_SEL" ] || [ "$PRE_HL_SEL" = "0" ] || [ "$PRE_HL_SEL" = "none" ] && PRE_HL_SEL="__SKIP__"
+        # 5. Запрос выбора модулей Homelab (только для Alpine Linux; на OpenWrt только шлюз + AdGuard)
+        if is_openwrt; then
+            PRE_HL_SEL="__SKIP__"
+        else
+            echo ""
+            ui_box_top "Выбор модулей домашнего сервера (Homelab & Media Stack)"
+            echo " Вы можете сразу выбрать нужные домашние сервисы (логин/пароль Samba и сервисов = ${AGH_USER}):"
+            echo "  ${C_CYN}[1]${C_RES} caddy       — Центральный HTTPS Reverse Proxy & Локальный CA (*.lan)"
+            echo "  ${C_CYN}[2]${C_RES} samba       — Общая сетевая папка SMB2/3 + автообнаружение Windows 11 / Linux"
+            echo "  ${C_CYN}[3]${C_RES} vaultwarden — Менеджер паролей Bitwarden (https://vaultwarden.lan)"
+            echo "  ${C_CYN}[4]${C_RES} forgejo     — Локальный Git-сервер (https://forgejo.lan)"
+            echo "  ${C_CYN}[5]${C_RES} code        — VS Code в браузере Server-Code (https://code.lan)"
+            echo "  ${C_CYN}[6]${C_RES} ytdlp       — MeTube загрузка видео и музыки yt-dlp (https://downloads.lan)"
+            echo "  ${C_CYN}[7]${C_RES} torrent     — Торрент-клиент Transmission (https://torrents.lan)"
+            ui_box_sep
+            printf "Введите номера через пробел (например: 1 2 3 6 7), 'all' для всех или Enter (только шлюз): "
+            read -r PRE_HL_SEL < /dev/tty || true
+            PRE_HL_SEL=$(printf "%s" "$PRE_HL_SEL" | tr ',' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [ -z "$PRE_HL_SEL" ] || [ "$PRE_HL_SEL" = "0" ] || [ "$PRE_HL_SEL" = "none" ] && PRE_HL_SEL="__SKIP__"
+        fi
+    fi
+
+    if [ "$TARGET_LAN_IP" != "$SAVED_LAN_IP" ]; then
+        check_ip_conflict_on_lan "$TARGET_LAN_IP" "$SAVED_LAN_IP" || exit 1
     fi
 
     ui_box_sep
@@ -377,26 +397,40 @@ run_installer() {
     echo " - Веб-панель UI:   $(get_active_ui_name)"
     echo " - IP сервера (LAN):${TARGET_LAN_IP} (интерфейс $(get_lan_ifname), маска /24)"
     echo " - Основной роутер: ${GW_IP}"
-    echo " - DNS и Домены:    AdGuard Home (0.0.0.0:53 + *.lan) -> Sing-Box (127.0.0.1:1053)"
-    echo " - Хранилище:       ${STORAGE_ROOT} (Music, Videos, Downloads)"
-    echo " - Единый логин:    ${AGH_USER} (AdGuard + Samba + Homelab) / Пароль: [СКРЫТ]"
-    echo " - Модули Homelab:  ${PRE_HL_SEL}"
+    echo " - DNS и Домены:    AdGuard Home (0.0.0.0:53 + *.lan) -> $(get_active_core_name) (127.0.0.1:1053)"
+    if is_openwrt; then
+        echo " - Профиль OpenWrt: Только сетевой шлюз и AdGuard Home (без Homelab)"
+    else
+        echo " - Хранилище:       ${STORAGE_ROOT} (Music, Videos, Downloads)"
+        echo " - Единый логин:    ${AGH_USER} (AdGuard + Samba + Homelab) / Пароль: [СКРЫТ]"
+        echo " - Модули Homelab:  ${PRE_HL_SEL}"
+    fi
     ui_box_sep
 
     sync_clock() {
         echo "Синхронизация системных часов..."
-        /usr/sbin/ntpd -n -q -p 162.159.200.1 -p 216.239.35.0 -p ntp.ix.ru -p pool.ntp.org 2>/dev/null || true
-        if [ "$(date +%Y)" -lt 2026 ]; then
-            TS=$(wget -qO- "http://1.1.1.1/cdn-cgi/trace" 2>/dev/null | awk -F= '/^ts=/ {split($2,a,"."); print a[1]}')
-            [ -n "$TS" ] && date -s "@$TS" >/dev/null 2>&1 || true
+        if is_openwrt; then
+            /usr/sbin/ntpd -n -q -p 162.159.200.1 -p 216.239.35.0 -p pool.ntp.org 2>/dev/null || true
+            if [ "$(date +%Y)" -lt 2026 ]; then
+                TS=$(wget -qO- "http://1.1.1.1/cdn-cgi/trace" 2>/dev/null | awk -F= '/^ts=/ {split($2,a,"."); print a[1]}')
+                [ -n "$TS" ] && date -s "@$TS" >/dev/null 2>&1 || true
+            fi
+            service_ctl sysntpd enable
+            service_ctl sysntpd start
+        else
+            /usr/sbin/ntpd -n -q -p 162.159.200.1 -p 216.239.35.0 -p ntp.ix.ru -p pool.ntp.org 2>/dev/null || true
+            if [ "$(date +%Y)" -lt 2026 ]; then
+                TS=$(wget -qO- "http://1.1.1.1/cdn-cgi/trace" 2>/dev/null | awk -F= '/^ts=/ {split($2,a,"."); print a[1]}')
+                [ -n "$TS" ] && date -s "@$TS" >/dev/null 2>&1 || true
+            fi
+            hwclock -w -u 2>/dev/null || true
+            rc-update add ntpd default >/dev/null 2>&1 || true
+            rc-service ntpd start >/dev/null 2>&1 || true
         fi
-        hwclock -w -u 2>/dev/null || true
-        rc-update add ntpd default >/dev/null 2>&1 || true
-        rc-service ntpd start >/dev/null 2>&1 || true
         return 0
     }
 
-    # ЭТАП 1: Настройка сети, синхронизация времени и установка базовых пакетов Alpine Linux
+    # ЭТАП 1: Настройка сети, синхронизация времени и установка базовых пакетов
     write_resolv_conf "nameserver ${GW_IP}
 nameserver 77.88.8.8
 nameserver 77.88.8.1"
@@ -406,27 +440,44 @@ nameserver 77.88.8.1"
         ip -4 route add default via "$GW_IP" dev "$LAN_IF_INIT" 2>/dev/null || true
 
     sync_clock
-    ensure_alpine_community_repo
+    if is_openwrt; then
+        echo "Проверка и установка базовых пакетов OpenWrt (${OS_NAME})..."
+        OWRT_PKGS="ca-bundle ca-certificates curl gzip tar jq ip-full conntrack wireguard-tools git git-http kmod-tun kmod-tcp-bbr kmod-nft-tproxy kmod-nft-nat apache-utils"
+        apk update >/dev/null 2>&1 || true
+        # shellcheck disable=SC2086
+        apk add $OWRT_PKGS || true
+        disable_apache_daemon
+        ensure_alpine_modules
 
-    echo "Проверка и установка базовых пакетов Alpine Linux..."
-    ALP_PKGS="ca-certificates curl gzip tar jq iproute2 conntrack-tools wireguard-tools-wg apache2-utils nftables tzdata sqlite acl"
-    apk update >/dev/null 2>&1 || true
-    # shellcheck disable=SC2086
-    apk add $ALP_PKGS || true
-    disable_apache_daemon
-    ensure_alpine_modules
+        if [ "$TARGET_LAN_IP" = "$SAVED_LAN_IP" ]; then
+            write_openwrt_static_network "$TARGET_LAN_IP" "$GW_IP"
+            ip -4 addr replace "${TARGET_LAN_IP}/24" dev "$LAN_IF_INIT" 2>/dev/null || true
+            ip link set "$LAN_IF_INIT" up 2>/dev/null || true
+            ip -4 route replace default via "$GW_IP" dev "$LAN_IF_INIT" 2>/dev/null || true
+        fi
+    else
+        ensure_alpine_community_repo
 
-    if [ -f /usr/share/zoneinfo/Europe/Moscow ] && [ ! -f /etc/localtime ]; then
-        cp -f /usr/share/zoneinfo/Europe/Moscow /etc/localtime 2>/dev/null || true
-        echo "Europe/Moscow" > /etc/timezone 2>/dev/null || true
-    fi
+        echo "Проверка и установка базовых пакетов Alpine Linux..."
+        ALP_PKGS="ca-certificates curl gzip tar jq iproute2 conntrack-tools wireguard-tools-wg apache2-utils nftables tzdata sqlite acl"
+        apk update >/dev/null 2>&1 || true
+        # shellcheck disable=SC2086
+        apk add $ALP_PKGS || true
+        disable_apache_daemon
+        ensure_alpine_modules
 
-    write_alpine_static_interfaces "$LAN_IF_INIT" "$TARGET_LAN_IP" "$GW_IP"
-    if [ "$TARGET_LAN_IP" = "$SAVED_LAN_IP" ]; then
-        killall -9 udhcpc >/dev/null 2>&1 || true
-        ip -4 addr replace "${TARGET_LAN_IP}/24" dev "$LAN_IF_INIT" 2>/dev/null || true
-        ip link set "$LAN_IF_INIT" up 2>/dev/null || true
-        ip -4 route replace default via "$GW_IP" dev "$LAN_IF_INIT" 2>/dev/null || true
+        if [ -f /usr/share/zoneinfo/Europe/Moscow ] && [ ! -f /etc/localtime ]; then
+            cp -f /usr/share/zoneinfo/Europe/Moscow /etc/localtime 2>/dev/null || true
+            echo "Europe/Moscow" > /etc/timezone 2>/dev/null || true
+        fi
+
+        write_alpine_static_interfaces "$LAN_IF_INIT" "$TARGET_LAN_IP" "$GW_IP"
+        if [ "$TARGET_LAN_IP" = "$SAVED_LAN_IP" ]; then
+            killall -9 udhcpc >/dev/null 2>&1 || true
+            ip -4 addr replace "${TARGET_LAN_IP}/24" dev "$LAN_IF_INIT" 2>/dev/null || true
+            ip link set "$LAN_IF_INIT" up 2>/dev/null || true
+            ip -4 route replace default via "$GW_IP" dev "$LAN_IF_INIT" 2>/dev/null || true
+        fi
     fi
 
     CURRENT_IP="$TARGET_LAN_IP"
@@ -466,6 +517,7 @@ net.ipv4.ip_unprivileged_port_start = 0
 SYS_EOF
 
     sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
+    is_openwrt && /etc/init.d/sysctl reload >/dev/null 2>&1 || true
     sync_dns_firewall "yes" "keep"
 
     if [ "$USE_INITIAL_WARP" = "yes" ]; then
@@ -492,7 +544,9 @@ SYS_EOF
     # ЭТАП 4: Настройка AdGuard Home с автоматической поддержкой локальных доменов *.lan
     echo "Генерация bcrypt-хэша пароля..."
     AGH_PASS_HASH=""
-    command -v htpasswd >/dev/null 2>&1 || apk add --no-cache apache2-utils >/dev/null 2>&1 || true
+    if ! command -v htpasswd >/dev/null 2>&1; then
+        is_openwrt && apk add apache-utils >/dev/null 2>&1 || apk add --no-cache apache2-utils >/dev/null 2>&1 || true
+    fi
     if command -v htpasswd >/dev/null 2>&1; then
         AGH_PASS_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
         [ -z "$AGH_PASS_HASH" ] && AGH_PASS_HASH=$(htpasswd -nbBC 10 "$AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true) || true
@@ -502,6 +556,7 @@ SYS_EOF
     disable_apache_daemon
     [ -z "$AGH_PASS_HASH" ] && { echo "${C_RED}[X] Ошибка генерации bcrypt-хэша!${C_RES}"; exit 1; }
 
+    prepare_openwrt_dnsmasq_for_adguard
     service_ctl adguardhome stop
     mkdir -p /etc/AdGuardHome/data
 
@@ -597,39 +652,39 @@ nameserver 77.88.8.8"
         disable_autoupdate
     fi
 
-    # ЭТАП 5.5: Автоматическая настройка внешнего накопителя из файла ответов
-    if [ "$IS_UNATTENDED" = "yes" ] && [ -n "$ANS_STORAGE_DISK" ] && [ "$ANS_STORAGE_DISK" != "none" ]; then
-        ui_step_progress 1 1 "Настройка внешнего хранилища (${ANS_STORAGE_DISK})..."
-        if [ "$ANS_STORAGE_DISK" = "auto" ]; then
-            AUTO_D=$(get_first_available_external_disk)
-            if [ -n "$AUTO_D" ]; then
-                ANS_STORAGE_DISK="$AUTO_D"
-                ui_info_msg "Автоматически обнаружен внешний накопитель: ${ANS_STORAGE_DISK}"
-            else
-                ui_warn_box "STORAGE_DISK='auto', но внешние накопители не обнаружены." \
-                            "Хранилище останется на системном разделе."
-                ANS_STORAGE_DISK=""
+    # ЭТАП 5.5, 6 и 6.5: Внешнее хранилище, Homelab и SSL (только для Alpine Linux)
+    if ! is_openwrt; then
+        if [ "$IS_UNATTENDED" = "yes" ] && [ -n "$ANS_STORAGE_DISK" ] && [ "$ANS_STORAGE_DISK" != "none" ]; then
+            ui_step_progress 1 1 "Настройка внешнего хранилища (${ANS_STORAGE_DISK})..."
+            if [ "$ANS_STORAGE_DISK" = "auto" ]; then
+                AUTO_D=$(get_first_available_external_disk)
+                if [ -n "$AUTO_D" ]; then
+                    ANS_STORAGE_DISK="$AUTO_D"
+                    ui_info_msg "Автоматически обнаружен внешний накопитель: ${ANS_STORAGE_DISK}"
+                else
+                    ui_warn_box "STORAGE_DISK='auto', но внешние накопители не обнаружены." \
+                                "Хранилище останется на системном разделе."
+                    ANS_STORAGE_DISK=""
+                fi
+            fi
+            if [ -n "$ANS_STORAGE_DISK" ]; then
+                if [ "$ANS_STORAGE_ACTION" = "format" ]; then
+                    format_and_mount_external_drive "$ANS_STORAGE_DISK" "$ANS_STORAGE_FS" "$ANS_STORAGE_LUKS" "YES" "$ANS_STORAGE_LUKS_PASS" || true
+                else
+                    mount_external_drive_to_storage "$ANS_STORAGE_DISK" "yes" "$ANS_STORAGE_LUKS_PASS" || true
+                fi
             fi
         fi
-        if [ -n "$ANS_STORAGE_DISK" ]; then
-            if [ "$ANS_STORAGE_ACTION" = "format" ]; then
-                format_and_mount_external_drive "$ANS_STORAGE_DISK" "$ANS_STORAGE_FS" "$ANS_STORAGE_LUKS" "YES" "$ANS_STORAGE_LUKS_PASS" || true
-            else
-                mount_external_drive_to_storage "$ANS_STORAGE_DISK" "yes" "$ANS_STORAGE_LUKS_PASS" || true
+
+        prompt_homelab_modules_wizard "${PRE_HL_SEL:-__SKIP__}"
+
+        if [ "$IS_UNATTENDED" = "yes" ] && [ "$ANS_SSL_TYPE" = "duckdns" ] && [ -n "$ANS_DUCK_SUB" ] && [ -n "$ANS_DUCK_TOK" ]; then
+            ui_step_progress 1 1 "Выпуск Let's Encrypt Wildcard сертификата DuckDNS (${ANS_DUCK_SUB})..."
+            if issue_duckdns_cert "$ANS_DUCK_SUB" "$ANS_DUCK_TOK"; then
+                sync_caddy_main_config
+                reload_caddy_safe
+                sync_agh_homelab_rewrites "$CURRENT_IP"
             fi
-        fi
-    fi
-
-    # ЭТАП 6: Автоматическая установка выбранных на старте модулей Homelab
-    prompt_homelab_modules_wizard "${PRE_HL_SEL:-__SKIP__}"
-
-    # ЭТАП 6.5: Автоматическая настройка Let's Encrypt Wildcard DuckDNS из файла ответов
-    if [ "$IS_UNATTENDED" = "yes" ] && [ "$ANS_SSL_TYPE" = "duckdns" ] && [ -n "$ANS_DUCK_SUB" ] && [ -n "$ANS_DUCK_TOK" ]; then
-        ui_step_progress 1 1 "Выпуск Let's Encrypt Wildcard сертификата DuckDNS (${ANS_DUCK_SUB})..."
-        if issue_duckdns_cert "$ANS_DUCK_SUB" "$ANS_DUCK_TOK"; then
-            sync_caddy_main_config
-            reload_caddy_safe
-            sync_agh_homelab_rewrites "$CURRENT_IP"
         fi
     fi
 
@@ -665,11 +720,19 @@ nameserver 77.88.8.8"
     ui_box_top "=================================================="
     echo "${C_GRN} Развертывание на ${OS_NAME} успешно завершено!${C_RES}"
     echo " - Активное ядро:      $(get_active_core_name) ($(get_active_core_version))"
-    echo " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} / ${C_CYN}https://${DOM_PANEL}${C_RES} (http://${CURRENT_IP}:9090/ui)"
-    echo " - IP-адрес сервера:   ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
-    echo " - Основной роутер:    ${GW_IP}"
-    echo " - Панель AdGuard:     ${C_CYN}https://${DOM_ADGUARD}${C_RES} (http://${CURRENT_IP}:3000)"
-    echo " - Портал сертификата: ${C_CYN}http://${DOM_CA}${C_RES}"
+    if is_openwrt; then
+        echo " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}http://${CURRENT_IP}:9090/ui${C_RES}"
+        echo " - IP-адрес шлюза:     ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
+        echo " - Основной роутер:    ${GW_IP}"
+        echo " - Панель AdGuard:     ${C_CYN}http://${CURRENT_IP}:3000${C_RES}"
+        echo " - Веб-панель LuCI:    ${C_CYN}http://${CURRENT_IP}${C_RES}"
+    else
+        echo " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} / ${C_CYN}https://${DOM_PANEL}${C_RES} (http://${CURRENT_IP}:9090/ui)"
+        echo " - IP-адрес сервера:   ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
+        echo " - Основной роутер:    ${GW_IP}"
+        echo " - Панель AdGuard:     ${C_CYN}https://${DOM_ADGUARD}${C_RES} (http://${CURRENT_IP}:3000)"
+        echo " - Портал сертификата: ${C_CYN}http://${DOM_CA}${C_RES}"
+    fi
     echo " - Переключение ядра:  ${C_GRN}gw core [singbox|mihomo]${C_RES} │ Панели: ${C_GRN}gw ui [zashboard|metacubexd]${C_RES}"
     echo " - Быстрый вызов:      ${C_GRN}gw${C_RES} (или ${C_GRN}gateway${C_RES})"
     ui_box_top "=================================================="

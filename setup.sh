@@ -22,8 +22,14 @@ fi
 
 # 1.5. Проверка и установка базовых зависимостей
 if command -v apk >/dev/null 2>&1; then
-    echo "[*] Проверка системных пакетов (jq, curl, nftables, ca-certificates, git)..."
-    apk add --no-cache jq curl nftables ca-certificates git >/dev/null 2>&1 || true
+    if [ -f /etc/openwrt_release ]; then
+        echo "[*] Проверка системных пакетов OpenWrt (jq, curl, ca-bundle, git)..."
+        apk update >/dev/null 2>&1 || true
+        apk add jq curl ca-bundle ca-certificates git git-http >/dev/null 2>&1 || true
+    else
+        echo "[*] Проверка системных пакетов (jq, curl, nftables, ca-certificates, git)..."
+        apk add --no-cache jq curl nftables ca-certificates git >/dev/null 2>&1 || true
+    fi
 fi
 
 # 2. Выставление прав на исполнение

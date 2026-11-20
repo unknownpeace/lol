@@ -27,7 +27,7 @@ configure_smart_dhcp() {
 
         if [ -f "$AGH_CONF" ]; then
             echo "Настройка встроенного DHCPv4 в AdGuard Home..."
-            rc-service adguardhome stop >/dev/null 2>&1 || true
+            service_ctl adguardhome stop
             sleep 1
 
             awk -v iface="${LAN_IF}" -v gw="${CUR_LAN_IP}" -v r_start="${LAN_SUB}.100" -v r_end="${LAN_SUB}.239" '
@@ -71,7 +71,8 @@ configure_smart_dhcp() {
                 rm -f "${AGH_CONF}.tmp.$$" 2>/dev/null || true
             fi
 
-            rc-service adguardhome start >/dev/null 2>&1 || true
+            is_openwrt 2>/dev/null && prepare_openwrt_dnsmasq_for_adguard
+            service_ctl adguardhome start || true
 
             echo "${C_GRN}[✓] DHCP-сервер AdGuard Home ВКЛЮЧЕН (Шлюз: ${CUR_LAN_IP}, DNS: ${CUR_LAN_IP}, пул ${LAN_SUB}.100-.239).${C_RES}"
             return 0
@@ -82,13 +83,44 @@ configure_smart_dhcp() {
         return 1
     else
         if [ -f "$AGH_CONF" ]; then
-            rc-service adguardhome stop >/dev/null 2>&1 || true
+            service_ctl adguardhome stop
             sleep 1
             sed -i '/^dhcp:/,/^[a-zA-Z0-9_]\+:/s/enabled: true/enabled: false/' "$AGH_CONF" 2>/dev/null || true
-            rc-service adguardhome start >/dev/null 2>&1 || true
+            is_openwrt 2>/dev/null && prepare_openwrt_dnsmasq_for_adguard
+            service_ctl adguardhome start || true
         fi
-        echo "${C_GRN}[✓] DHCP-сервер на Alpine ВЫКЛЮЧЕН (классический режим Sidecar).${C_RES}"
+        echo "${C_GRN}[✓] DHCP-сервер на ${OS_NAME:-шлюзе} ВЫКЛЮЧЕН (классический режим Sidecar).${C_RES}"
     fi
+    return 0
+}
+
+# Проверка занятости целевого IP в локальной сети (защита от конфликта с уже работающим шлюзом)
+check_ip_conflict_on_lan() {
+    PROBE_IP="$1"
+    SELF_IP="${2:-$(get_current_lan_ip)}"
+    [ -z "$PROBE_IP" ] || [ "$PROBE_IP" = "$SELF_IP" ] && return 0
+    if ping -c 1 -W 1 "$PROBE_IP" >/dev/null 2>&1 || \
+       ip neigh show "$PROBE_IP" 2>/dev/null | grep -qE "lladdr[[:space:]]+[0-9a-fA-F:]{17}"; then
+        echo "${C_RED}[X] КОНФЛИКТ АДРЕСОВ: IP ${PROBE_IP} уже используется другим устройством в сети!${C_RES}"
+        echo "    Выберите свободный адрес, чтобы не нарушить работу основного роутера или второго шлюза."
+        return 1
+    fi
+    return 0
+}
+
+# Запись статической конфигурации сети UCI для OpenWrt
+write_openwrt_static_network() {
+    O_IP="$1"
+    O_GW="$2"
+    command -v uci >/dev/null 2>&1 || return 0
+    uci set network.lan.proto='static'
+    uci set network.lan.ipaddr="$O_IP"
+    uci set network.lan.netmask='255.255.255.0'
+    uci set network.lan.gateway="$O_GW"
+    uci -q delete network.lan.dns
+    uci add_list network.lan.dns='127.0.0.1'
+    uci add_list network.lan.dns="$O_GW"
+    uci commit network
     return 0
 }
 
@@ -110,7 +142,7 @@ NET_ALP
     return 0
 }
 
-# Безопасная смена LAN IP шлюза и/или IP основного роутера на Alpine Linux (с обновлением *.lan в AdGuard Home)
+# Безопасная смена LAN IP шлюза и/или IP основного роутера (Alpine / OpenWrt)
 apply_network_ips() {
     TARGET_LAN_IP="$1"
     TARGET_GW_IP="$2"
@@ -136,6 +168,8 @@ apply_network_ips() {
         echo "${C_RED}[X] Ошибка: IP шлюза (${TARGET_LAN_IP}) не может совпадать с IP основного роутера (${TARGET_GW_IP})!${C_RES}"
         return 1
     fi
+
+    check_ip_conflict_on_lan "$TARGET_LAN_IP" "$CUR_LAN_IP" || return 1
 
     LAN_SUBNET="${TARGET_LAN_IP%.*}"
     GW_SUBNET="${TARGET_GW_IP%.*}"
@@ -164,13 +198,31 @@ apply_network_ips() {
         core_generate_config || true
     fi
 
-    write_alpine_static_interfaces "$LAN_IF" "$TARGET_LAN_IP" "$GW_IP"
+    if is_openwrt 2>/dev/null; then
+        write_openwrt_static_network "$TARGET_LAN_IP" "$GW_IP"
+    else
+        write_alpine_static_interfaces "$LAN_IF" "$TARGET_LAN_IP" "$GW_IP"
+    fi
     if is_dhcp_server_enabled; then
         configure_smart_dhcp "on" >/dev/null 2>&1 || true
     fi
 
     SW_SCRIPT="/tmp/switch_lan_ip.$$.sh"
-    cat << SW_ALP > "$SW_SCRIPT"
+    if is_openwrt 2>/dev/null; then
+        cat << SW_OWRT > "$SW_SCRIPT"
+#!/bin/sh
+sleep 1
+/etc/init.d/${ACT_SVC} stop >/dev/null 2>&1 || true
+/etc/init.d/network reload >/dev/null 2>&1 || true
+sleep 2
+ip -4 route replace default via ${GW_IP} dev ${LAN_IF} >/dev/null 2>&1 || true
+fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
+/etc/init.d/${ACT_SVC} start >/dev/null 2>&1 || true
+/etc/init.d/adguardhome restart >/dev/null 2>&1 || true
+rm -f "\$0" 2>/dev/null || true
+SW_OWRT
+    else
+        cat << SW_ALP > "$SW_SCRIPT"
 #!/bin/sh
 sleep 1
 rc-service ${ACT_SVC} stop >/dev/null 2>&1 || true
@@ -189,8 +241,9 @@ rc-service caddy reload >/dev/null 2>&1 || rc-service caddy restart >/dev/null 2
 rc-service samba restart >/dev/null 2>&1 || true
 rc-service wsdd restart >/dev/null 2>&1 || true
 rc-service avahi-daemon restart >/dev/null 2>&1 || true
-rm -f "$0" 2>/dev/null || true
+rm -f "\$0" 2>/dev/null || true
 SW_ALP
+    fi
     chmod 700 "$SW_SCRIPT"
 
     write_resolv_conf "nameserver 127.0.0.1
@@ -201,8 +254,8 @@ nameserver 77.88.8.8"
     echo "${C_GRN}[✓] Сетевые настройки успешно сохранены (${OS_NAME}):${C_RES}"
     echo " • Новый IP сервера (${LAN_IF}):   ${TARGET_LAN_IP} (маска 255.255.255.0)"
     echo " • IP основного роутера:     ${GW_IP}"
-    echo " • Панель $(get_active_ui_name): http://${TARGET_LAN_IP}:9090/ui (https://${DOM_PANEL})"
-    echo " • Панель AdGuard Home:      http://${TARGET_LAN_IP}:3000 (https://${DOM_ADGUARD})"
+    echo " • Панель $(get_active_ui_name): http://${TARGET_LAN_IP}:9090/ui"
+    echo " • Панель AdGuard Home:      http://${TARGET_LAN_IP}:3000"
     echo " • Локальные домены *.lan:   перенаправлены на ${TARGET_LAN_IP}"
 
     if [ "$TARGET_LAN_IP" != "$CUR_LAN_IP" ]; then

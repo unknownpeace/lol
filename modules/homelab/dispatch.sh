@@ -37,6 +37,15 @@ sync_all_homelab_permissions() {
 print_quick_access_card() {
     load_gateway_env
     CUR_LIP=$(get_current_lan_ip)
+    if is_openwrt 2>/dev/null; then
+        ui_box_top "🔗 КАРТОЧКА БЫСТРОГО ДОСТУПА К ШЛЮЗУ (${OS_NAME} | ${CUR_LIP})"
+        ui_box_row "▸ Панель $(get_active_ui_name):   ${C_GRN}http://${CUR_LIP}:9090/ui${C_RES}"
+        ui_box_row "▸ Панель AdGuard Home:    ${C_GRN}http://${CUR_LIP}:3000${C_RES}"
+        ui_box_row "▸ Веб-интерфейс LuCI:     ${C_CYN}http://${CUR_LIP}${C_RES}"
+        ui_box_row "▸ Единый логин сервисов:  ${C_BLD}${AGH_USER:-admin}${C_RES} ${C_DIM}(пароль шлюза и AdGuard Home)${C_RES}"
+        ui_box_bottom
+        return 0
+    fi
     HN_VAL=$(hostname -s 2>/dev/null || echo "HOMELAB")
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
         ui_box_top "🔗 КАРТОЧКА БЫСТРОГО ДОСТУПА К СЕРВЕРУ (${CUR_LIP} | *.${SSL_DOMAIN})"

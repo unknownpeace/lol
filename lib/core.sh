@@ -52,8 +52,14 @@ atomic_commit_tmp() {
     return 0
 }
 
-# Безопасная атомарная запись /etc/resolv.conf в Alpine Linux (с защитой от перезаписи udhcpc)
+# Безопасная атомарная запись /etc/resolv.conf (Alpine и OpenWrt)
 write_resolv_conf() {
+    if is_openwrt 2>/dev/null; then
+        printf "%s\n" "$1" > "/tmp/resolv.conf.$$"
+        mv -f "/tmp/resolv.conf.$$" /tmp/resolv.conf 2>/dev/null || cp -f "/tmp/resolv.conf.$$" /tmp/resolv.conf 2>/dev/null || true
+        rm -f "/tmp/resolv.conf.$$" 2>/dev/null || true
+        return 0
+    fi
     mkdir -p /etc/udhcpc 2>/dev/null || true
     if [ ! -f /etc/udhcpc/udhcpc.conf ] || ! grep -q '^RESOLV_CONF=' /etc/udhcpc/udhcpc.conf 2>/dev/null; then
         echo 'RESOLV_CONF="no"' >> /etc/udhcpc/udhcpc.conf 2>/dev/null || true
@@ -135,16 +141,58 @@ calc_hardware_limits() {
     return 0
 }
 
-# Проверка целевой платформы (Эксклюзивно Alpine Linux x86_64 / arm64)
+is_openwrt() {
+    [ "${OS_TYPE:-alpine}" = "openwrt" ]
+}
+
+version_ge() {
+    awk -v cur="$1" -v min="$2" '
+        BEGIN {
+            nc = split(cur, c, ".")
+            nm = split(min, m, ".")
+            n = (nc > nm) ? nc : nm
+            for (i = 1; i <= n; i++) {
+                if (c[i] != "" && c[i] !~ /^[0-9]+$/) exit 1
+                if (m[i] != "" && m[i] !~ /^[0-9]+$/) exit 1
+                ci = (i <= nc && c[i] != "") ? c[i] + 0 : 0
+                mi = (i <= nm && m[i] != "") ? m[i] + 0 : 0
+                if (ci > mi) exit 0
+                if (ci < mi) exit 1
+            }
+            exit 0
+        }
+    ' 2>/dev/null
+}
+
+# Проверка целевой платформы (Alpine Linux 3.21+ и OpenWrt >= 25.12.6 с apk)
 detect_os() {
-    if [ ! -f /etc/alpine-release ] || ! command -v apk >/dev/null 2>&1; then
-        echo "${C_RED}[X] Ошибка: Эта ветка (Alpine Linux Homelab Edition) предназначена исключительно для Alpine Linux!${C_RES}"
+    if [ -f /etc/openwrt_release ] || grep -qi '^ID="openwrt"' /etc/os-release 2>/dev/null; then
+        if ! command -v apk >/dev/null 2>&1; then
+            echo "${C_RED}[X] Ошибка: Поддерживается только OpenWrt ${OPENWRT_MIN_VERSION:-25.12.6}+ с пакетным менеджером apk!${C_RES}"
+            exit 1
+        fi
+        OWRT_VER=""
+        if [ -f /etc/openwrt_release ]; then
+            OWRT_VER=$(sed -n "s/^DISTRIB_RELEASE=['\"]\([^'\"]*\)['\"].*/\1/p" /etc/openwrt_release 2>/dev/null | head -n 1 | tr -d ' \t\r\n')
+        fi
+        if [ -z "$OWRT_VER" ] && [ -f /etc/os-release ]; then
+            OWRT_VER=$(sed -n 's/^VERSION_ID="\([^"]*\)".*/\1/p' /etc/os-release 2>/dev/null | head -n 1 | tr -d ' \t\r\n')
+        fi
+        if ! version_ge "$OWRT_VER" "${OPENWRT_MIN_VERSION:-25.12.6}"; then
+            echo "${C_RED}[X] Ошибка: Требуется OpenWrt ${OPENWRT_MIN_VERSION:-25.12.6} или новее! Обнаружена версия: ${OWRT_VER:-неизвестна}${C_RES}"
+            exit 1
+        fi
+        calc_hardware_limits
+        OS_TYPE="openwrt"
+        OS_NAME="OpenWrt ${OWRT_VER}"
+    elif [ -f /etc/alpine-release ] && command -v apk >/dev/null 2>&1; then
+        calc_hardware_limits
+        OS_TYPE="alpine"
+        OS_NAME="Alpine Linux v$(tr -d ' \t\r\n' < /etc/alpine-release 2>/dev/null)"
+    else
+        echo "${C_RED}[X] Ошибка: Поддерживаются только Alpine Linux и OpenWrt >= ${OPENWRT_MIN_VERSION:-25.12.6} (с apk)!${C_RES}"
         exit 1
     fi
-
-    calc_hardware_limits
-    OS_TYPE="alpine"
-    OS_NAME="Alpine Linux v$(cat /etc/alpine-release 2>/dev/null | tr -d ' \t\r\n')"
 
     ARCH_RAW=$(uname -m)
     case "$ARCH_RAW" in
@@ -170,8 +218,20 @@ detect_os() {
     return 0
 }
 
-# Подгрузка и фиксация ядерных модулей для Alpine Linux (tun, tcp_bbr, nf_conntrack, nftables)
+# Подгрузка и фиксация ядерных модулей (tun, tcp_bbr, nf_conntrack, nftables)
 ensure_alpine_modules() {
+    if is_openwrt; then
+        for kmod in tun tcp_bbr nf_conntrack; do
+            modprobe "$kmod" 2>/dev/null || true
+        done
+        if [ ! -e /dev/net/tun ]; then
+            mkdir -p /dev/net
+            mknod /dev/net/tun c 10 200 2>/dev/null || true
+            chmod 666 /dev/net/tun 2>/dev/null || true
+        fi
+        ensure_core_tools
+        return 0
+    fi
     touch /etc/modules 2>/dev/null || true
     for kmod in tun tcp_bbr nf_conntrack nft_chain_nat nft_masq nft_redir nft_reject_inet; do
         modprobe "$kmod" 2>/dev/null || true
@@ -193,11 +253,23 @@ ensure_core_tools() {
     MISSING_PKGS=""
     command -v jq >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS jq"
     command -v curl >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS curl"
-    command -v nft >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS nftables"
-    command -v git >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS git"
-    [ -d /etc/ssl/certs ] || MISSING_PKGS="$MISSING_PKGS ca-certificates"
-    if [ -n "$MISSING_PKGS" ]; then
-        if command -v apk >/dev/null 2>&1; then
+    command -v git >/dev/null 2>&1 || {
+        MISSING_PKGS="$MISSING_PKGS git"
+        is_openwrt && MISSING_PKGS="$MISSING_PKGS git-http"
+    }
+    if is_openwrt; then
+        [ -d /etc/ssl/certs ] || MISSING_PKGS="$MISSING_PKGS ca-bundle ca-certificates"
+        [ -e /dev/net/tun ] || modprobe tun >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS kmod-tun"
+        if [ -n "$MISSING_PKGS" ] && command -v apk >/dev/null 2>&1; then
+            apk update >/dev/null 2>&1 || true
+            # shellcheck disable=SC2086
+            apk add $MISSING_PKGS >/dev/null 2>&1 || true
+        fi
+    else
+        command -v nft >/dev/null 2>&1 || MISSING_PKGS="$MISSING_PKGS nftables"
+        [ -d /etc/ssl/certs ] || MISSING_PKGS="$MISSING_PKGS ca-certificates"
+        if [ -n "$MISSING_PKGS" ] && command -v apk >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
             apk add --no-cache $MISSING_PKGS >/dev/null 2>&1 || true
         fi
     fi
@@ -220,11 +292,15 @@ is_valid_ipv4() {
     ' >/dev/null 2>&1
 }
 
-# Динамическое определение имени физического LAN-интерфейса в Alpine Linux (eth0, ens18, enp0s3, br0 и т.д.)
+# Динамическое определение имени физического LAN-интерфейса (eth0, br-lan, ens18, enp0s3 и т.д.)
 get_lan_ifname() {
     DEF_DEV=$(ip -4 route show default 2>/dev/null | awk -v ct="${CORE_TUN_IF:-gateway-tun}" '{for(i=1;i<=NF;i++) if($i=="dev" && $(i+1)!=ct && $(i+1)!="gateway-tun" && $(i+1)!="singbox-tun" && $(i+1)!="mihomo0" && $(i+1)!="lo") {print $(i+1); exit}}')
     if [ -n "$DEF_DEV" ] && ip link show "$DEF_DEV" >/dev/null 2>&1; then
         printf "%s" "$DEF_DEV"
+        return 0
+    fi
+    if is_openwrt 2>/dev/null && ip link show br-lan >/dev/null 2>&1; then
+        printf "br-lan"
         return 0
     fi
     if ip link show eth0 >/dev/null 2>&1; then
@@ -240,11 +316,14 @@ get_lan_ifname() {
     return 0
 }
 
-# Получение текущего LAN IP-адреса самого сервера Alpine Linux
+# Получение текущего LAN IP-адреса самого сервера
 get_current_lan_ip() {
     L_IF=$(get_lan_ifname)
     CUR_LAN=$(ip -4 addr show "$L_IF" 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
     [ -z "$CUR_LAN" ] && CUR_LAN=$(ip -4 addr show eth0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
+    if [ -z "$CUR_LAN" ] && is_openwrt 2>/dev/null && command -v uci >/dev/null 2>&1; then
+        CUR_LAN=$(uci -q get network.lan.ipaddr 2>/dev/null || true)
+    fi
     if [ -z "$CUR_LAN" ] && [ -f /etc/network/interfaces ]; then
         CUR_LAN=$(awk '/^[[:space:]]*address[[:space:]]+/ {split($2,a,"/"); print a[1]; exit}' /etc/network/interfaces 2>/dev/null || true)
     fi
@@ -254,7 +333,7 @@ get_current_lan_ip() {
     return 0
 }
 
-# Получение IP-адреса основного роутера из таблицы маршрутизации (в обход singbox-tun)
+# Получение IP-адреса основного роутера из таблицы маршрутизации (в обход gateway-tun)
 get_default_router_ip() {
     DEF_GW=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") {gw=$(i+1); if(gw!="" && gw!="172.19.0.1") {print gw; exit}}}')
     if [ -n "$DEF_GW" ] && is_valid_ipv4 "$DEF_GW"; then
@@ -265,24 +344,66 @@ get_default_router_ip() {
     return 0
 }
 
-# Отключение фонового демона apache2 (оставляем только утилиту htpasswd для генерации bcrypt)
+# Отключение фонового демона apache2 (оставляем только утилиту htpasswd для генерации bcrypt; uhttpd на OpenWrt не трогаем)
 disable_apache_daemon() {
     for srv in apache apache2 httpd; do
         if [ -f "/etc/init.d/${srv}" ]; then
-            rc-service "$srv" stop >/dev/null 2>&1 || "/etc/init.d/${srv}" stop >/dev/null 2>&1 || true
-            rc-update del "$srv" default >/dev/null 2>&1 || true
+            service_ctl "$srv" stop
+            service_ctl "$srv" disable
             rm -f "/etc/init.d/${srv}" 2>/dev/null || true
         fi
     done
     return 0
 }
 
-# Универсальное управление системными службами (OpenRC / systemd)
+# Универсальное управление системными службами (Alpine OpenRC / OpenWrt procd)
 service_ctl() {
     SVC_NAME="$1"
     SVC_ACT="$2"
-    [ "$SVC_NAME" = "cron" ] && SVC_NAME="crond"
+    if is_openwrt 2>/dev/null; then
+        [ "$SVC_NAME" = "crond" ] && SVC_NAME="cron"
+        SVC_SCRIPT="/etc/init.d/${SVC_NAME}"
+        case "$SVC_ACT" in
+            enable)
+                [ -x "$SVC_SCRIPT" ] && "$SVC_SCRIPT" enable >/dev/null 2>&1 || true
+                return 0
+                ;;
+            disable)
+                [ -x "$SVC_SCRIPT" ] && "$SVC_SCRIPT" disable >/dev/null 2>&1 || true
+                return 0
+                ;;
+            stop)
+                [ -x "$SVC_SCRIPT" ] && "$SVC_SCRIPT" stop >/dev/null 2>&1 || true
+                return 0
+                ;;
+            reload)
+                if [ -x "$SVC_SCRIPT" ]; then
+                    "$SVC_SCRIPT" reload >/dev/null 2>&1 || "$SVC_SCRIPT" restart >/dev/null 2>&1 || return 1
+                    return 0
+                fi
+                return 1
+                ;;
+            status)
+                if [ -x "$SVC_SCRIPT" ] && "$SVC_SCRIPT" running >/dev/null 2>&1; then
+                    return 0
+                fi
+                case "$SVC_NAME" in
+                    sing-box)    pgrep -x sing-box >/dev/null 2>&1 ;;
+                    mihomo)      pgrep -x mihomo >/dev/null 2>&1 ;;
+                    adguardhome) pgrep AdGuardHome >/dev/null 2>&1 ;;
+                    cron)        pgrep crond >/dev/null 2>&1 ;;
+                    *)           return 1 ;;
+                esac
+                return $?
+                ;;
+            *)
+                [ -x "$SVC_SCRIPT" ] && "$SVC_SCRIPT" "$SVC_ACT" >/dev/null 2>&1 && return 0
+                return 1
+                ;;
+        esac
+    fi
 
+    [ "$SVC_NAME" = "cron" ] && SVC_NAME="crond"
     case "$SVC_ACT" in
         enable)
             rc-update add "$SVC_NAME" default >/dev/null 2>&1 || true

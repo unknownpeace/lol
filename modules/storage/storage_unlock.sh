@@ -173,7 +173,30 @@ unlock_external_storage_cli() {
 # Команда `gateway safe-reboot` / `gateway safe-poweroff`: безопасное выключение/перезагрузка
 safe_power_action() {
     PWR_MODE="${1:-reboot}"
+    detect_os >/dev/null 2>&1 || true
     load_gateway_env
+
+    if is_openwrt; then
+        ui_box_top "⚡ БЕЗОПАСНОЕ ЗАВЕРШЕНИЕ РАБОТЫ РОУТЕРА (${PWR_MODE})"
+        ui_step_progress 1 3 "Остановка ядра шлюза и AdGuard Home..."
+        service_ctl "$(get_active_core_service)" stop >/dev/null 2>&1 || true
+        service_ctl adguardhome stop >/dev/null 2>&1 || true
+
+        ui_step_progress 2 3 "Сохранение состояния шлюза и сброс кэшей (sync)..."
+        check_and_recover_power_loss_state
+        backup_gateway_state
+        sync
+
+        ui_step_progress 3 3 "Выполнение системной команды ${PWR_MODE}..."
+        ui_box_bottom
+        if [ "$PWR_MODE" = "poweroff" ] || [ "$PWR_MODE" = "shutdown" ]; then
+            poweroff || halt
+        else
+            reboot
+        fi
+        return 0
+    fi
+
     ui_box_top "⚡ БЕЗОПАСНОЕ ЗАВЕРШЕНИЕ РАБОТЫ СЕРВЕРА (${PWR_MODE})"
     ui_step_progress 1 4 "Остановка медиа-сервисов, торрентов и баз данных Homelab..."
     stop_storage_dependent_services

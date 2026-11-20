@@ -22,29 +22,35 @@ run_gateway_doctor() {
     check_and_recover_power_loss_state
     rm -f "$POWER_LOSS_FLAG" 2>/dev/null || true
 
-    ui_step_progress 2 6 "Подгрузка ядерных модулей (tun, tcp_bbr, nftables, dm_crypt) и настройка sysctl..."
+    ui_step_progress 2 6 "Подгрузка ядерных модулей (tun, tcp_bbr, nftables) и настройка sysctl..."
     ensure_alpine_modules
     heal_default_gateway_route >/dev/null 2>&1 || true
     [ -f /etc/sysctl.d/99-gateway-forward.conf ] && sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf >/dev/null 2>&1 || true
+    is_openwrt && /etc/init.d/sysctl reload >/dev/null 2>&1 || true
 
-    ui_step_progress 3 6 "Проверка DNS-резолвера (/etc/resolv.conf) и таблиц файрвола nftables..."
+    ui_step_progress 3 6 "Проверка DNS-резолвера (/etc/resolv.conf) и правил файрвола nftables..."
     write_resolv_conf "nameserver 127.0.0.1
 nameserver ${GW_IP:-${DEFAULT_ROUTER_IP:-192.168.1.5}}
 nameserver 77.88.8.8"
     sync_user_domain_rulesets
+    is_openwrt && prepare_openwrt_dnsmasq_for_adguard
     sync_dns_firewall "yes" "keep" >/dev/null 2>&1 || true
 
-    ui_step_progress 4 6 "Проверка внешнего накопителя (${STORAGE_ROOT}), LUKS2 и прав доступа (${MEDIA_GROUP})..."
-    if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] && ! is_external_storage_mounted; then
-        if try_auto_unlock_and_mount_storage; then
-            ui_ok_msg "Внешний накопитель автоматически разблокирован, проверен fsck и смонтирован!"
-        else
-            ui_warn_box "Внешний накопитель (${STORAGE_ROOT}) ожидает ручного ввода пароля LUKS2 или подключения кабеля." \
-                        "Подключите диск и выполните команду: gateway unlock"
+    if is_openwrt; then
+        ui_step_progress 4 6 "Проверка сетевого режима Sidecar (${OS_NAME})..."
+    else
+        ui_step_progress 4 6 "Проверка внешнего накопителя (${STORAGE_ROOT}), LUKS2 и прав доступа (${MEDIA_GROUP})..."
+        if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] && ! is_external_storage_mounted; then
+            if try_auto_unlock_and_mount_storage; then
+                ui_ok_msg "Внешний накопитель автоматически разблокирован, проверен fsck и смонтирован!"
+            else
+                ui_warn_box "Внешний накопитель (${STORAGE_ROOT}) ожидает ручного ввода пароля LUKS2 или подключения кабеля." \
+                            "Подключите диск и выполните команду: gateway unlock"
+            fi
         fi
-    fi
-    if is_storage_mount_ready; then
-        sync_all_homelab_permissions >/dev/null 2>&1 || true
+        if is_storage_mount_ready; then
+            sync_all_homelab_permissions >/dev/null 2>&1 || true
+        fi
     fi
 
     ui_step_progress 5 6 "Валидация и перезапуск служб $(get_active_core_name), AdGuard Home и Conntrack..."
@@ -58,16 +64,20 @@ nameserver 77.88.8.8"
     conntrack -F >/dev/null 2>&1 || true
     core_reload_api
 
-    ui_step_progress 6 6 "Проверка и запуск активных модулей Homelab..."
-    if is_module_enabled "caddy"; then
-        reload_caddy_safe >/dev/null 2>&1 || true
-    fi
-    if is_storage_mount_ready; then
-        start_storage_dependent_services
+    if is_openwrt; then
+        ui_step_progress 6 6 "Сохранение эталонного снимка конфигурации шлюза..."
     else
-        stop_storage_dependent_services
+        ui_step_progress 6 6 "Проверка и запуск активных модулей Homelab..."
+        if is_module_enabled "caddy"; then
+            reload_caddy_safe >/dev/null 2>&1 || true
+        fi
+        if is_storage_mount_ready; then
+            start_storage_dependent_services
+        else
+            stop_storage_dependent_services
+        fi
+        check_and_heal_lxc_doctor
     fi
-    check_and_heal_lxc_doctor
     backup_gateway_state
     ui_ok_msg "Авто-починка (gateway doctor) успешно завершена!"
     ui_box_bottom
@@ -126,9 +136,19 @@ run_watchdog() {
 
     if ! pgrep AdGuardHome >/dev/null 2>&1; then
         logger -t gateway-watchdog "AdGuardHome down, restarting service..." 2>/dev/null || true
+        is_openwrt && prepare_openwrt_dnsmasq_for_adguard >/dev/null 2>&1 || true
         service_ctl adguardhome restart
         RECOVERED_MSG="${RECOVERED_MSG}
 ⚡ [Авто-Доктор] Перезапущена служба AdGuard Home."
+    fi
+
+    if is_openwrt; then
+        if [ -n "$RECOVERED_MSG" ]; then
+            send_telegram_msg "$RECOVERED_MSG" >/dev/null 2>&1 || true
+        fi
+        release_gateway_lock
+        trap - EXIT INT TERM HUP
+        return 0
     fi
 
     # Caddy и Vaultwarden не зависят от внешнего USB-диска и всегда поддерживаются в работе
@@ -398,41 +418,60 @@ print_gateway_header() {
     RAM_USED=$(get_ram_used_mb)
     RAM_BAR=$(ui_progress_bar "$RAM_PCT" 10)
 
-    DISK_PCT=$(get_disk_usage_pct "$STORAGE_ROOT")
-    DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
-    DISK_TARGET_D="${STORAGE_ROOT:-/}"
-    [ -d "$DISK_TARGET_D" ] || DISK_TARGET_D="/"
-    DISK_FREE_TXT=$(df -Ph "$DISK_TARGET_D" 2>/dev/null | awk 'NR==2 {print $4 " своб. из " $2}' || true)
-    [ -z "$DISK_FREE_TXT" ] && DISK_FREE_TXT="н/д"
-    DISK_BADGE=$(get_storage_disk_badge)
+    if is_openwrt; then
+        DISK_PCT=$(get_disk_usage_pct "/")
+        DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
+        DISK_FREE_TXT=$(df -Ph / 2>/dev/null | awk 'NR==2 {print $4 " своб. из " $2}' || true)
+        [ -z "$DISK_FREE_TXT" ] && DISK_FREE_TXT="н/д"
 
-    HL_ACT_CNT=$(count_enabled_homelab_modules)
-    HL_TOT_CNT=$(awk -F'|' '$1 !~ /^#/ && NF >= 2 {c++} END {print c+0}' "$HOMELAB_STATE" 2>/dev/null || echo "7")
-    [ "${HL_TOT_CNT:-0}" -le 0 ] && HL_TOT_CNT=7
-    if [ "$HL_ACT_CNT" -gt 0 ]; then
-        HL_BADGE=$(ui_badge "on" "HOMELAB: ${HL_ACT_CNT}/${HL_TOT_CNT}")
+        ui_box_top "⚡ ПРИБОРНАЯ ПАНЕЛЬ ШЛЮЗА (${OS_NAME})"
+        ui_box_row "Сеть LAN:     ${C_BLD}${LAN_IF_NOW}: ${LAN_IP_NOW}${C_RES} ▸ Роутер: ${C_CYN}${GW_IP}${C_RES} │ DHCP (AGH): ${DHCP_TXT}"
+        ui_box_row "Загрузка ОЗУ: ${RAM_BAR} (${RAM_USED}/${TOTAL_RAM_MB} МБ, лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
+        ui_box_row "Система (/):  ${DISK_BAR} (${DISK_FREE_TXT}) ▸ ${C_CYN}OpenWrt Overlay${C_RES}"
+        ui_box_sep "СТАТУС ЯДЕР И СЛУЖБ"
+        ui_box_row "Ядро шлюза:   ${S_BADGE} ${S_VER_INFO} │ Веб-панель: ${UI_BADGE} ${UI_VER_INFO}"
+        ui_box_row "AdGuard Home: ${A_BADGE} ${A_VER_INFO} (DNS :53 + *.lan Rewrites)"
+        ui_box_row "Основной пул: ${P_BADGE} ${P_INFO}"
+        ui_box_row "Amnezia WARP: ${W_BADGE} ${W_INFO}"
+        ui_box_row "Защита сети:  ${KS_BADGE} ${KS_INFO}"
+        ui_box_row "Автономность: ${AU_BADGE} │ Watchdog: ${WD_TXT} │ Telegram: ${TG_TXT}"
     else
-        HL_BADGE=$(ui_badge "off" "HOMELAB: 0/${HL_TOT_CNT}")
-    fi
+        DISK_PCT=$(get_disk_usage_pct "$STORAGE_ROOT")
+        DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
+        DISK_TARGET_D="${STORAGE_ROOT:-/}"
+        [ -d "$DISK_TARGET_D" ] || DISK_TARGET_D="/"
+        DISK_FREE_TXT=$(df -Ph "$DISK_TARGET_D" 2>/dev/null | awk 'NR==2 {print $4 " своб. из " $2}' || true)
+        [ -z "$DISK_FREE_TXT" ] && DISK_FREE_TXT="н/д"
+        DISK_BADGE=$(get_storage_disk_badge)
 
-    ui_box_top "⚡ ПРИБОРНАЯ ПАНЕЛЬ ТЕЛЕМЕТРИИ ШЛЮЗА И HOMELAB (${OS_NAME})"
-    ui_box_row "Сеть LAN:     ${C_BLD}${LAN_IF_NOW}: ${LAN_IP_NOW}${C_RES} ▸ Роутер: ${C_CYN}${GW_IP}${C_RES} │ DHCP (AGH): ${DHCP_TXT}"
-    ui_box_row "Загрузка ОЗУ: ${RAM_BAR} (${RAM_USED}/${TOTAL_RAM_MB} МБ, лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
-    ui_box_row "Накопитель:   ${DISK_BAR} (${DISK_FREE_TXT}) ▸ ${C_CYN}${DISK_BADGE}${C_RES}"
-    ui_box_sep "СТАТУС ЯДЕР И СЛУЖБ"
-    ui_box_row "Ядро шлюза:   ${S_BADGE} ${S_VER_INFO} │ Веб-панель: ${UI_BADGE} ${UI_VER_INFO}"
-    ui_box_row "AdGuard Home: ${A_BADGE} ${A_VER_INFO} (DNS :53 + *.lan Rewrites)"
-    ui_box_row "Основной пул: ${P_BADGE} ${P_INFO}"
-    ui_box_row "Amnezia WARP: ${W_BADGE} ${W_INFO}"
-    ui_box_row "Защита сети:  ${KS_BADGE} ${KS_INFO}"
-    ui_box_row "Автономность: ${AU_BADGE} │ Watchdog: ${WD_TXT} │ Telegram: ${TG_TXT} │ Стек: ${HL_BADGE}"
+        HL_ACT_CNT=$(count_enabled_homelab_modules)
+        HL_TOT_CNT=$(awk -F'|' '$1 !~ /^#/ && NF >= 2 {c++} END {print c+0}' "$HOMELAB_STATE" 2>/dev/null || echo "7")
+        [ "${HL_TOT_CNT:-0}" -le 0 ] && HL_TOT_CNT=7
+        if [ "$HL_ACT_CNT" -gt 0 ]; then
+            HL_BADGE=$(ui_badge "on" "HOMELAB: ${HL_ACT_CNT}/${HL_TOT_CNT}")
+        else
+            HL_BADGE=$(ui_badge "off" "HOMELAB: 0/${HL_TOT_CNT}")
+        fi
+
+        ui_box_top "⚡ ПРИБОРНАЯ ПАНЕЛЬ ТЕЛЕМЕТРИИ ШЛЮЗА И HOMELAB (${OS_NAME})"
+        ui_box_row "Сеть LAN:     ${C_BLD}${LAN_IF_NOW}: ${LAN_IP_NOW}${C_RES} ▸ Роутер: ${C_CYN}${GW_IP}${C_RES} │ DHCP (AGH): ${DHCP_TXT}"
+        ui_box_row "Загрузка ОЗУ: ${RAM_BAR} (${RAM_USED}/${TOTAL_RAM_MB} МБ, лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
+        ui_box_row "Накопитель:   ${DISK_BAR} (${DISK_FREE_TXT}) ▸ ${C_CYN}${DISK_BADGE}${C_RES}"
+        ui_box_sep "СТАТУС ЯДЕР И СЛУЖБ"
+        ui_box_row "Ядро шлюза:   ${S_BADGE} ${S_VER_INFO} │ Веб-панель: ${UI_BADGE} ${UI_VER_INFO}"
+        ui_box_row "AdGuard Home: ${A_BADGE} ${A_VER_INFO} (DNS :53 + *.lan Rewrites)"
+        ui_box_row "Основной пул: ${P_BADGE} ${P_INFO}"
+        ui_box_row "Amnezia WARP: ${W_BADGE} ${W_INFO}"
+        ui_box_row "Защита сети:  ${KS_BADGE} ${KS_INFO}"
+        ui_box_row "Автономность: ${AU_BADGE} │ Watchdog: ${WD_TXT} │ Telegram: ${TG_TXT} │ Стек: ${HL_BADGE}"
+    fi
 
     if [ -f "$POWER_LOSS_FLAG" ]; then
         PL_TIME=$(cat "$POWER_LOSS_FLAG" 2>/dev/null || echo "недавно")
         ui_box_sep "ПРЕДУПРЕЖДЕНИЕ ПИТАНИЯ"
         ui_box_row "${C_YEL}▲ Зафиксировано авто-восстановление после сбоя питания (${PL_TIME}). Рекомендуется: gateway doctor${C_RES}"
     fi
-    if [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] && ! is_external_storage_mounted; then
+    if ! is_openwrt && [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] && ! is_external_storage_mounted; then
         ui_box_sep "СТАТУС ВНЕШНЕГО ДИСКА LUKS2"
         ui_box_row "${C_YEL}▲ Внешний накопитель ожидает разблокировки! Выполните в терминале: ${C_BLD}gateway unlock${C_RES}"
     fi
