@@ -1,3 +1,14 @@
+heal_default_gateway_route() {
+    LAN_IF_WD=$(get_lan_ifname)
+    if [ -n "${GW_IP:-}" ] && ! ip -4 route show default 2>/dev/null | grep -q "via ${GW_IP}"; then
+        ip link set "$LAN_IF_WD" up 2>/dev/null || true
+        ip -4 route replace default via "$GW_IP" dev "$LAN_IF_WD" 2>/dev/null || true
+        conntrack -F >/dev/null 2>&1 || true
+        return 0
+    fi
+    return 1
+}
+
 run_gateway_doctor() {
     set +e
     detect_os
@@ -12,11 +23,12 @@ run_gateway_doctor() {
 
     ui_step_progress 2 6 "Подгрузка ядерных модулей (tun, tcp_bbr, nftables, dm_crypt) и настройка sysctl..."
     ensure_alpine_modules
+    heal_default_gateway_route >/dev/null 2>&1 || true
     [ -f /etc/sysctl.d/99-gateway-forward.conf ] && sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf >/dev/null 2>&1 || true
 
     ui_step_progress 3 6 "Проверка DNS-резолвера (/etc/resolv.conf) и таблиц файрвола nftables..."
     write_resolv_conf "nameserver 127.0.0.1
-nameserver ${GW_IP:-192.168.1.1}
+nameserver ${GW_IP:-${DEFAULT_ROUTER_IP:-192.168.1.5}}
 nameserver 77.88.8.8"
     sync_user_domain_rulesets
     sync_dns_firewall "yes" "keep" >/dev/null 2>&1 || true
@@ -34,15 +46,16 @@ nameserver 77.88.8.8"
         sync_all_homelab_permissions >/dev/null 2>&1 || true
     fi
 
-    ui_step_progress 5 6 "Валидация и перезапуск служб Sing-Box Extended, AdGuard Home и Conntrack..."
-    if [ ! -s "$SB_CONF" ] || ! check_singbox_config; then
-        generate_singbox_config
+    ui_step_progress 5 6 "Валидация и перезапуск служб $(get_active_core_name), AdGuard Home и Conntrack..."
+    CUR_C_CONF=$(get_active_core_conf)
+    if [ ! -s "$CUR_C_CONF" ] || ! core_check_config; then
+        core_generate_config
     fi
-    service_ctl sing-box restart
+    service_ctl "$(get_active_core_service)" restart
     sleep 2
     service_ctl adguardhome restart
     conntrack -F >/dev/null 2>&1 || true
-    reload_singbox_api
+    core_reload_api
 
     ui_step_progress 6 6 "Проверка и запуск активных модулей Homelab..."
     if is_module_enabled "caddy"; then
@@ -71,7 +84,7 @@ run_watchdog() {
     check_and_recover_power_loss_state
     load_gateway_env
 
-    if [ ! -f "$SB_CONF" ]; then
+    if [ ! -f "$SB_CONF" ] && [ ! -f "$MIHOMO_CONF" ]; then
         release_gateway_lock
         trap - EXIT INT TERM HUP
         return 0
@@ -79,14 +92,35 @@ run_watchdog() {
     ensure_alpine_modules
     RECOVERED_MSG=""
 
-    if ! pgrep sing-box >/dev/null 2>&1 || ! ip link show singbox-tun >/dev/null 2>&1; then
-        logger -t gateway-watchdog "Sing-Box or singbox-tun down, restarting service..." 2>/dev/null || true
-        if ! check_singbox_config && [ -s "${STATE_BAK_DIR}/config.json" ]; then
-            cp -f "${STATE_BAK_DIR}/config.json" "$SB_CONF" 2>/dev/null || true
+    if heal_default_gateway_route; then
+        logger -t gateway-watchdog "Restored missing default route via ${GW_IP} on $(get_lan_ifname)" 2>/dev/null || true
+        RECOVERED_MSG="⚡ [Авто-Доктор] Восстановлен маршрут по умолчанию через роутер (${GW_IP} на $(get_lan_ifname))."
+    fi
+
+    if ! is_core_running || ! ip link show "$CORE_TUN_IF" >/dev/null 2>&1; then
+        logger -t gateway-watchdog "$(get_active_core_name) or ${CORE_TUN_IF} down, restarting service..." 2>/dev/null || true
+        if ! core_check_config; then
+            if [ "$(get_active_core)" = "mihomo" ] && [ -s "${STATE_BAK_DIR}/config.yaml" ]; then
+                cp -f "${STATE_BAK_DIR}/config.yaml" "$MIHOMO_CONF" 2>/dev/null || true
+            elif [ -s "${STATE_BAK_DIR}/config.json" ]; then
+                cp -f "${STATE_BAK_DIR}/config.json" "$SB_CONF" 2>/dev/null || true
+            fi
         fi
-        service_ctl sing-box restart
+        service_ctl "$(get_active_core_service)" restart
+        conntrack -F >/dev/null 2>&1 || true
         sleep 2
-        RECOVERED_MSG="⚡ [Авто-Доктор] На сервере ($(get_current_lan_ip)) перезапущен туннель Sing-Box."
+        RECOVERED_MSG="${RECOVERED_MSG}
+⚡ [Авто-Доктор] На сервере ($(get_current_lan_ip)) перезапущен туннель $(get_active_core_name)."
+    elif is_sub_enabled && command -v jq >/dev/null 2>&1; then
+        PROV_JSON=$(curl -fsS --connect-timeout 2 -m 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/providers/proxies" 2>/dev/null || true)
+        if [ -n "$PROV_JSON" ]; then
+            EMPTY_SUB=$(printf "%s" "$PROV_JSON" | jq -r '[.providers // {} | to_entries[] | select((.value.vehicleType == "Remote" or .value.vehicleType == "HTTP") and ((.value.proxies // []) | length == 0))] | length' 2>/dev/null || echo "0")
+            if [ "${EMPTY_SUB:-0}" -gt 0 ]; then
+                logger -t gateway-watchdog "Remote proxy provider has 0 proxies, triggering reload..." 2>/dev/null || true
+                core_reload_api >/dev/null 2>&1 || true
+                conntrack -F >/dev/null 2>&1 || true
+            fi
+        fi
     fi
 
     if ! pgrep AdGuardHome >/dev/null 2>&1; then
@@ -120,7 +154,7 @@ run_watchdog() {
             case "$LAST_ALERT_TS" in ''|*[!0-9]*) LAST_ALERT_TS=0 ;; esac
             if [ $((NOW_TS - LAST_ALERT_TS)) -ge 3600 ]; then
                 echo "$NOW_TS" > "$STORAGE_ALERT_CACHE" 2>/dev/null || true
-                send_telegram_msg "⚡ Сервер ($(get_current_lan_ip)) перезагрузился после сбоя питания. Сетевой шлюз (Sing-Box + AdGuard) работает, но внешний диск (${STORAGE_ROOT}) ожидает подключения или разблокировки (выполните: gateway unlock)" >/dev/null 2>&1 || true
+                send_telegram_msg "⚡ Сервер ($(get_current_lan_ip)) перезагрузился после сбоя питания. Сетевой шлюз ($(get_active_core_name) + AdGuard) работает, но внешний диск (${STORAGE_ROOT}) ожидает подключения или разблокировки (выполните: gateway unlock)" >/dev/null 2>&1 || true
             fi
             if [ -n "$RECOVERED_MSG" ]; then
                 send_telegram_msg "$RECOVERED_MSG" >/dev/null 2>&1 || true
@@ -144,6 +178,9 @@ run_watchdog() {
 ⚡ [Авто-Доктор Homelab] Перезапущен модуль ${M_ID} (${M_SVC})."
             fi
         done < "$HOMELAB_STATE"
+        if is_module_enabled "samba" && [ -x /etc/init.d/wsdd ] && ! rc-service wsdd status >/dev/null 2>&1; then
+            rc-service wsdd restart >/dev/null 2>&1 || true
+        fi
     fi
 
     if [ -n "$RECOVERED_MSG" ]; then
@@ -167,15 +204,15 @@ run_autoupdate() {
     detect_os
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Запуск автообновления шлюза и Homelab (${OS_NAME}) ==="
     update_cores_only "yes"
-    if ! pgrep sing-box >/dev/null 2>&1; then
-        service_ctl sing-box start
+    if ! is_core_running; then
+        service_ctl "$(get_active_core_service)" start
     fi
     if ! pgrep AdGuardHome >/dev/null 2>&1; then
         service_ctl adguardhome start
     fi
-    reload_singbox_api
+    core_reload_api
     rotate_gateway_logs
-    send_telegram_msg "🔄 [Автообновление 04:00] Сервер (${OS_NAME} | $(get_current_lan_ip)) проверил обновления. Текущие версии: Sing-Box ${LATEST_SB_TAG}, AdGuard ${LATEST_AGH_TAG}." >/dev/null 2>&1 || true
+    send_telegram_msg "🔄 [Автообновление 04:00] Сервер (${OS_NAME} | $(get_current_lan_ip)) проверил обновления. Ядро: $(get_active_core_name) $(get_active_core_version), AdGuard ${LATEST_AGH_TAG}." >/dev/null 2>&1 || true
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Автообновление завершено ==="
     release_gateway_lock
     trap - EXIT INT TERM HUP
@@ -215,10 +252,19 @@ refresh_remote_versions() {
         return 0
     fi
 
-    LATEST_SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
+    load_gateway_env || true
+    if [ "$(get_active_core)" = "mihomo" ]; then
+        LATEST_MIHOMO_TAG=$(fetch_latest_github_tag "MetaCubeX/mihomo")
+    else
+        LATEST_SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
+    fi
     LATEST_AGH_TAG=$(fetch_latest_github_tag "AdguardTeam/AdGuardHome")
-    if [ -f "${SB_DIR}/ui/index.html" ]; then
-        LATEST_UI_TAG=$(fetch_latest_github_tag "$UI_REPO")
+    if [ -f "${UI_DIR}/index.html" ]; then
+        if [ "$(get_active_ui)" = "metacubexd" ]; then
+            LATEST_UI_TAG=$(fetch_latest_github_tag "$METACUBEXD_REPO")
+        else
+            LATEST_UI_TAG=$(fetch_latest_github_tag "$ZASHBOARD_REPO")
+        fi
         if [ ! -f "$UI_VER_FILE" ] && [ -n "$LATEST_UI_TAG" ]; then
             echo "$LATEST_UI_TAG" > "$UI_VER_FILE"
         fi
@@ -226,6 +272,7 @@ refresh_remote_versions() {
 
     cat << VC_EOF > "$VER_CACHE_FILE" 2>/dev/null || true
 LATEST_SB_TAG='${LATEST_SB_TAG}'
+LATEST_MIHOMO_TAG='${LATEST_MIHOMO_TAG}'
 LATEST_AGH_TAG='${LATEST_AGH_TAG}'
 LATEST_UI_TAG='${LATEST_UI_TAG}'
 VC_EOF
@@ -239,24 +286,23 @@ print_gateway_header() {
     LAN_IP_NOW=$(get_current_lan_ip)
     LAN_IF_NOW=$(get_lan_ifname)
 
-    if pgrep sing-box >/dev/null 2>&1; then
-        S_BADGE=$(ui_badge "on" "SING-BOX: АКТИВЕН")
+    ACT_C=$(get_active_core)
+    ACT_CN=$(get_active_core_name)
+    ACT_CTAG=$([ "$ACT_C" = "mihomo" ] && echo "MIHOMO" || echo "SING-BOX")
+    LATEST_CORE_T=$([ "$ACT_C" = "mihomo" ] && echo "${LATEST_MIHOMO_TAG:-}" || echo "${LATEST_SB_TAG:-}")
+
+    if is_core_running; then
+        S_BADGE=$(ui_badge "on" "${ACT_CTAG}: АКТИВЕН")
     else
-        S_BADGE=$(ui_badge "err" "SING-BOX: СТОП")
+        S_BADGE=$(ui_badge "err" "${ACT_CTAG}: СТОП")
     fi
 
-    if [ -x /usr/bin/sing-box ]; then
-        S_VER_RAW=$(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || true)
-        [ -n "$S_VER_RAW" ] && S_VER="v${S_VER_RAW#v}" || S_VER="неизвестно"
-    else
-        S_VER="не установлен"
-    fi
-
-    if [ -n "$LATEST_SB_TAG" ] && [ "$S_VER" != "не установлен" ]; then
-        if [ "$S_VER" = "$LATEST_SB_TAG" ]; then
+    S_VER=$(get_active_core_version)
+    if [ -n "$LATEST_CORE_T" ] && [ "$S_VER" != "не установлен" ]; then
+        if [ "$S_VER" = "$LATEST_CORE_T" ]; then
             S_VER_INFO="${S_VER} ${C_DIM}(актуальна)${C_RES}"
         else
-            S_VER_INFO="${S_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_SB_TAG}!${C_RES}"
+            S_VER_INFO="${S_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_CORE_T}!${C_RES}"
         fi
     else
         S_VER_INFO="${S_VER}"
@@ -306,7 +352,9 @@ print_gateway_header() {
 
     if is_warp_enabled; then
         W_BADGE=$(ui_badge "on" "WARP 2.0: ON")
-        if [ -n "${WARP_LICENSE:-}" ]; then
+        if [ "$ACT_C" = "mihomo" ]; then
+            W_INFO="4 ноды AmneziaWG UDP (MASQUE H2 только в Sing-Box)"
+        elif [ -n "${WARP_LICENSE:-}" ]; then
             W_INFO="4 ноды AWG WARP+ + MASQUE TCP/H2"
         else
             W_INFO="4 ноды AWG 2.0 + MASQUE TCP/H2"
@@ -316,11 +364,12 @@ print_gateway_header() {
         W_INFO="можно включить бесплатно в п. 2"
     fi
 
-    if [ -f "${SB_DIR}/ui/index.html" ]; then
+    if [ -f "${UI_DIR}/index.html" ]; then
         UI_VER=""
         [ -f "$UI_VER_FILE" ] && UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
         [ -z "$UI_VER" ] && UI_VER="установлена"
-        UI_BADGE=$(ui_badge "on" "ZASHBOARD")
+        ACT_UIN=$(get_active_ui_name | tr 'a-z' 'A-Z')
+        UI_BADGE=$(ui_badge "on" "$ACT_UIN")
         if [ -n "$LATEST_UI_TAG" ] && [ "$UI_VER" != "установлена" ] && [ "$UI_VER" != "$LATEST_UI_TAG" ]; then
             UI_VER_INFO="${UI_VER} -> ${C_YEL}ДОСТУПНА ${LATEST_UI_TAG}!${C_RES}"
         else
@@ -333,7 +382,7 @@ print_gateway_header() {
 
     if is_killswitch_enabled; then
         KS_BADGE=$(ui_badge "info" "KILL-SWITCH: ON")
-        KS_INFO="строгая блокировка мимо singbox-tun (${LAN_IF_NOW})"
+        KS_INFO="строгая блокировка мимо ${CORE_TUN_IF} (${LAN_IF_NOW})"
     else
         KS_BADGE=$(ui_badge "on" "FIREWALL: GUARD")
         KS_INFO="блок IPv6 + DoT/853 + перехват DNS :53 (${LAN_IF_NOW})"
@@ -350,14 +399,19 @@ print_gateway_header() {
 
     DISK_PCT=$(get_disk_usage_pct "$STORAGE_ROOT")
     DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
-    DISK_FREE_TXT=$(df -h "${STORAGE_ROOT:-/}" 2>/dev/null | awk 'NR==2 {print $4 " своб. из " $2}' || echo "н/д")
+    DISK_TARGET_D="${STORAGE_ROOT:-/}"
+    [ -d "$DISK_TARGET_D" ] || DISK_TARGET_D="/"
+    DISK_FREE_TXT=$(df -Ph "$DISK_TARGET_D" 2>/dev/null | awk 'NR==2 {print $4 " своб. из " $2}' || true)
+    [ -z "$DISK_FREE_TXT" ] && DISK_FREE_TXT="н/д"
     DISK_BADGE=$(get_storage_disk_badge)
 
     HL_ACT_CNT=$(count_enabled_homelab_modules)
+    HL_TOT_CNT=$(awk -F'|' '$1 !~ /^#/ && NF >= 2 {c++} END {print c+0}' "$HOMELAB_STATE" 2>/dev/null || echo "7")
+    [ "${HL_TOT_CNT:-0}" -le 0 ] && HL_TOT_CNT=7
     if [ "$HL_ACT_CNT" -gt 0 ]; then
-        HL_BADGE=$(ui_badge "on" "HOMELAB: ${HL_ACT_CNT}/9")
+        HL_BADGE=$(ui_badge "on" "HOMELAB: ${HL_ACT_CNT}/${HL_TOT_CNT}")
     else
-        HL_BADGE=$(ui_badge "off" "HOMELAB: 0/9")
+        HL_BADGE=$(ui_badge "off" "HOMELAB: 0/${HL_TOT_CNT}")
     fi
 
     ui_box_top "⚡ ПРИБОРНАЯ ПАНЕЛЬ ТЕЛЕМЕТРИИ ШЛЮЗА И HOMELAB (${OS_NAME})"
@@ -365,7 +419,7 @@ print_gateway_header() {
     ui_box_row "Загрузка ОЗУ: ${RAM_BAR} (${RAM_USED}/${TOTAL_RAM_MB} МБ, лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
     ui_box_row "Накопитель:   ${DISK_BAR} (${DISK_FREE_TXT}) ▸ ${C_CYN}${DISK_BADGE}${C_RES}"
     ui_box_sep "СТАТУС ЯДЕР И СЛУЖБ"
-    ui_box_row "Sing-Box Ext: ${S_BADGE} ${S_VER_INFO} │ Веб-панель: ${UI_BADGE} ${UI_VER_INFO}"
+    ui_box_row "Ядро шлюза:   ${S_BADGE} ${S_VER_INFO} │ Веб-панель: ${UI_BADGE} ${UI_VER_INFO}"
     ui_box_row "AdGuard Home: ${A_BADGE} ${A_VER_INFO} (DNS :53 + *.lan Rewrites)"
     ui_box_row "Основной пул: ${P_BADGE} ${P_INFO}"
     ui_box_row "Amnezia WARP: ${W_BADGE} ${W_INFO}"

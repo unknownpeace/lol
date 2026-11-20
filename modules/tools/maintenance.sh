@@ -1,5 +1,5 @@
 rotate_gateway_logs() {
-    for LOG_F in "$SB_LOG_FILE" "$AUTOUPDATE_LOG" /var/log/caddy.log /var/log/vaultwarden.log /var/log/metube.log /var/log/code-server.log /var/log/transmission/transmission.log; do
+    for LOG_F in "$SB_LOG_FILE" "$MIHOMO_LOG_FILE" "$AUTOUPDATE_LOG" /var/log/caddy.log /var/log/vaultwarden.log /var/log/metube.log /var/log/code-server.log /var/log/transmission/transmission.log; do
         if [ -f "$LOG_F" ]; then
             F_SIZE=$(wc -c < "$LOG_F" 2>/dev/null | tr -d ' \t\r\n' || echo "0")
             if [ "${F_SIZE:-0}" -gt 1048576 ]; then
@@ -133,8 +133,8 @@ self_update_gateway() {
         rm -f /tmp/gateway_update_check.cache 2>/dev/null || true
     fi
 
-    # 2. Обновление ядер Sing-Box Extended, AdGuard Home и панели Zashboard
-    ui_step_progress 2 5 "Обновление ядер Sing-Box Extended, AdGuard Home и панели Zashboard..."
+    # 2. Обновление активного ядра, AdGuard Home и выбранной веб-панели
+    ui_step_progress 2 5 "Обновление ядер $(get_active_core_name), AdGuard Home и панели $(get_active_ui_name)..."
     update_cores_only "yes"
 
     # 3. Обновление активных модулей Homelab
@@ -149,12 +149,12 @@ self_update_gateway() {
     fi
 
     # 4. Пересборка конфига, сброс conntrack и перезапуск
-    ui_step_progress 4 5 "Пересборка конфигурации Sing-Box и перезапуск служб..."
+    ui_step_progress 4 5 "Пересборка конфигурации $(get_active_core_name) и перезапуск служб..."
     backup_gateway_state
     load_gateway_env
-    if apply_and_verify_singbox "Полное обновление шлюза и компонентов"; then
+    if apply_and_verify_core "Полное обновление шлюза и компонентов"; then
         conntrack -F >/dev/null 2>&1 || true
-        service_ctl sing-box restart || true
+        service_ctl "$(get_active_core_service)" restart || true
         service_ctl adguardhome restart || true
     fi
 
@@ -163,13 +163,13 @@ self_update_gateway() {
     sleep 2
     echo ""
     ui_box_top "🎉 РЕЗУЛЬТАТ ПОЛНОГО ОБНОВЛЕНИЯ СЕРВЕРА"
-    if pgrep sing-box >/dev/null 2>&1 && pgrep AdGuardHome >/dev/null 2>&1; then
+    if is_core_running && pgrep AdGuardHome >/dev/null 2>&1; then
         ui_box_row "${C_GRN}[✔] Все службы шлюза и модули Homelab активны и работают стабильно!${C_RES}"
     else
         ui_box_row "${C_YEL}[▲] Некоторые службы перезапускаются или требуют внимания (запустите: gw doctor)${C_RES}"
     fi
     ui_box_row "• Версия скриптов: $(git -C "${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'Standalone')"
-    ui_box_row "• Ядро Sing-Box:   $(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || echo 'OK')"
+    ui_box_row "• Ядро шлюза:     $(get_active_core_name) ($(get_active_core_version)) │ Панель: $(get_active_ui_name)"
     ui_box_row "• AdGuard Home:    $(/usr/bin/AdGuardHome --version 2>&1 | sed -n 's/.*version \(v[0-9.a-zA-Z_.-]*\).*/\1/p' | head -n 1 || echo 'OK')"
     ui_box_bottom
     echo ""

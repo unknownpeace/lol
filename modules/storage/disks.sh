@@ -172,6 +172,10 @@ start_storage_dependent_services() {
             fi
         done < "$HOMELAB_STATE"
     fi
+    if is_module_enabled "samba"; then
+        [ -x /etc/init.d/wsdd ] && rc-service wsdd start >/dev/null 2>&1 || true
+        [ -x /etc/init.d/avahi-daemon ] && rc-service avahi-daemon start >/dev/null 2>&1 || true
+    fi
     return 0
 }
 
@@ -324,11 +328,22 @@ mount_external_drive_to_storage() {
     EXT_STORAGE_EXPECTED="yes"
     EXT_STORAGE_FSTYPE="$FS_TYPE"
     if [ "$IS_LUKS" = "yes" ]; then
+        touch /etc/modules 2>/dev/null || true
+        for k_luks in dm_mod dm_crypt; do
+            modprobe "$k_luks" 2>/dev/null || true
+            grep -qxF "$k_luks" /etc/modules 2>/dev/null || echo "$k_luks" >> /etc/modules
+        done
+        rc-update add modules boot >/dev/null 2>&1 || true
         EXT_STORAGE_LUKS_UUID="$LUKS_UUID"
         EXT_STORAGE_UUID="$FS_UUID"
         mkdir -p /etc/conf.d
         touch /etc/conf.d/dmcrypt
-        sed -i "/^target='${LUKS_MAPPER_NAME}'/,+2d" /etc/conf.d/dmcrypt 2>/dev/null || true
+        awk -v tgt="target='${LUKS_MAPPER_NAME}'" '
+            $0 == tgt { skip=2; next }
+            skip > 0 { skip--; next }
+            { print }
+        ' /etc/conf.d/dmcrypt > /etc/conf.d/dmcrypt.tmp.$$ 2>/dev/null && \
+            mv -f /etc/conf.d/dmcrypt.tmp.$$ /etc/conf.d/dmcrypt || rm -f /etc/conf.d/dmcrypt.tmp.$$
         if [ -s "$LUKS_KEYFILE" ]; then
             cat << DMCRYPT_EOF >> /etc/conf.d/dmcrypt
 target='${LUKS_MAPPER_NAME}'
@@ -415,7 +430,10 @@ format_and_mount_external_drive() {
         mdev -s 2>/dev/null || partprobe "$TARGET_DEV" 2>/dev/null || true
         sleep 2
         PART_DEV=$(lsblk -rnpo NAME,TYPE "$TARGET_DEV" 2>/dev/null | awk '$2=="part" {print $1; exit}')
-        [ -n "$PART_DEV" ] && TARGET_DEV="$PART_DEV"
+        if [ -n "$PART_DEV" ]; then
+            TARGET_DEV="$PART_DEV"
+            wipefs -a "$TARGET_DEV" >/dev/null 2>&1 || true
+        fi
     else
         wipefs -a "$TARGET_DEV" >/dev/null 2>&1 || true
     fi
@@ -586,7 +604,7 @@ manage_external_disks_menu() {
         ui_box_row "${C_CYN}0)${C_RES} Назад"
         ui_box_bottom
         printf "Выберите действие [0-7]: "
-        read -r DSK_ACT < /dev/tty || true
+        read -r DSK_ACT < /dev/tty || break
         case "$DSK_ACT" in
             ""|0) break ;;
             1)

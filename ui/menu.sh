@@ -20,7 +20,7 @@ show_homelab_menu() {
         ui_box_row "${C_CYN}0)${C_RES}  Назад в главное меню шлюза"
         ui_box_bottom
         printf "Выберите действие [0-11]: "
-        read -r HL_ACT < /dev/tty || true
+        read -r HL_ACT < /dev/tty || break
 
         case "$HL_ACT" in
             ""|0)
@@ -182,6 +182,10 @@ show_homelab_menu() {
 # ==============================================================================
 show_menu() {
     set +e
+    if ! ( : < /dev/tty ) 2>/dev/null; then
+        echo "${C_YEL}[i] Интерактивное TUI-меню требует TTY-терминал. Доступные команды: gw help${C_RES}"
+        return 0
+    fi
     detect_os
     check_and_recover_power_loss_state
     init_user_lists
@@ -193,10 +197,10 @@ show_menu() {
         print_gateway_header
         ui_box_top "🎛️ ГЛАВНОЕ МЕНЮ УПРАВЛЕНИЯ СЕРВЕРОМ [0-16 / u / d]"
         ui_box_row "${C_CYN}1)${C_RES}  📊 Статус служб, матрица пинга и рентген сайтов (Self-Test 2.0)"
-        ui_box_row "${C_CYN}2)${C_RES}  🌐 Управление прокси: Подписки / Ключи / WARP + ${C_GRN}⚡ SSH-пульт нод${C_RES}"
-        ui_box_row "${C_CYN}3)${C_RES}  🔄 Полное обновление: скрипт шлюза (Git) + ядра (Sing-Box, AGH) + Homelab"
+        ui_box_row "${C_CYN}2)${C_RES}  🌐 Прокси, Ядро ($(get_active_core_name)) и Панель ($(get_active_ui_name)) + ${C_GRN}⚡ SSH-пульт${C_RES}"
+        ui_box_row "${C_CYN}3)${C_RES}  🔄 Полное обновление: скрипт шлюза (Git) + ядра (SB/Mihomo, AGH) + Homelab"
         ui_box_row "${C_CYN}4)${C_RES}  ♻️  Перезапустить службы + пересобрать конфиг и сбросить conntrack"
-        ui_box_row "${C_CYN}5)${C_RES}  📜 Посмотреть живые логи Sing-Box и служб сервера"
+        ui_box_row "${C_CYN}5)${C_RES}  📜 Посмотреть живые логи ядра шлюза и служб сервера"
         ui_box_row "${C_CYN}6)${C_RES}  🛠️  Полная перенастройка сервера (Мастер установки)"
         ui_box_row "${C_CYN}7)${C_RES}  🧭 Свои домены (В прокси / Напрямую) + ${C_GRN}🕵️ Детектор сайта${C_RES}"
         ui_box_row "${C_CYN}8)${C_RES}  📱 Маршрутизация устройств по IP + ${C_GRN}🔍 Авто-поиск в LAN${C_RES}"
@@ -212,7 +216,7 @@ show_menu() {
         ui_box_row "${C_CYN}0)${C_RES}  Выход"
         ui_box_bottom
         printf "Выберите действие [0-16 / u]: "
-        read -r CHOICE < /dev/tty || true
+        read -r CHOICE < /dev/tty || break
 
         case "$CHOICE" in
             u|U)
@@ -265,10 +269,10 @@ show_menu() {
             2)
                 while true; do
                     clear
-                    ui_banner "PROXY MANAGER // 3 НЕЗАВИСИМЫХ СЛОТА И ПУЛЬТ НОД"
-                    ui_box_top "🌐 УПРАВЛЕНИЕ ИСТОЧНИКАМИ ПРОКСИ (3 НЕЗАВИСИМЫХ СЛОТА)"
+                    ui_banner "PROXY, CORE & UI MANAGER // СЛОТЫ, ЯДРО И ПАНЕЛЬ"
+                    ui_box_top "🌐 ИСТОЧНИКИ ПРОКСИ, ЯДРО ($(get_active_core_name)) И ПАНЕЛЬ ($(get_active_ui_name))"
                     print_proxy_slots_report
-                    ui_box_sep "ДЕЙСТВИЯ [0-12]"
+                    ui_box_sep "ДЕЙСТВИЯ [0-14]"
                     ui_box_row "1)  Указать / заменить основную подписку (http://...) [Слот 1]"
                     ui_box_row "2)  Добавить дополнительную подписку в пул (Мульти-Саб) [Слот 1]"
                     ui_box_row "3)  Отключить и очистить все подписки по ссылке [Слот 1]"
@@ -281,23 +285,25 @@ show_menu() {
                     ui_box_row "10) Режим «Белые списки» (показать/скрыть РФ-каскады в подписке) [Слот 1]"
                     ui_box_row "11) ${C_GRN}⚡ Мини-пульт управления нодами и группами прямо из SSH${C_RES}"
                     ui_box_row "12) ${C_GRN}🩺 Поштучно проверить и оживить ноды с молнией (⚡)${C_RES}"
+                    ui_box_row "13) ${C_CYN}🔄 Переключить ядро шлюза (Sing-Box Extended ⇄ Mihomo)${C_RES}"
+                    ui_box_row "14) ${C_CYN}🎨 Сменить веб-панель (Zashboard ⇄ MetaCubeXD)${C_RES}"
                     ui_box_row "0)  Назад в главное меню"
                     ui_box_bottom
-                    printf "Выбор [0-12]: "
-                    read -r SUB_ACT < /dev/tty || true
+                    printf "Выбор [0-14]: "
+                    read -r SUB_ACT < /dev/tty || break
                     case "$SUB_ACT" in
                         ""|0) break ;;
                         1)
                             printf "Введите ссылку на подписку (или несколько через пробел): "
                             read -r NEW_SUB < /dev/tty || true
                             NEW_SUB=$(clean_clipboard_line "$NEW_SUB")
-                            if [ -n "$NEW_SUB" ] && [ -f "$SB_CONF" ]; then
+                            if [ -n "$NEW_SUB" ] && { [ -f "$SB_CONF" ] || [ -f "$MIHOMO_CONF" ]; }; then
                                 backup_gateway_state
                                 load_gateway_env
                                 apply_subscription_input "$NEW_SUB"
                                 save_gateway_env
                                 [ "${USE_INITIAL_WARP:-no}" = "yes" ] && generate_amnezia_warp || true
-                                apply_and_verify_singbox "Обновление подписки (Слот 1)" || true
+                                apply_and_verify_core "Обновление подписки (Слот 1)" || true
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
@@ -313,7 +319,7 @@ show_menu() {
                                     CLEAN_EXTRA=$(sanitize_sub_url_list "$EXTRA_SUB")
                                     SUB_URL="${SUB_URL:+${SUB_URL} }${CLEAN_EXTRA}"
                                     save_gateway_env
-                                    apply_and_verify_singbox "Добавление дополнительной подписки в Слот 1" || true
+                                    apply_and_verify_core "Добавление дополнительной подписки в Слот 1" || true
                                     ;;
                                 *) ui_warn_box "Ссылка подписки должна начинаться с http:// или https://" "Для добавления отдельного URI-ключа (vless://) выберите пункт 5." ;;
                             esac
@@ -325,7 +331,7 @@ show_menu() {
                             load_gateway_env
                             SUB_URL=""
                             save_gateway_env
-                            apply_and_verify_singbox "Очистка подписок по ссылке (Слот 1)" || true
+                            apply_and_verify_core "Очистка подписок по ссылке (Слот 1)" || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
                             ;;
@@ -344,7 +350,7 @@ show_menu() {
                                 load_gateway_env
                                 sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
                                 format_uri_keys "$EXTRA_KEY" >> "$CUSTOM_NODES_FILE"
-                                apply_and_verify_singbox "Добавление личного ключа в Слот 2 (my_nodes)" || true
+                                apply_and_verify_core "Добавление личного ключа в Слот 2 (my_nodes)" || true
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
@@ -359,7 +365,7 @@ show_menu() {
                                 if [ -n "$DEL_NUM" ]; then
                                     backup_gateway_state
                                     load_gateway_env
-                                    delete_my_node_by_index "$DEL_NUM" && apply_and_verify_singbox "Удаление ключа #${DEL_NUM}" || true
+                                    delete_my_node_by_index "$DEL_NUM" && apply_and_verify_core "Удаление ключа #${DEL_NUM}" || true
                                 fi
                             fi
                             printf "\nНажмите Enter для продолжения..."
@@ -369,7 +375,7 @@ show_menu() {
                             backup_gateway_state
                             load_gateway_env
                             echo "proxies: []" > "$CUSTOM_NODES_FILE"
-                            apply_and_verify_singbox "Очистка всех личных ключей (Слот 2)" || true
+                            apply_and_verify_core "Очистка всех личных ключей (Слот 2)" || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
                             ;;
@@ -379,7 +385,7 @@ show_menu() {
                             printf "Вставьте ключ лицензии WARP+ (если есть) [Enter = бесплатный WARP]: "
                             read -r W_LIC_IN < /dev/tty || true
                             W_LIC_IN=$(printf "%s" "$W_LIC_IN" | tr -d ' \t\r\n')
-                            generate_amnezia_warp "$W_LIC_IN" && apply_and_verify_singbox "Обновление гибридного WARP 2.0 + MASQUE H2" || true
+                            generate_amnezia_warp "$W_LIC_IN" && apply_and_verify_core "Обновление гибридного WARP 2.0 + MASQUE H2" || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
                             ;;
@@ -389,7 +395,7 @@ show_menu() {
                             echo '{"outbounds": []}' > "$WARP_NODES_FILE"
                             WARP_LICENSE=""
                             save_gateway_env
-                            apply_and_verify_singbox "Отключение Amnezia WARP 2.0 (Слот 3)" || true
+                            apply_and_verify_core "Отключение Amnezia WARP 2.0 (Слот 3)" || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
                             ;;
@@ -404,13 +410,37 @@ show_menu() {
                                 ACT_MSG="Показ каскадных нод РФ/Белые списки в подписке"
                             fi
                             save_gateway_env
-                            apply_and_verify_singbox "$ACT_MSG" || true
+                            apply_and_verify_core "$ACT_MSG" || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
                             ;;
                         11) manage_nodes_cli_menu || true ;;
                         12)
                             diagnose_failed_nodes || true
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty || true
+                            ;;
+                        13)
+                            echo ""
+                            echo " 1) Sing-Box Extended  |  2) Mihomo (Clash Meta)"
+                            printf " Выберите ядро [1-2, Enter = отмена]: "
+                            read -r C_SW < /dev/tty || break
+                            case "$C_SW" in
+                                1|singbox) switch_core_engine "singbox" || true ;;
+                                2|mihomo)  switch_core_engine "mihomo" || true ;;
+                            esac
+                            printf "\nНажмите Enter для продолжения..."
+                            read -r _ < /dev/tty || true
+                            ;;
+                        14)
+                            echo ""
+                            echo " 1) Zashboard  |  2) MetaCubeXD"
+                            printf " Выберите веб-панель [1-2, Enter = отмена]: "
+                            read -r U_SW < /dev/tty || break
+                            case "$U_SW" in
+                                1|zashboard)  switch_web_ui "zashboard" || true ;;
+                                2|metacubexd) switch_web_ui "metacubexd" || true ;;
+                            esac
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
                             ;;
@@ -427,7 +457,7 @@ show_menu() {
                 ui_box_top "♻️ ПЕРЕСБОРКА КОНФИГУРАЦИИ И СБРОС СЕССИЙ CONNTRACK"
                 backup_gateway_state
                 load_gateway_env
-                if apply_and_verify_singbox "Актуализация групп и перезапуск служб"; then
+                if apply_and_verify_core "Актуализация групп и перезапуск служб"; then
                     conntrack -F >/dev/null 2>&1 || true
                     service_ctl adguardhome restart
                     ui_ok_msg "Таблица conntrack очищена, службы успешно перезапущены."
@@ -436,7 +466,7 @@ show_menu() {
                 sleep 2
                 ;;
             5)
-                show_service_logs_cli "sing-box" 45
+                show_service_logs_cli "core" 45
                 printf "\nНажмите Enter для возврата в меню..."
                 read -r _ < /dev/tty || true
                 ;;
@@ -450,7 +480,7 @@ show_menu() {
                     clear
                     ui_banner "DOMAIN ROUTER // ПОЛЬЗОВАТЕЛЬСКИЕ ДОМЕНЫ И РЕНТГЕН САЙТОВ"
                     ui_box_top "🧭 ПОЛЬЗОВАТЕЛЬСКИЕ ПРАВИЛА ДОМЕНОВ (JSON RULE-SET v3)"
-                    ui_box_row "${C_BLD}Домены В ПРОКСИ (${USER_PROXY_FILE} -> группа 🌐 Остальной трафик):${C_RES}"
+                    ui_box_row "${C_BLD}Домены В ПРОКСИ (${USER_PROXY_FILE} -> группа 🛑 Обход блокировок, высший приоритет):${C_RES}"
                     list_entries_numbered "$USER_PROXY_FILE"
                     ui_box_sep "Домены НАПРЯМУЮ (${USER_DIRECT_FILE} -> DIRECT, высший приоритет)"
                     list_entries_numbered "$USER_DIRECT_FILE"
@@ -464,7 +494,7 @@ show_menu() {
                     ui_box_row "0) Назад в главное меню"
                     ui_box_bottom
                     printf "Выбор [0-6]: "
-                    read -r DOM_ACT < /dev/tty || true
+                    read -r DOM_ACT < /dev/tty || break
                     case "$DOM_ACT" in
                         ""|0) break ;;
                         1)
@@ -487,7 +517,7 @@ show_menu() {
                                                     "Пример корректного домена: youtube.com или https://site.org"
                                     fi
                                 done
-                                [ -n "$ADDED_LIST" ] && apply_and_verify_singbox "Добавление в прокси:${ADDED_LIST}" || true
+                                [ -n "$ADDED_LIST" ] && apply_and_verify_core "Добавление в прокси:${ADDED_LIST}" || true
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
@@ -504,7 +534,7 @@ show_menu() {
                                     [ -z "$D_ITEM" ] && continue
                                     CLEAN_D=$(sanitize_domain_entry "$D_ITEM" || true)
                                     if [ -n "$CLEAN_D" ]; then
-                                        awk -v d="$CLEAN_D" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.chatgpt.com"}' "$USER_PROXY_FILE" > "${USER_PROXY_FILE}.tmp.$$" && mv -f "${USER_PROXY_FILE}.tmp.$$" "$USER_PROXY_FILE"
+                                        awk -v d="$CLEAN_D" 'NF && $0 != d {print}' "$USER_PROXY_FILE" > "${USER_PROXY_FILE}.tmp.$$" && mv -f "${USER_PROXY_FILE}.tmp.$$" "$USER_PROXY_FILE"
                                         grep -qxF "$CLEAN_D" "$USER_DIRECT_FILE" 2>/dev/null || echo "$CLEAN_D" >> "$USER_DIRECT_FILE"
                                         ADDED_LIST="${ADDED_LIST} ${CLEAN_D}"
                                     else
@@ -512,7 +542,7 @@ show_menu() {
                                                     "Пример корректного домена: gosuslugi.ru или https://bank.ru"
                                     fi
                                 done
-                                [ -n "$ADDED_LIST" ] && apply_and_verify_singbox "Добавление напрямую (DIRECT):${ADDED_LIST}" || true
+                                [ -n "$ADDED_LIST" ] && apply_and_verify_core "Добавление напрямую (DIRECT):${ADDED_LIST}" || true
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
@@ -525,7 +555,7 @@ show_menu() {
                                 backup_gateway_state
                                 load_gateway_env
                                 DEL_VAL=$(get_entry_by_index "$USER_PROXY_FILE" "$DEL_D_IDX")
-                                delete_entry_by_index "$USER_PROXY_FILE" "$DEL_D_IDX" "+.chatgpt.com" && apply_and_verify_singbox "Удаление ${DEL_VAL}" || true
+                                delete_entry_by_index "$USER_PROXY_FILE" "$DEL_D_IDX" "" && apply_and_verify_core "Удаление ${DEL_VAL}" || true
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
@@ -538,7 +568,7 @@ show_menu() {
                                 backup_gateway_state
                                 load_gateway_env
                                 DEL_VAL=$(get_entry_by_index "$USER_DIRECT_FILE" "$DEL_D_IDX")
-                                delete_entry_by_index "$USER_DIRECT_FILE" "$DEL_D_IDX" "+.localdomain" && apply_and_verify_singbox "Удаление ${DEL_VAL}" || true
+                                delete_entry_by_index "$USER_DIRECT_FILE" "$DEL_D_IDX" "+.localdomain" && apply_and_verify_core "Удаление ${DEL_VAL}" || true
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
@@ -547,8 +577,8 @@ show_menu() {
                             backup_gateway_state
                             load_gateway_env
                             printf "+.localdomain\n+.lan\n" > "$USER_DIRECT_FILE"
-                            echo "+.chatgpt.com" > "$USER_PROXY_FILE"
-                            apply_and_verify_singbox "Сброс пользовательских списков доменов" || true
+                            : > "$USER_PROXY_FILE"
+                            apply_and_verify_core "Сброс пользовательских списков доменов" || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
                             ;;
@@ -580,7 +610,7 @@ show_menu() {
                     ui_box_row "0) Назад в главное меню"
                     ui_box_bottom
                     printf "Выбор [0-5 / s]: "
-                    read -r BYP_ACT < /dev/tty || true
+                    read -r BYP_ACT < /dev/tty || break
                     case "$BYP_ACT" in
                         ""|0) break ;;
                         s|S) scan_lan_subnet ;;
@@ -593,7 +623,7 @@ show_menu() {
                                 load_gateway_env
                                 sed -i "\|^${IP_IN}$|d" "$USER_FORCE_PROXY_IPS" 2>/dev/null || true
                                 grep -qxF "$IP_IN" "$USER_BYPASS_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_BYPASS_IPS"
-                                apply_and_verify_singbox "Добавление IP ${IP_IN} в DIRECT" && conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
+                                apply_and_verify_core "Добавление IP ${IP_IN} в DIRECT" && conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
                             else
                                 ui_warn_box "Некорректный IP или номер устройства (${RAW_DEV_IN})." "Нажмите 's' для сканирования сети или введите IP вида 192.168.1.50."
                             fi
@@ -609,7 +639,7 @@ show_menu() {
                                 load_gateway_env
                                 sed -i "\|^${IP_IN}$|d" "$USER_BYPASS_IPS" 2>/dev/null || true
                                 grep -qxF "$IP_IN" "$USER_FORCE_PROXY_IPS" 2>/dev/null || echo "$IP_IN" >> "$USER_FORCE_PROXY_IPS"
-                                apply_and_verify_singbox "Добавление IP ${IP_IN} в Full-VPN" && conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
+                                apply_and_verify_core "Добавление IP ${IP_IN} в Full-VPN" && conntrack -D -s "$IP_IN" >/dev/null 2>&1 || true
                             else
                                 ui_warn_box "Некорректный IP или номер устройства (${RAW_DEV_IN})." "Нажмите 's' для сканирования сети или введите IP вида 192.168.1.50."
                             fi
@@ -624,7 +654,7 @@ show_menu() {
                                 backup_gateway_state
                                 load_gateway_env
                                 DEL_IP=$(get_entry_by_index "$USER_BYPASS_IPS" "$DEL_I_IDX")
-                                delete_entry_by_index "$USER_BYPASS_IPS" "$DEL_I_IDX" "" && apply_and_verify_singbox "Удаление IP ${DEL_IP}" || true
+                                delete_entry_by_index "$USER_BYPASS_IPS" "$DEL_I_IDX" "" && apply_and_verify_core "Удаление IP ${DEL_IP}" || true
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
@@ -637,7 +667,7 @@ show_menu() {
                                 backup_gateway_state
                                 load_gateway_env
                                 DEL_IP=$(get_entry_by_index "$USER_FORCE_PROXY_IPS" "$DEL_I_IDX")
-                                delete_entry_by_index "$USER_FORCE_PROXY_IPS" "$DEL_I_IDX" "" && apply_and_verify_singbox "Удаление IP ${DEL_IP}" || true
+                                delete_entry_by_index "$USER_FORCE_PROXY_IPS" "$DEL_I_IDX" "" && apply_and_verify_core "Удаление IP ${DEL_IP}" || true
                             fi
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
@@ -647,7 +677,7 @@ show_menu() {
                             load_gateway_env
                             : > "$USER_BYPASS_IPS"
                             : > "$USER_FORCE_PROXY_IPS"
-                            apply_and_verify_singbox "Очистка списков маршрутизации по IP" || true
+                            apply_and_verify_core "Очистка списков маршрутизации по IP" || true
                             printf "\nНажмите Enter для продолжения..."
                             read -r _ < /dev/tty || true
                             ;;
@@ -672,7 +702,7 @@ show_menu() {
                     ui_box_row "0) Назад в главное меню"
                     ui_box_bottom
                     printf "Выбор [0-7]: "
-                    read -r SRV_ACT < /dev/tty || true
+                    read -r SRV_ACT < /dev/tty || break
                     case "$SRV_ACT" in
                         ""|0) break ;;
                         1)
@@ -740,7 +770,7 @@ show_menu() {
                     ui_box_row "0) Назад в главное меню"
                     ui_box_bottom
                     printf "Выбор [0-5]: "
-                    read -r AU_ACT < /dev/tty || true
+                    read -r AU_ACT < /dev/tty || break
                     case "$AU_ACT" in
                         ""|0) break ;;
                         1) enable_autoupdate; enable_watchdog; ui_ok_msg "Автообновление и Watchdog включены."; sleep 1 ;;
@@ -767,7 +797,7 @@ show_menu() {
                     clear
                     ui_banner "HARDWARE KILL-SWITCH // ЗАЩИТА ОТ УТЕЧЕК ТРАФИКА"
                     ui_box_top "🛡️ АППАРАТНЫЙ KILL-SWITCH (NFTABLES НА ИНТЕРФЕЙСЕ $(get_lan_ifname))"
-                    ui_box_row "Текущий статус: $(is_killswitch_enabled && echo "${C_GRN}◆ ВКЛЮЧЕН (строгая блокировка трафика мимо singbox-tun)${C_RES}" || echo "${C_CYN}● ВЫКЛЮЧЕН (стандартная защита DNS + DoT + IPv6)${C_RES}")"
+                    ui_box_row "Текущий статус: $(is_killswitch_enabled && echo "${C_GRN}◆ ВКЛЮЧЕН (строгая блокировка трафика мимо ${CORE_TUN_IF})${C_RES}" || echo "${C_CYN}● ВЫКЛЮЧЕН (стандартная защита DNS + DoT + IPv6)${C_RES}")"
                     ui_box_row "Локальная сеть LAN (SSH, Samba, *.lan) всегда доступна и защищена от блокировки."
                     ui_box_sep "ДЕЙСТВИЯ [0-2]"
                     ui_box_row "1) ВКЛЮЧИТЬ строгий Kill-Switch"
@@ -775,7 +805,7 @@ show_menu() {
                     ui_box_row "0) Назад"
                     ui_box_bottom
                     printf "Выбор [0-2]: "
-                    read -r KS_ACT < /dev/tty || true
+                    read -r KS_ACT < /dev/tty || break
                     case "$KS_ACT" in
                         ""|0) break ;;
                         1) sync_dns_firewall "yes" "yes"; ui_ok_msg "Kill-Switch ВКЛЮЧЕН."; sleep 1 ;;
@@ -803,7 +833,7 @@ show_menu() {
                     ui_box_row "0) Назад"
                     ui_box_bottom
                     printf "Выбор [0-6]: "
-                    read -r NET_ACT < /dev/tty || true
+                    read -r NET_ACT < /dev/tty || break
                     case "$NET_ACT" in
                         ""|0) break ;;
                         1)

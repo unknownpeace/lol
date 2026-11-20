@@ -102,7 +102,7 @@ sync_user_domain_rulesets() {
     mkdir -p "$SB_RULES_DIR"
     [ -f "$USER_DIRECT_FILE" ] || printf "+.localdomain\n+.lan\n" > "$USER_DIRECT_FILE"
     grep -qxF "+.lan" "$USER_DIRECT_FILE" 2>/dev/null || echo "+.lan" >> "$USER_DIRECT_FILE"
-    [ -f "$USER_PROXY_FILE" ] || echo "+.chatgpt.com" > "$USER_PROXY_FILE"
+    [ -f "$USER_PROXY_FILE" ] || : > "$USER_PROXY_FILE"
     sed -i 's/\r$//' "$USER_DIRECT_FILE" "$USER_PROXY_FILE" "$CUSTOM_NODES_FILE" 2>/dev/null || true
 
     if command -v jq >/dev/null 2>&1; then
@@ -111,14 +111,14 @@ sync_user_domain_rulesets() {
             mv "${USER_DIRECT_JSON}.tmp" "$USER_DIRECT_JSON"
 
         sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^+\.//;s/^\.//' "$USER_PROXY_FILE" 2>/dev/null | grep -v '^$' | \
-            jq -R . | jq -s '{version: 3, rules: [{domain_suffix: (if length > 0 then . else ["chatgpt.com"] end)}]}' > "${USER_PROXY_JSON}.tmp" && \
+            jq -R . | jq -s '{version: 3, rules: (if length > 0 then [{domain_suffix: .}] else [] end)}' > "${USER_PROXY_JSON}.tmp" && \
             mv "${USER_PROXY_JSON}.tmp" "$USER_PROXY_JSON"
     else
         cat << 'J_DIR' > "$USER_DIRECT_JSON"
 {"version":3,"rules":[{"domain_suffix":["localdomain","lan"]}]}
 J_DIR
         cat << 'J_PRX' > "$USER_PROXY_JSON"
-{"version":3,"rules":[{"domain_suffix":["chatgpt.com"]}]}
+{"version":3,"rules":[]}
 J_PRX
     fi
     return 0

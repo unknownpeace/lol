@@ -51,7 +51,7 @@ sync_dns_firewall() {
     KS_RULE=""
     if [ "$KS_STATE" = "yes" ]; then
         KS_COMMENT="#KILLSWITCH_ACTIVE"
-        KS_RULE="iifname \"${LAN_IF}\" oifname != { \"singbox-tun\", \"lo\" } ${BYP_SADDR_CLAUSE}ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject"
+        KS_RULE="iifname \"${LAN_IF}\" oifname != { \"${CORE_TUN_IF}\", \"lo\" } ${BYP_SADDR_CLAUSE}ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject"
     fi
 
     DNS_RULE=""
@@ -59,7 +59,9 @@ sync_dns_firewall() {
         DNS_RULE="iifname \"${LAN_IF}\" meta l4proto { tcp, udp } th dport 53 redirect to :53"
     fi
 
-    cat << NFT_ALPINE > "${ALPINE_NFT_CONF}.tmp.$$"
+    render_nft_conf() {
+        MASQ_LINE="$1"
+        cat << NFT_ALPINE
 #!/usr/sbin/nft -f
 ${KS_COMMENT}
 
@@ -82,8 +84,8 @@ table inet gateway_fw {
 
     chain forward_mss {
         type filter hook forward priority mangle; policy accept;
-        oifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
-        iifname "singbox-tun" tcp flags syn tcp option maxseg size set rt mtu
+        oifname "${CORE_TUN_IF}" tcp flags syn tcp option maxseg size set rt mtu
+        iifname "${CORE_TUN_IF}" tcp flags syn tcp option maxseg size set rt mtu
     }
 
     chain forward_filter {
@@ -100,14 +102,21 @@ table inet gateway_fw {
 
     chain postrouting_nat {
         type nat hook postrouting priority srcnat; policy accept;
-        oifname "${LAN_IF}" masquerade
+        ${MASQ_LINE}
     }
 }
 NFT_ALPINE
+    }
+
+    render_nft_conf "oifname \"${LAN_IF}\" masquerade persistent" > "${ALPINE_NFT_CONF}.tmp.$$"
     chmod +x "${ALPINE_NFT_CONF}.tmp.$$" 2>/dev/null || true
     if ! command -v nft >/dev/null 2>&1; then
         rm -f "${ALPINE_NFT_CONF}.tmp.$$"
         return 0
+    fi
+    if ! nft --check -f "${ALPINE_NFT_CONF}.tmp.$$" >/dev/null 2>&1; then
+        render_nft_conf "oifname \"${LAN_IF}\" masquerade" > "${ALPINE_NFT_CONF}.tmp.$$"
+        chmod +x "${ALPINE_NFT_CONF}.tmp.$$" 2>/dev/null || true
     fi
     if nft --check -f "${ALPINE_NFT_CONF}.tmp.$$" >/dev/null 2>&1; then
         mv -f "${ALPINE_NFT_CONF}.tmp.$$" "$ALPINE_NFT_CONF"

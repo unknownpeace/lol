@@ -72,36 +72,13 @@ configure_smart_dhcp() {
 
             rc-service adguardhome start >/dev/null 2>&1 || true
 
-            # Удаляем legacy dnsmasq если остался
-            if [ -f "$ALPINE_DHCP_CONF" ]; then
-                rm -f "$ALPINE_DHCP_CONF" 2>/dev/null || true
-                service_ctl dnsmasq stop || true
-                service_ctl dnsmasq disable || true
-            fi
-
             echo "${C_GRN}[✓] DHCP-сервер AdGuard Home ВКЛЮЧЕН (Шлюз: ${CUR_LAN_IP}, DNS: ${CUR_LAN_IP}, пул ${LAN_SUB}.100-.239).${C_RES}"
             return 0
         fi
 
-        # Фоллбэк на dnsmasq если AGH еще не установлен
-        if ! command -v dnsmasq >/dev/null 2>&1; then
-            echo "Установка пакета dnsmasq для DHCP-сервера..."
-            apk update >/dev/null 2>&1 || true
-            apk add dnsmasq >/dev/null 2>&1 || true
-        fi
-        mkdir -p /etc/dnsmasq.d /var/lib/misc
-        cat << ALP_DHCP > "$ALPINE_DHCP_CONF"
-port=5353
-interface=${LAN_IF}
-bind-interfaces
-dhcp-authoritative
-dhcp-range=${LAN_SUB}.100,${LAN_SUB}.239,255.255.255.0,12h
-dhcp-option=3,${CUR_LAN_IP}
-dhcp-option=6,${CUR_LAN_IP}
-ALP_DHCP
-        service_ctl dnsmasq enable
-        service_ctl dnsmasq restart
-        echo "${C_GRN}[✓] DHCP-сервер на Alpine ВКЛЮЧЕН (Шлюз и DNS: ${CUR_LAN_IP}, пул .100-.239).${C_RES}"
+        echo "${C_RED}[X] Ошибка: Конфигурация AdGuard Home (${AGH_CONF}) не найдена!${C_RES}"
+        echo "    Сначала выполните первичную настройку шлюза (gateway install)."
+        return 1
     else
         if [ -f "$AGH_CONF" ]; then
             rc-service adguardhome stop >/dev/null 2>&1 || true
@@ -109,9 +86,6 @@ ALP_DHCP
             sed -i '/^dhcp:/,/^[a-zA-Z0-9_]\+:/s/enabled: true/enabled: false/' "$AGH_CONF" 2>/dev/null || true
             rc-service adguardhome start >/dev/null 2>&1 || true
         fi
-        rm -f "$ALPINE_DHCP_CONF" 2>/dev/null || true
-        service_ctl dnsmasq stop || true
-        service_ctl dnsmasq disable || true
         echo "${C_GRN}[✓] DHCP-сервер на Alpine ВЫКЛЮЧЕН (классический режим Sidecar).${C_RES}"
     fi
     return 0
@@ -184,10 +158,13 @@ apply_network_ips() {
     GW_IP="$TARGET_GW_IP"
     save_gateway_env
     update_agh_gateway_ip "$GW_IP" "$TARGET_LAN_IP"
-    [ -f "$SB_CONF" ] && generate_singbox_config || true
+    ACT_SVC=$(get_active_core_service)
+    if [ -f "$SB_CONF" ] || [ -f "$MIHOMO_CONF" ]; then
+        core_generate_config || true
+    fi
 
     write_alpine_static_interfaces "$LAN_IF" "$TARGET_LAN_IP" "$GW_IP"
-    if [ -f "$ALPINE_DHCP_CONF" ]; then
+    if is_dhcp_server_enabled; then
         configure_smart_dhcp "on" >/dev/null 2>&1 || true
     fi
 
@@ -195,7 +172,7 @@ apply_network_ips() {
     cat << SW_ALP > "$SW_SCRIPT"
 #!/bin/sh
 sleep 1
-rc-service sing-box stop >/dev/null 2>&1 || true
+rc-service ${ACT_SVC} stop >/dev/null 2>&1 || true
 killall -9 udhcpc >/dev/null 2>&1 || true
 if [ "${TARGET_LAN_IP}" != "${CUR_LAN_IP}" ]; then
     ip -4 addr flush dev ${LAN_IF} >/dev/null 2>&1 || true
@@ -205,7 +182,7 @@ ip link set ${LAN_IF} up >/dev/null 2>&1 || true
 ip -4 route replace default via ${GW_IP} dev ${LAN_IF} >/dev/null 2>&1 || true
 sleep 2
 nft -f ${ALPINE_NFT_CONF} >/dev/null 2>&1 || true
-rc-service sing-box start >/dev/null 2>&1 || true
+rc-service ${ACT_SVC} start >/dev/null 2>&1 || true
 rc-service adguardhome restart >/dev/null 2>&1 || true
 rc-service caddy reload >/dev/null 2>&1 || rc-service caddy restart >/dev/null 2>&1 || true
 rc-service samba restart >/dev/null 2>&1 || true
@@ -223,7 +200,7 @@ nameserver 77.88.8.8"
     echo "${C_GRN}[✓] Сетевые настройки успешно сохранены (${OS_NAME}):${C_RES}"
     echo " • Новый IP сервера (${LAN_IF}):   ${TARGET_LAN_IP} (маска 255.255.255.0)"
     echo " • IP основного роутера:     ${GW_IP}"
-    echo " • Панель Sing-Box Extended: http://${TARGET_LAN_IP}:9090/ui (https://${DOM_ZASHBOARD})"
+    echo " • Панель $(get_active_ui_name): http://${TARGET_LAN_IP}:9090/ui (https://${DOM_PANEL})"
     echo " • Панель AdGuard Home:      http://${TARGET_LAN_IP}:3000 (https://${DOM_ADGUARD})"
     echo " • Локальные домены *.lan:   перенаправлены на ${TARGET_LAN_IP}"
 

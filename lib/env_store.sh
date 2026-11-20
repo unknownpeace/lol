@@ -55,7 +55,9 @@ load_gateway_env() {
         ADMIN_PASS=$(jq -r '.experimental.clash_api.secret // empty' "$SB_CONF" 2>/dev/null | head -n 1)
     fi
     if [ -z "${SUB_URL:-}" ] && [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
-        SUB_URL=$(jq -r '[.providers[]? | select(.type=="remote") | .url] | join(" ")' "$SB_CONF" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        if [ ! -f "$SB_ENV" ] || ! grep -q '^SUB_URL=' "$SB_ENV" 2>/dev/null; then
+            SUB_URL=$(jq -r '[.providers[]? | select(.type=="remote") | .url] | join(" ")' "$SB_CONF" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        fi
     fi
 
     case "${SUB_URL:-}" in
@@ -64,10 +66,18 @@ load_gateway_env() {
     esac
 
     [ -z "${ALLOW_RU_NODES:-}" ] && ALLOW_RU_NODES="no"
+    case "${CORE_ENGINE:-singbox}" in
+        mihomo|clash|meta) CORE_ENGINE="mihomo" ;;
+        *) CORE_ENGINE="singbox" ;;
+    esac
+    case "${WEB_UI:-zashboard}" in
+        metacubexd|metacube|xd) WEB_UI="metacubexd" ;;
+        *) WEB_UI="zashboard" ;;
+    esac
     if [ -z "${GW_IP:-}" ]; then
-        GW_IP=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") {print $(i+1); exit}}')
+        GW_IP=$(get_default_router_ip)
     fi
-    [ -z "${GW_IP:-}" ] && GW_IP="192.168.1.1"
+    [ -z "${GW_IP:-}" ] && GW_IP="${DEFAULT_ROUTER_IP:-192.168.1.5}"
     if [ -z "${AGH_USER:-}" ]; then
         AGH_USER=$(get_agh_admin_user)
     fi
@@ -113,6 +123,8 @@ save_gateway_env() {
     ESC_ARU=$(escape_single_quotes "${ALLOW_RU_NODES:-no}")
     ESC_TGB=$(escape_single_quotes "${TG_BOT_TOKEN:-}")
     ESC_TGC=$(escape_single_quotes "${TG_CHAT_ID:-}")
+    ESC_CORE=$(escape_single_quotes "${CORE_ENGINE:-singbox}")
+    ESC_UI=$(escape_single_quotes "${WEB_UI:-zashboard}")
     atomic_write_file "$SB_ENV" 0600 "root:root" << ENV_EOF
 GW_IP='${ESC_GW}'
 AGH_USER='${ESC_AGHU}'
@@ -122,6 +134,8 @@ WARP_LICENSE='${ESC_WLIC}'
 ALLOW_RU_NODES='${ESC_ARU}'
 TG_BOT_TOKEN='${ESC_TGB}'
 TG_CHAT_ID='${ESC_TGC}'
+CORE_ENGINE='${ESC_CORE}'
+WEB_UI='${ESC_UI}'
 ENV_EOF
     umask 022
     return 0

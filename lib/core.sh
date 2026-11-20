@@ -150,10 +150,16 @@ detect_os() {
         x86_64)
             SB_ARCH="amd64"
             AGH_ARCH="amd64"
+            if grep -qw avx2 /proc/cpuinfo 2>/dev/null && grep -qw bmi2 /proc/cpuinfo 2>/dev/null && grep -qw fma /proc/cpuinfo 2>/dev/null; then
+                MIHOMO_ARCH="amd64-v3"
+            else
+                MIHOMO_ARCH="amd64-v1"
+            fi
             ;;
         aarch64|arm64)
             SB_ARCH="arm64"
             AGH_ARCH="arm64"
+            MIHOMO_ARCH="arm64"
             ;;
         *)
             echo "${C_RED}[X] Ошибка: Неподдерживаемая архитектура ${ARCH_RAW} (требуется x86_64 или aarch64).${C_RES}"
@@ -215,7 +221,7 @@ is_valid_ipv4() {
 
 # Динамическое определение имени физического LAN-интерфейса в Alpine Linux (eth0, ens18, enp0s3, br0 и т.д.)
 get_lan_ifname() {
-    DEF_DEV=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev" && $(i+1)!="singbox-tun" && $(i+1)!="lo") {print $(i+1); exit}}')
+    DEF_DEV=$(ip -4 route show default 2>/dev/null | awk -v ct="${CORE_TUN_IF:-gateway-tun}" '{for(i=1;i<=NF;i++) if($i=="dev" && $(i+1)!=ct && $(i+1)!="gateway-tun" && $(i+1)!="singbox-tun" && $(i+1)!="mihomo0" && $(i+1)!="lo") {print $(i+1); exit}}')
     if [ -n "$DEF_DEV" ] && ip link show "$DEF_DEV" >/dev/null 2>&1; then
         printf "%s" "$DEF_DEV"
         return 0
@@ -224,7 +230,7 @@ get_lan_ifname() {
         printf "eth0"
         return 0
     fi
-    ANY_DEV=$(ip -o -4 addr show scope global 2>/dev/null | awk '$2 != "singbox-tun" && $2 != "lo" {print $2; exit}')
+    ANY_DEV=$(ip -o -4 addr show scope global 2>/dev/null | awk -v ct="${CORE_TUN_IF:-gateway-tun}" '$2 != ct && $2 != "gateway-tun" && $2 != "singbox-tun" && $2 != "mihomo0" && $2 != "lo" {print $2; exit}')
     if [ -n "$ANY_DEV" ] && ip link show "$ANY_DEV" >/dev/null 2>&1; then
         printf "%s" "$ANY_DEV"
         return 0
@@ -244,6 +250,17 @@ get_current_lan_ip() {
     CUR_LAN="${CUR_LAN%%/*}"
     [ -z "$CUR_LAN" ] && CUR_LAN="192.168.1.2"
     printf "%s" "$CUR_LAN"
+    return 0
+}
+
+# Получение IP-адреса основного роутера из таблицы маршрутизации (в обход singbox-tun)
+get_default_router_ip() {
+    DEF_GW=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") {gw=$(i+1); if(gw!="" && gw!="172.19.0.1") {print gw; exit}}}')
+    if [ -n "$DEF_GW" ] && is_valid_ipv4 "$DEF_GW"; then
+        printf "%s" "$DEF_GW"
+        return 0
+    fi
+    printf "%s" "${DEFAULT_ROUTER_IP:-192.168.1.5}"
     return 0
 }
 

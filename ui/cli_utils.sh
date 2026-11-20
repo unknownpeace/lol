@@ -7,7 +7,7 @@ resolve_homelab_module_id() {
         4|forgejo|git)                    printf "forgejo" ;;
         5|code|vscode|code-server)        printf "code" ;;
         6|ytdlp|yt|metube|downloads)     printf "ytdlp" ;;
-        7|torrent|transmission|tr|qbittorrent) printf "torrent" ;;
+        7|torrent|transmission|tr)         printf "torrent" ;;
         *)                                return 1 ;;
     esac
     return 0
@@ -15,12 +15,18 @@ resolve_homelab_module_id() {
 
 # Быстрое просмотр логов любой службы из CLI: `gateway logs [service]`
 show_service_logs_cli() {
-    SVC_Q=$(printf "%s" "${1:-sing-box}" | tr 'A-Z' 'a-z' | tr -d ' \t\r\n')
+    SVC_Q=$(printf "%s" "${1:-core}" | tr 'A-Z' 'a-z' | tr -d ' \t\r\n')
     LINES_Q="${2:-45}"
     ui_box_top "📜 ЖУРНАЛ СОБЫТИЙ СЛУЖБЫ: ${SVC_Q} (последние ${LINES_Q} строк)"
     case "$SVC_Q" in
+        core|gateway)
+            show_core_logs "$LINES_Q"
+            ;;
         sing-box|singbox|sb)
-            show_singbox_logs "$LINES_Q"
+            tail -n "$LINES_Q" "$SB_LOG_FILE" 2>/dev/null || echo "  (лог ${SB_LOG_FILE} пуст)"
+            ;;
+        mihomo|clash|meta|mh)
+            tail -n "$LINES_Q" "$MIHOMO_LOG_FILE" 2>/dev/null || echo "  (лог ${MIHOMO_LOG_FILE} пуст)"
             ;;
         adguard|adguardhome|agh)
             if [ -f /var/log/messages ]; then
@@ -34,7 +40,7 @@ show_service_logs_cli() {
             tail -n "$LINES_Q" /var/log/vaultwarden.log 2>/dev/null || echo "  (лог /var/log/vaultwarden.log пуст)"
             ;;
         ytdlp|metube|downloads)
-            tail -n "$LINES_Q" /var/log/metube.log /var/log/ytdlp-webui.log 2>/dev/null || echo "  (лог MeTube пуст)"
+            tail -n "$LINES_Q" /var/log/metube.log 2>/dev/null || echo "  (лог MeTube пуст)"
             ;;
         code|code-server|vscode)
             tail -n "$LINES_Q" /var/log/code-server.log 2>/dev/null || echo "  (лог /var/log/code-server.log пуст)"
@@ -46,7 +52,7 @@ show_service_logs_cli() {
             tail -n "$LINES_Q" /var/log/forgejo/*.log 2>/dev/null || echo "  (лог /var/log/forgejo пуст)"
             ;;
         torrent|transmission|tr)
-            tail -n "$LINES_Q" /var/log/transmission/transmission.log /var/log/qbittorrent-nox.log 2>/dev/null || echo "  (лог Transmission пуст)"
+            tail -n "$LINES_Q" /var/log/transmission/transmission.log 2>/dev/null || echo "  (лог Transmission пуст)"
             ;;
         autoupdate|cron)
             tail -n "$LINES_Q" "$AUTOUPDATE_LOG" 2>/dev/null || echo "  (лог ${AUTOUPDATE_LOG} пуст)"
@@ -79,15 +85,15 @@ cli_proxy_add() {
                 *) SUB_URL="${SUB_URL:+${SUB_URL} }${CLEAN_P}" ;;
             esac
             save_gateway_env
-            apply_and_verify_singbox "CLI: Добавление подписки в Слот 1"
+            apply_and_verify_core "CLI: Добавление подписки в Слот 1"
             ;;
         warp|WARP|amnezia|masque)
-            generate_amnezia_warp "${2:-}" && apply_and_verify_singbox "CLI: Активация Amnezia WARP 2.0 + MASQUE H2"
+            generate_amnezia_warp "${2:-}" && apply_and_verify_core "CLI: Активация Amnezia WARP 2.0 + MASQUE H2"
             ;;
         *)
             sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
             format_uri_keys "$RAW_P_ARG" >> "$CUSTOM_NODES_FILE"
-            apply_and_verify_singbox "CLI: Добавление ключа в Слот 2 (my_nodes.yaml)"
+            apply_and_verify_core "CLI: Добавление ключа в Слот 2 (my_nodes.yaml)"
             ;;
     esac
     return $?
@@ -112,15 +118,15 @@ cli_domain_rule_add() {
     load_gateway_env
     init_user_lists
     if [ "$RULE_MODE" = "direct" ]; then
-        awk -v d="$CLEAN_D" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.chatgpt.com"}' "$USER_PROXY_FILE" > "${USER_PROXY_FILE}.tmp.$$"
+        awk -v d="$CLEAN_D" 'NF && $0 != d {print}' "$USER_PROXY_FILE" > "${USER_PROXY_FILE}.tmp.$$"
         atomic_commit_tmp "${USER_PROXY_FILE}.tmp.$$" "$USER_PROXY_FILE" 0644 "root:root" || true
         grep -qxF "$CLEAN_D" "$USER_DIRECT_FILE" 2>/dev/null || echo "$CLEAN_D" >> "$USER_DIRECT_FILE"
-        apply_and_verify_singbox "CLI: Перевод домена ${CLEAN_D} напрямую (DIRECT)"
+        apply_and_verify_core "CLI: Перевод домена ${CLEAN_D} напрямую (DIRECT)"
     else
         awk -v d="$CLEAN_D" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.localdomain"}' "$USER_DIRECT_FILE" > "${USER_DIRECT_FILE}.tmp.$$"
         atomic_commit_tmp "${USER_DIRECT_FILE}.tmp.$$" "$USER_DIRECT_FILE" 0644 "root:root" || true
         grep -qxF "$CLEAN_D" "$USER_PROXY_FILE" 2>/dev/null || echo "$CLEAN_D" >> "$USER_PROXY_FILE"
-        apply_and_verify_singbox "CLI: Перевод домена ${CLEAN_D} в прокси (PROXY)"
+        apply_and_verify_core "CLI: Перевод домена ${CLEAN_D} в прокси (PROXY)"
     fi
     return $?
 }
@@ -142,7 +148,9 @@ generate_answers_template() {
 #   gw install --answers gateway.answers
 # ==============================================================================
 
-# 1. Сеть и подключение к интернету
+# 1. Ядро шлюза, панель и подключение к интернету
+CORE_ENGINE="singbox"
+WEB_UI="zashboard"
 SUB_URL="warp"
 WARP_LICENSE=""
 TARGET_LAN_IP="auto"
@@ -215,7 +223,8 @@ verify_answers_file() {
     (
         parse_env_file_safely "$IN_F"
 
-        # Сеть
+        # Сеть и ядро
+        printf "• Ядро / Панель:    CORE=%s │ WEB_UI=%s\n" "${CORE_ENGINE:-singbox}" "${WEB_UI:-zashboard}"
         printf "• Сеть:             LAN IP: %s │ GW IP: %s │ Подписка: %s\n" "${TARGET_LAN_IP:-auto}" "${GW_IP:-auto}" "${SUB_URL:-warp}"
         # Пользователь
         if [ -n "${ADMIN_PASS:-}" ]; then
@@ -251,7 +260,9 @@ print_gateway_cli_help() {
     ui_box_row "${C_CYN}gw restart${C_RES}                  — Быстрая пересборка конфига, сброс conntrack и перезапуск шлюза"
     ui_box_row "${C_CYN}gw update${C_RES} (или ${C_CYN}check${C_RES})        — Полное обновление: скрипты Git + ядра Sing-Box/AGH + Homelab"
     ui_box_row "${C_CYN}gw links${C_RES} (или ${C_CYN}gw urls${C_RES})         — Карточка всех веб-адресов https://*.lan, сертификата и шары Samba"
-    ui_box_row "${C_CYN}gw logs [служба]${C_RES}            — Живые логи (sing-box|adguard|caddy|vaultwarden|metube|samba|...)"
+    ui_box_row "${C_CYN}gw logs [служба]${C_RES}            — Живые логи (core|sing-box|mihomo|adguard|caddy|vaultwarden|...)"
+    ui_box_row "${C_CYN}gw core [singbox|mihomo]${C_RES}    — Горячее переключение ядра (Sing-Box Extended ⇄ Mihomo)"
+    ui_box_row "${C_CYN}gw ui [zashboard|metacubexd]${C_RES}— Смена веб-панели (:9090/ui) без перезапуска ядра"
     ui_box_sep "🤖 АВТОМАТИЧЕСКАЯ УСТАНОВКА И ФАЙЛЫ ОТВЕТОВ (ZERO-TOUCH)"
     ui_box_row "${C_CYN}gw install --answers <файл>${C_RES} — Полная тихая установка шлюза и сервисов без единого вопроса"
     ui_box_row "${C_CYN}gw answers template [файл]${C_RES}  — Сгенерировать подробный шаблон файла ответов (Answers File)"
@@ -266,6 +277,7 @@ print_gateway_cli_help() {
     ui_box_row "${C_CYN}gw proxy add <url|key|warp>${C_RES} — Добавить подписку (Слот 1), ключ URI (Слот 2) или включить WARP"
     ui_box_row "${C_CYN}gw domain direct <url|dom>${C_RES}  — Направить сайт/домен всегда НАПРЯМУЮ (в обход туннеля)"
     ui_box_row "${C_CYN}gw domain proxy <url|dom>${C_RES}   — Направить сайт/домен принудительно В ПРОКСИ (через туннель)"
+    ui_box_row "${C_CYN}gw killswitch [on|off|status]${C_RES}— Аппаратный Kill-Switch (nftables: блокировка мимо TUN)"
     ui_box_sep "📦 УПРАВЛЕНИЕ КОНТЕЙНЕРАМИ LXC И СНАПШОТАМИ"
     ui_box_row "${C_CYN}gw lxc${C_RES} (или ${C_CYN}gw lxc list${C_RES})    — Таблица контейнеров (статус, IP, память, автозапуск, снапшоты)"
     ui_box_row "${C_CYN}gw lxc create${C_RES}               — Интерактивный мастер создания контейнера (Alpine, Debian, Ubuntu, Arch...)"

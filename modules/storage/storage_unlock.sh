@@ -61,29 +61,38 @@ auto_fsck_device() {
     return 0
 }
 
-# Автоматическая попытка разблокировать (по ключу) и смонтировать внешний накопитель после подачи питания
+# Автоматическая попытка разблокировать (по ключу) и смонтировать внешний накопитель
 try_auto_unlock_and_mount_storage() {
+    FORCE_UNLOCK="${1:-no}"
     load_gateway_env
     is_external_storage_mounted && return 0
-    [ "${EXT_STORAGE_EXPECTED:-no}" = "yes" ] || return 0
+    if [ "$FORCE_UNLOCK" != "yes" ] && [ "${EXT_STORAGE_EXPECTED:-no}" != "yes" ]; then
+        return 1
+    fi
 
     ensure_disk_tools >/dev/null 2>&1 || true
     TARGET_MNT_DEV=""
+    USED_LUKS="no"
+    DET_LUKS_UUID=""
+    RAW_LUKS_DEV=""
 
     if [ -n "${EXT_STORAGE_LUKS_UUID:-}" ]; then
         RAW_LUKS_DEV=$(wait_for_block_device_uuid "$EXT_STORAGE_LUKS_UUID" 8 || true)
-        if [ -n "$RAW_LUKS_DEV" ] && [ -b "$RAW_LUKS_DEV" ]; then
-            if [ ! -b "/dev/mapper/${LUKS_MAPPER_NAME}" ]; then
-                if [ -s "$LUKS_KEYFILE" ]; then
-                    cryptsetup open "$RAW_LUKS_DEV" "$LUKS_MAPPER_NAME" --key-file "$LUKS_KEYFILE" >/dev/null 2>&1 || return 1
-                else
-                    return 1
-                fi
+    elif [ "$FORCE_UNLOCK" = "yes" ]; then
+        RAW_LUKS_DEV=$(blkid -t TYPE="crypto_LUKS" -o device 2>/dev/null | head -n 1 || true)
+    fi
+
+    if [ -n "$RAW_LUKS_DEV" ] && [ -b "$RAW_LUKS_DEV" ]; then
+        USED_LUKS="yes"
+        DET_LUKS_UUID=$(cryptsetup luksUUID "$RAW_LUKS_DEV" 2>/dev/null || blkid -s UUID -o value "$RAW_LUKS_DEV" 2>/dev/null || true)
+        if [ ! -b "/dev/mapper/${LUKS_MAPPER_NAME}" ]; then
+            if [ -s "$LUKS_KEYFILE" ]; then
+                cryptsetup open "$RAW_LUKS_DEV" "$LUKS_MAPPER_NAME" --key-file "$LUKS_KEYFILE" >/dev/null 2>&1 || return 1
+            else
+                return 1
             fi
-            TARGET_MNT_DEV="/dev/mapper/${LUKS_MAPPER_NAME}"
-        else
-            return 1
         fi
+        TARGET_MNT_DEV="/dev/mapper/${LUKS_MAPPER_NAME}"
     elif [ -n "${EXT_STORAGE_UUID:-}" ]; then
         TARGET_MNT_DEV=$(wait_for_block_device_uuid "$EXT_STORAGE_UUID" 8 || true)
         [ -n "$TARGET_MNT_DEV" ] && [ -b "$TARGET_MNT_DEV" ] || return 1
@@ -93,13 +102,27 @@ try_auto_unlock_and_mount_storage() {
 
     [ -b "$TARGET_MNT_DEV" ] || return 1
     DET_FS=$(blkid -s TYPE -o value "$TARGET_MNT_DEV" 2>/dev/null || printf "%s" "${EXT_STORAGE_FSTYPE:-ext4}")
+    DET_UUID=$(blkid -s UUID -o value "$TARGET_MNT_DEV" 2>/dev/null || true)
     auto_fsck_device "$TARGET_MNT_DEV" "$DET_FS"
 
     mkdir -p "$STORAGE_ROOT"
     M_OPTS=$(get_optimal_mount_opts "$DET_FS")
     if mount -t "$DET_FS" -o "$M_OPTS" "$TARGET_MNT_DEV" "$STORAGE_ROOT" 2>/dev/null || mount "$TARGET_MNT_DEV" "$STORAGE_ROOT" 2>/dev/null; then
+        EXT_STORAGE_EXPECTED="yes"
+        EXT_STORAGE_FSTYPE="$DET_FS"
+        [ -n "$DET_UUID" ] && EXT_STORAGE_UUID="$DET_UUID" || true
+        [ "$USED_LUKS" = "yes" ] && [ -n "$DET_LUKS_UUID" ] && EXT_STORAGE_LUKS_UUID="$DET_LUKS_UUID" || true
+        if ! awk -v mp="$STORAGE_ROOT" '$2 == mp {found=1} END {exit !found}' /etc/fstab 2>/dev/null; then
+            if [ "$USED_LUKS" = "yes" ] && [ -s "$LUKS_KEYFILE" ]; then
+                printf "/dev/mapper/%s\t%s\t%s\t%s\t0 0\n" "$LUKS_MAPPER_NAME" "$STORAGE_ROOT" "$DET_FS" "$M_OPTS" >> /etc/fstab 2>/dev/null || true
+            elif [ -n "$DET_UUID" ]; then
+                printf "UUID=%s\t%s\t%s\t%s\t0 0\n" "$DET_UUID" "$STORAGE_ROOT" "$DET_FS" "$M_OPTS" >> /etc/fstab 2>/dev/null || true
+            fi
+        fi
+        save_homelab_env
         rm -f "$STORAGE_ALERT_CACHE" 2>/dev/null || true
         init_homelab_storage >/dev/null 2>&1 || true
+        sync_all_homelab_permissions >/dev/null 2>&1 || true
         start_storage_dependent_services >/dev/null 2>&1 || true
         return 0
     fi
@@ -118,7 +141,7 @@ unlock_external_storage_cli() {
         return 0
     fi
 
-    if try_auto_unlock_and_mount_storage; then
+    if try_auto_unlock_and_mount_storage "yes" && is_external_storage_mounted; then
         ui_box_row "${C_GRN}[✔] Контейнер LUKS2 автоматически открыт ключом ${LUKS_KEYFILE} и смонтирован!${C_RES}"
         ui_box_row "${C_GRN}[✔] Все зависимые сервисы Homelab запущены.${C_RES}"
         ui_box_bottom

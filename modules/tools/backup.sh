@@ -17,6 +17,7 @@ create_unified_backup() {
 
     # 2. Сбор всех конфигурационных директорий, секретов и локального CA Caddy
     BACKUP_PATHS="/etc/sing-box"
+    [ -d "$MIHOMO_DIR" ] && BACKUP_PATHS="$BACKUP_PATHS $MIHOMO_DIR"
     [ -f "$AGH_CONF" ] && BACKUP_PATHS="$BACKUP_PATHS $AGH_CONF"
     [ -f "$ALPINE_NFT_CONF" ] && BACKUP_PATHS="$BACKUP_PATHS $ALPINE_NFT_CONF"
     [ -d /etc/caddy ] && BACKUP_PATHS="$BACKUP_PATHS /etc/caddy"
@@ -33,14 +34,18 @@ create_unified_backup() {
     [ "$INCLUDE_MEDIA" = "yes" ] && [ -d "$STORAGE_ROOT" ] && BACKUP_PATHS="$BACKUP_PATHS $STORAGE_ROOT"
 
     umask 077
+    TAR_ERR="/tmp/gw_backup_tar.err.$$"
+    TAR_RC=0
     # shellcheck disable=SC2086
-    if ! tar --exclude='*cache.db*' -czf "${BACKUP_ARCHIVE}.tmp.$$" $BACKUP_PATHS "$STAGE_DIR" 2>/dev/null; then
-        rm -rf "$STAGE_DIR" "${BACKUP_ARCHIVE}.tmp.$$"
+    tar --exclude='*cache.db*' --exclude='*.db-wal' --exclude='*.db-shm' --exclude='*/msg.sock*' --exclude='*.sock' --exclude='*.pid' -czf "${BACKUP_ARCHIVE}.tmp.$$" $BACKUP_PATHS "$STAGE_DIR" 2>"$TAR_ERR" || TAR_RC=$?
+    if [ "$TAR_RC" -gt 1 ] || [ ! -s "${BACKUP_ARCHIVE}.tmp.$$" ] || ! tar -tzf "${BACKUP_ARCHIVE}.tmp.$$" >/dev/null 2>&1; then
+        echo "${C_RED}[X] Ошибка создания архива резервной копии (код tar: ${TAR_RC})!${C_RES}"
+        [ -s "$TAR_ERR" ] && tail -n 5 "$TAR_ERR" || true
+        rm -rf "$STAGE_DIR" "${BACKUP_ARCHIVE}.tmp.$$" "$TAR_ERR"
         umask 022
-        echo "${C_RED}[X] Ошибка создания архива резервной копии!${C_RES}"
         return 1
     fi
-    rm -rf "$STAGE_DIR"
+    rm -rf "$STAGE_DIR" "$TAR_ERR"
     chmod 600 "${BACKUP_ARCHIVE}.tmp.$$" 2>/dev/null || true
     mv -f "${BACKUP_ARCHIVE}.tmp.$$" "$BACKUP_ARCHIVE"
     chmod 600 "$BACKUP_ARCHIVE" 2>/dev/null || true
@@ -74,6 +79,7 @@ restore_unified_backup() {
 
     echo "${C_CYN}[*] Восстановление конфигурации шлюза и сервисов Homelab из ${TARGET_BAK}...${C_RES}"
     service_ctl sing-box stop
+    service_ctl mihomo stop
     service_ctl adguardhome stop
     if [ -f "$HOMELAB_STATE" ]; then
         while IFS='|' read -r M_ID M_EN M_SVC _REST; do
@@ -106,8 +112,18 @@ restore_unified_backup() {
     sync_all_homelab_permissions >/dev/null 2>&1 || true
     sync_user_domain_rulesets >/dev/null 2>&1 || true
     sync_dns_firewall "yes" "keep" >/dev/null 2>&1 || true
-    service_ctl sing-box start || true
+    setup_init_scripts >/dev/null 2>&1 || service_ctl "$(get_active_core_service)" start || true
     service_ctl adguardhome start || true
+
+    _RST_W=0
+    while [ "$_RST_W" -lt 8 ]; do
+        if curl -fsS -m 1 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        _RST_W=$((_RST_W + 1))
+    done
+    core_reload_api >/dev/null 2>&1 || true
 
     # Перезапуск активных модулей Homelab после восстановления
     if [ -f "$HOMELAB_STATE" ]; then
@@ -119,14 +135,16 @@ restore_unified_backup() {
             fi
         done < "$HOMELAB_STATE"
     fi
+    if is_module_enabled "samba"; then
+        if [ -x /etc/init.d/wsdd ]; then
+            service_ctl wsdd enable
+            service_ctl wsdd restart || true
+        fi
+        if [ -x /etc/init.d/avahi-daemon ]; then
+            service_ctl avahi-daemon restart || true
+        fi
+    fi
     build_pki_portal >/dev/null 2>&1 || true
     echo "${C_GRN}[✓] Система (Шлюз + Homelab + БД SQLite + локальный CA Caddy) успешно восстановлена!${C_RES}"
     return 0
 }
-
-
-# ==============================================================================
-# Диагностика Homelab, Мастер установки, Меню Homelab (Пункт 13) и Главное меню
-# ==============================================================================
-
-# Сводная таблица всех модулей Homelab (реальный статус демона OpenRC, порт и домен)

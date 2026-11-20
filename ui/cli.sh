@@ -2,6 +2,7 @@
 # Маршрутизация аргументов командной строки (CLI: `gateway <command>`)
 # ==============================================================================
 gateway_cli_dispatch() {
+    load_gateway_env >/dev/null 2>&1 || true
     case "${1:-}" in
     autoupdate)
         run_autoupdate
@@ -12,7 +13,7 @@ gateway_cli_dispatch() {
     check|verify|lint)
         run_gateway_quick_check
         ;;
-    test|status)
+    test|status|selftest)
         run_self_test
         ;;
     doctor|fix|heal|repair)
@@ -33,10 +34,10 @@ gateway_cli_dispatch() {
     restart|reload)
         backup_gateway_state
         load_gateway_env
-        if apply_and_verify_singbox "CLI: Пересборка конфига и перезапуск шлюза"; then
+        if apply_and_verify_core "CLI: Пересборка конфига и перезапуск шлюза"; then
             conntrack -F >/dev/null 2>&1 || true
             service_ctl adguardhome restart
-            ui_ok_msg "Таблица conntrack сброшена, службы Sing-Box и AdGuard Home перезапущены."
+            ui_ok_msg "Таблица conntrack сброшена, службы $(get_active_core_name) и AdGuard Home перезапущены."
         fi
         ;;
     update|upgrade)
@@ -50,7 +51,35 @@ gateway_cli_dispatch() {
         esac
         ;;
     logs|log)
-        show_service_logs_cli "${2:-sing-box}" "${3:-45}"
+        show_service_logs_cli "${2:-core}" "${3:-45}"
+        ;;
+    core|engine)
+        case "${2:-}" in
+            status)
+                load_gateway_env
+                echo "Активное ядро: $(get_active_core_name) ($(get_active_core_version)) | Интерфейс: ${CORE_TUN_IF}"
+                ;;
+            singbox|sing-box|sb|mihomo|clash|meta)
+                switch_core_engine "$2" || return $?
+                ;;
+            *)
+                prompt_core_and_ui_menu
+                ;;
+        esac
+        ;;
+    ui|panel|dashboard)
+        case "${2:-}" in
+            status)
+                load_gateway_env
+                echo "Активная веб-панель: $(get_active_ui_name) (http://$(get_current_lan_ip):9090/ui/)"
+                ;;
+            zashboard|zash|zb|metacubexd|metacube|xd)
+                switch_web_ui "$2" || return $?
+                ;;
+            *)
+                prompt_core_and_ui_menu
+                ;;
+        esac
         ;;
     proxy)
         case "${2:-}" in
@@ -97,11 +126,7 @@ gateway_cli_dispatch() {
                 ;;
             duckdns|setup)
                 if [ -n "${3:-}" ] && [ -n "${4:-}" ]; then
-                    if issue_duckdns_cert "$3" "$4"; then
-                        sync_caddy_main_config
-                        reload_caddy_safe
-                        sync_agh_homelab_rewrites
-                    fi
+                    issue_duckdns_cert "$3" "$4" || return $?
                 else
                     prompt_ssl_management_menu
                 fi
@@ -212,11 +237,34 @@ gateway_cli_dispatch() {
             telegram) [ -f "$BACKUP_ARCHIVE" ] || create_unified_backup "no"; send_telegram_backup "$BACKUP_ARCHIVE" ;;
         esac
         ;;
+    killswitch|kill-switch|ks)
+        case "${2:-status}" in
+            on|enable|yes|1)
+                sync_dns_firewall "yes" "yes"
+                ui_ok_msg "Аппаратный Kill-Switch (nftables) ВКЛЮЧЕН."
+                ;;
+            off|disable|no|0)
+                sync_dns_firewall "yes" "no"
+                ui_ok_msg "Аппаратный Kill-Switch (nftables) ВЫКЛЮЧЕН."
+                ;;
+            status)
+                if is_killswitch_enabled; then
+                    echo "Kill-Switch: ВКЛЮЧЕН (строгая блокировка трафика мимо ${CORE_TUN_IF})"
+                else
+                    echo "Kill-Switch: ВЫКЛЮЧЕН"
+                fi
+                ;;
+            *)
+                echo "Использование: gw killswitch [on|off|status]"
+                return 1
+                ;;
+        esac
+        ;;
     help|--help|-h)
         print_gateway_cli_help
         ;;
     *)
-        if [ ! -f "$SB_CONF" ]; then
+        if [ ! -f "$SB_CONF" ] && [ ! -f "$MIHOMO_CONF" ]; then
             run_installer
         else
             show_menu

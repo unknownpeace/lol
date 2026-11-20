@@ -57,6 +57,7 @@ check_and_recover_power_loss_state() {
     if [ -d "$STATE_BAK_DIR" ]; then
         for CRIT_F in \
             "${SB_CONF}:config.json" \
+            "${MIHOMO_CONF}:config.yaml" \
             "${SB_ENV}:gateway.env" \
             "${HOMELAB_ENV}:homelab.env" \
             "${CUSTOM_NODES_FILE}:my_nodes.yaml" \
@@ -66,6 +67,7 @@ check_and_recover_power_loss_state() {
             DEST_P="${CRIT_F%:*}"
             BAK_N="${CRIT_F#*:}"
             if [ ! -s "$DEST_P" ] && [ -s "${STATE_BAK_DIR}/${BAK_N}" ]; then
+                mkdir -p "$(dirname "$DEST_P")" 2>/dev/null || true
                 cp -f "${STATE_BAK_DIR}/${BAK_N}" "$DEST_P" 2>/dev/null || true
                 RECOVERED_ANY="yes"
             fi
@@ -73,6 +75,12 @@ check_and_recover_power_loss_state() {
         if [ -f "$SB_CONF" ] && [ -x /usr/bin/sing-box ] && ! check_singbox_config; then
             if [ -s "${STATE_BAK_DIR}/config.json" ]; then
                 cp -f "${STATE_BAK_DIR}/config.json" "$SB_CONF" 2>/dev/null || true
+                RECOVERED_ANY="yes"
+            fi
+        fi
+        if [ -f "$MIHOMO_CONF" ] && [ -x /usr/bin/mihomo ] && ! check_mihomo_config; then
+            if [ -s "${STATE_BAK_DIR}/config.yaml" ]; then
+                cp -f "${STATE_BAK_DIR}/config.yaml" "$MIHOMO_CONF" 2>/dev/null || true
                 RECOVERED_ANY="yes"
             fi
         fi

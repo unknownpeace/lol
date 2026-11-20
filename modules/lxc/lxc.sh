@@ -294,7 +294,6 @@ kali current
 mint wilma
 nixos 26.05
 opensuse tumbleweed
-openwrt 25.12
 rockylinux 9
 ubuntu jammy
 ubuntu noble
@@ -364,7 +363,7 @@ FALLBACK_EOF
     STATIC_DNS=""
     if [ "$IP_MODE_CHOICE" = "2" ]; then
         DEFAULT_GW="10.0.3.1"
-        [ "$NET_CHOICE" = "2" ] && DEFAULT_GW="$(get_current_lan_ip | sed 's/\.[0-9]*$/.1/' 2>/dev/null || echo "192.168.1.1")"
+        [ "$NET_CHOICE" = "2" ] && DEFAULT_GW="$(get_current_lan_ip)"
         echo "Введите статический IPv4 с CIDR маской (например, $([ "$NET_CHOICE" = "2" ] && echo "192.168.1.150/24" || echo "10.0.3.50/24")):"
         read -r STATIC_IP
         echo "Введите шлюз по умолчанию [Enter для ${DEFAULT_GW}]:"

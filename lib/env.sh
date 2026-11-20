@@ -1,6 +1,10 @@
 check_singbox_config() {
-    ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true \
-        /usr/bin/sing-box check -c "$SB_CONF" -D "$SB_DIR" >/dev/null 2>&1
+    /usr/bin/sing-box check -c "$SB_CONF" -D "$SB_DIR" >/dev/null 2>&1
+}
+
+check_mihomo_config() {
+    [ -x /usr/bin/mihomo ] && [ -s "$MIHOMO_CONF" ] && \
+        SAFE_PATHS="${SB_DIR}:${MIHOMO_DIR}" /usr/bin/mihomo -t -d "$MIHOMO_DIR" -f "$MIHOMO_CONF" >/dev/null 2>&1
 }
 
 # Проверка 3 независимых слотов прокси: Слот 1 (Подписки HTTP), Слот 2 (my_nodes), Слот 3 (WARP + MASQUE)
@@ -47,14 +51,14 @@ is_killswitch_enabled() {
     [ -f "$ALPINE_NFT_CONF" ] && grep -q "#KILLSWITCH_ACTIVE" "$ALPINE_NFT_CONF" 2>/dev/null
 }
 
-# Проверка состояния DHCP-сервера на шлюзе (AdGuard Home или legacy dnsmasq)
+# Проверка состояния DHCP-сервера на шлюзе (AdGuard Home)
 is_dhcp_server_enabled() {
     if [ -f "$AGH_CONF" ]; then
         if awk '/^dhcp:/{in_dhcp=1; next} in_dhcp && /^[a-zA-Z0-9_]+:/{in_dhcp=0} in_dhcp && /^[[:space:]]*enabled:[[:space:]]*true/{found=1} END{exit !found}' "$AGH_CONF" 2>/dev/null; then
             return 0
         fi
     fi
-    [ -f "$ALPINE_DHCP_CONF" ] && pgrep dnsmasq >/dev/null 2>&1
+    return 1
 }
 
 # Формирование списка IP-исключений (bypass_devices.conf) для корректной работы DIRECT при включенном Kill-Switch

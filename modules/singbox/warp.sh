@@ -37,7 +37,7 @@ init_user_lists() {
     chmod 755 "$HOMELAB_LIB_DIR" 2>/dev/null || true
     [ -f "$USER_DIRECT_FILE" ] || printf "+.localdomain\n+.lan\n" > "$USER_DIRECT_FILE"
     grep -qxF "+.lan" "$USER_DIRECT_FILE" 2>/dev/null || echo "+.lan" >> "$USER_DIRECT_FILE"
-    [ -f "$USER_PROXY_FILE" ] || echo "+.chatgpt.com" > "$USER_PROXY_FILE"
+    [ -f "$USER_PROXY_FILE" ] || : > "$USER_PROXY_FILE"
     [ -f "$USER_BYPASS_IPS" ] || : > "$USER_BYPASS_IPS"
     [ -f "$USER_FORCE_PROXY_IPS" ] || : > "$USER_FORCE_PROXY_IPS"
     [ -s "$CUSTOM_NODES_FILE" ] || echo "proxies: []" > "$CUSTOM_NODES_FILE"
@@ -412,7 +412,7 @@ generate_amnezia_warp() {
       "auth_token": "${REG_TOKEN:-}",
       "license_key": "${WARP_LICENSE:-}"
     },
-    "address": "${CF_IP1:-162.159.198.2}",
+    "address": "162.159.198.2",
     "port": 443,
     "udp_timeout": "5m0s",
     "udp_keepalive_period": "30s",
@@ -433,27 +433,6 @@ WARP_EOF
     mv -f "${WARP_NODES_FILE}.tmp.$$" "$WARP_NODES_FILE"
     chmod 600 "$WARP_NODES_FILE" 2>/dev/null || true
     echo "${C_GRN}[✓] Гибридный пул WARP 2.0 (4 ноды UDP AWG: ${EP1}, ${EP2}, ${EP3}, ${EP4} + 1 нода TCP MASQUE H2) создан!${C_RES}"
-    return 0
-}
-
-# Горячая перезагрузка всех активных провайдеров и мгновенный выбор лучшей ноды в Авто
-reload_singbox_api() {
-    if ! pgrep sing-box >/dev/null 2>&1; then
-        return 0
-    fi
-    load_gateway_env
-    P_LIST=""
-    if [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
-        P_LIST=$(jq -r '.providers[]?.tag // empty' "$SB_CONF" 2>/dev/null || true)
-    fi
-    [ -z "$P_LIST" ] && P_LIST="custom_sub custom_sub_2 custom_sub_3 my_nodes"
-
-    for P_TAG in $P_LIST; do
-        curl -fsS -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
-            "http://127.0.0.1:9090/providers/proxies/${P_TAG}" >/dev/null 2>&1 || true
-    done
-    curl -g -fsS --connect-timeout 2 -m 7 -H "Authorization: Bearer ${ADMIN_PASS}" \
-        "http://127.0.0.1:9090/group/%E2%9A%A1%20%D0%90%D0%B2%D1%82%D0%BE%20%28%D0%A1%D0%B0%D0%BC%D1%8B%D0%B9%20%D0%B1%D1%8B%D1%81%D1%82%D1%80%D1%8B%D0%B9%29/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=6000" >/dev/null 2>&1 || true
     return 0
 }
 

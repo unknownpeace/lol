@@ -136,6 +136,7 @@ run_installer() {
         fi
 
         LAN_IP_DETECTED=$(get_current_lan_ip)
+        SAVED_LAN_IP="$LAN_IP_DETECTED"
         if [ -z "${TARGET_LAN_IP:-}" ] || [ "$TARGET_LAN_IP" = "auto" ]; then
             TARGET_LAN_IP="$LAN_IP_DETECTED"
         fi
@@ -143,8 +144,8 @@ run_installer() {
             TARGET_LAN_IP="$LAN_IP_DETECTED"
         fi
 
-        GW_IP_DETECTED=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -n 1)
-        [ -z "$GW_IP_DETECTED" ] && GW_IP_DETECTED="${TARGET_LAN_IP%.*}.1"
+        GW_IP_DETECTED=$(get_default_router_ip)
+        [ -z "$GW_IP_DETECTED" ] && GW_IP_DETECTED="${DEFAULT_ROUTER_IP:-192.168.1.5}"
         if [ -z "${GW_IP:-}" ] || [ "$GW_IP" = "auto" ]; then
             GW_IP="$GW_IP_DETECTED"
         fi
@@ -160,6 +161,15 @@ run_installer() {
         fi
         SMB_USER="$AGH_USER"
         SMB_PASS="$ADMIN_PASS"
+
+        case "${CORE_ENGINE:-singbox}" in
+            mihomo|clash|meta|2) CORE_ENGINE="mihomo" ;;
+            *) CORE_ENGINE="singbox" ;;
+        esac
+        case "${WEB_UI:-zashboard}" in
+            metacubexd|metacube|xd|2) WEB_UI="metacubexd" ;;
+            *) WEB_UI="zashboard" ;;
+        esac
 
         case "${ENABLE_AUTOUPDATE:-no}" in
             [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа]) ENABLE_AU="yes" ;;
@@ -223,7 +233,7 @@ run_installer() {
                     USE_INITIAL_WARP="yes"
                     ;;
                 *)
-                    echo "Бро я не буду этого делать без подписки или ключа ,_."
+                    echo "Не указана подписка, ключ или WARP. Установка отменена."
                     exit 1
                     ;;
             esac
@@ -260,7 +270,7 @@ run_installer() {
         if [ -n "$SAVED_GW_IP" ] && [ "$SAVED_GW_IP" != "$TARGET_LAN_IP" ]; then
             printf "Введите IP основного роутера [Enter = %s]: " "$SAVED_GW_IP"
         else
-            printf "Введите IP-адрес основного роутера (отличный от %s, например %s.1): " "$TARGET_LAN_IP" "${TARGET_LAN_IP%.*}"
+            printf "Введите IP-адрес основного роутера (отличный от %s, например %s): " "$TARGET_LAN_IP" "${DEFAULT_ROUTER_IP:-192.168.1.5}"
         fi
         read -r INPUT_GW_IP < /dev/tty || true
         INPUT_GW_IP=$(printf "%s" "$INPUT_GW_IP" | tr -d ' \t\r\n')
@@ -306,13 +316,39 @@ run_installer() {
         else
             DEF_AU_CHAR="n"
         fi
-        printf "Включить автообновление ядер и панелей в 04:00 (Бро я думаю ты осознаешь последствия ,_,)? (y/n) [Enter = %s]: " "$DEF_AU_CHAR"
+        printf "Включить ночное автообновление ядер и панелей в 04:00? (y/n) [Enter = %s]: " "$DEF_AU_CHAR"
         read -r INPUT_AU_ANS < /dev/tty || true
         INPUT_AU_ANS=$(printf "%s" "$INPUT_AU_ANS" | tr -d ' \t\r\n')
         [ -z "$INPUT_AU_ANS" ] && INPUT_AU_ANS="$DEF_AU_CHAR"
         case "$INPUT_AU_ANS" in
             [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа]) ENABLE_AU="yes" ;;
             *) ENABLE_AU="no" ;;
+        esac
+
+        # 4.5. Выбор ядра шлюза и веб-панели управления
+        echo ""
+        echo "Выберите ядро маршрутизации шлюза:"
+        echo "  1) Sing-Box Extended (по умолчанию — JSON + WARP MASQUE H2 + WireGuard)"
+        echo "  2) Mihomo (Clash Meta — нативный Clash YAML + правила .mrs)"
+        printf "Ваш выбор ядра [1-2, Enter = %s]: " "$([ "${CORE_ENGINE:-singbox}" = "mihomo" ] && echo 2 || echo 1)"
+        read -r IN_CORE < /dev/tty || true
+        IN_CORE=$(printf "%s" "$IN_CORE" | tr -d ' \t\r\n')
+        [ -z "$IN_CORE" ] && IN_CORE=$([ "${CORE_ENGINE:-singbox}" = "mihomo" ] && echo 2 || echo 1)
+        case "$IN_CORE" in
+            2|mihomo|clash|meta) CORE_ENGINE="mihomo" ;;
+            *) CORE_ENGINE="singbox" ;;
+        esac
+
+        echo "Выберите веб-панель управления (:9090/ui):"
+        echo "  1) Zashboard (по умолчанию — современный интерфейс)"
+        echo "  2) MetaCubeXD (классическая легкая панель Clash Meta)"
+        printf "Ваш выбор панели [1-2, Enter = %s]: " "$([ "${WEB_UI:-zashboard}" = "metacubexd" ] && echo 2 || echo 1)"
+        read -r IN_UI < /dev/tty || true
+        IN_UI=$(printf "%s" "$IN_UI" | tr -d ' \t\r\n')
+        [ -z "$IN_UI" ] && IN_UI=$([ "${WEB_UI:-zashboard}" = "metacubexd" ] && echo 2 || echo 1)
+        case "$IN_UI" in
+            2|metacubexd|metacube|xd) WEB_UI="metacubexd" ;;
+            *) WEB_UI="zashboard" ;;
         esac
 
         # 5. Запрос выбора модулей Homelab сразу на старте (чтобы установка шла полностью без остановок)
@@ -336,7 +372,8 @@ run_installer() {
     ui_box_sep
     echo "Итоговая конфигурация развертывания:"
     echo " - ОС и Память:     ${OS_NAME} | ${TOTAL_RAM_MB} МБ RAM"
-    echo " - Ядро шлюза:      shtorm-7/sing-box-extended (${SB_ARCH}, лимит ${SB_GOMEMLIMIT})"
+    echo " - Ядро шлюза:      $(get_active_core_name) (${SB_ARCH}, лимит ${SB_GOMEMLIMIT})"
+    echo " - Веб-панель UI:   $(get_active_ui_name)"
     echo " - IP сервера (LAN):${TARGET_LAN_IP} (интерфейс $(get_lan_ifname), маска /24)"
     echo " - Основной роутер: ${GW_IP}"
     echo " - DNS и Домены:    AdGuard Home (0.0.0.0:53 + *.lan) -> Sing-Box (127.0.0.1:1053)"
@@ -399,12 +436,16 @@ net.ipv4.ip_forward = 1
 net.ipv4.conf.all.forwarding = 1
 net.ipv4.conf.all.rp_filter = 0
 net.ipv4.conf.default.rp_filter = 0
+net.ipv4.conf.${LAN_IF_INIT}.rp_filter = 0
 net.ipv4.conf.all.send_redirects = 0
 net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.${LAN_IF_INIT}.send_redirects = 0
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.${LAN_IF_INIT}.accept_redirects = 0
 net.ipv4.conf.all.secure_redirects = 0
 net.ipv4.conf.default.secure_redirects = 0
+net.ipv4.conf.${LAN_IF_INIT}.secure_redirects = 0
 net.ipv6.conf.all.disable_ipv6 = 1
 net.ipv6.conf.default.disable_ipv6 = 1
 net.ipv6.conf.lo.disable_ipv6 = 0
@@ -417,6 +458,7 @@ net.netfilter.nf_conntrack_max = ${SYS_CONNTRACK_MAX}
 net.netfilter.nf_conntrack_tcp_timeout_established = 7200
 net.netfilter.nf_conntrack_udp_timeout = 60
 net.netfilter.nf_conntrack_udp_timeout_stream = 180
+net.netfilter.nf_conntrack_tcp_be_liberal = 1
 net.ipv4.tcp_congestion_control = bbr
 fs.inotify.max_user_watches = 524288
 net.ipv4.ip_unprivileged_port_start = 0
@@ -429,17 +471,22 @@ SYS_EOF
         generate_amnezia_warp "${WARP_LICENSE:-}" || true
     fi
 
-    # ЭТАП 2: Загрузка/обновление ядер Sing-Box Extended и AdGuard Home
+    # ЭТАП 2: Сохранение выбранных параметров ядра/панели и загрузка/обновление ядер
+    save_gateway_env
     update_cores_only "no"
 
-    # ЭТАП 3: Генерация конфига Sing-Box Extended и установка веб-панели Zashboard
+    # ЭТАП 3: Генерация конфига активного ядра и установка выбранной веб-панели
     service_ctl sing-box stop
-    if [ ! -f "${SB_DIR}/ui/index.html" ]; then
-        install_zashboard_ui || true
+    service_ctl mihomo stop
+    CUR_UI_TYPE=$(get_active_ui)
+    INST_UI_TYPE=""
+    [ -f "$UI_TYPE_FILE" ] && INST_UI_TYPE=$(cat "$UI_TYPE_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
+    if [ ! -f "${UI_DIR}/index.html" ] || [ "$INST_UI_TYPE" != "$CUR_UI_TYPE" ]; then
+        install_web_ui "$CUR_UI_TYPE" || true
     else
-        echo "${C_GRN}[✓] Веб-панель Zashboard уже установлена.${C_RES}"
+        echo "${C_GRN}[✓] Веб-панель $(get_active_ui_name) уже установлена.${C_RES}"
     fi
-    generate_singbox_config
+    core_generate_config
 
     # ЭТАП 4: Настройка AdGuard Home с автоматической поддержкой локальных доменов *.lan
     echo "Генерация bcrypt-хэша пароля..."
@@ -516,6 +563,7 @@ dns:
   use_private_ptr_resolvers: true
   local_ptr_upstreams: [${GW_IP}:53]
   serve_plain_dns: true
+  ratelimit: 0
   pending_requests: { enabled: true }
 tls: { enabled: false }
 querylog: { enabled: true, interval: 24h, file_enabled: false }
@@ -524,8 +572,11 @@ filters:
   - { enabled: true, url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt, name: AdGuard DNS filter, id: 1 }
   - { enabled: true, url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt, name: AdAway Default Blocklist, id: 2 }
   - { enabled: true, url: https://filters.adtidy.org/extension/chromium/filters/1.txt, name: AdGuard Russian Filter, id: 3 }
-filtering: { protection_enabled: true, filtering_enabled: true }
-schema_version: 34
+filtering:
+  protection_enabled: true
+  filtering_enabled: true
+  rewrites: []
+schema_version: 35
 AGH_EOF
         sync_agh_homelab_rewrites "$CURRENT_IP"
         chmod 600 "$AGH_CONF" 2>/dev/null || true
@@ -607,16 +658,18 @@ nameserver 77.88.8.8"
     fi
 
     # ЭТАП 7: Итоговый Self-Test 2.0
-    reload_singbox_api
+    core_reload_api
     run_self_test
 
     ui_box_top "=================================================="
     echo "${C_GRN} Развертывание на ${OS_NAME} успешно завершено!${C_RES}"
+    echo " - Активное ядро:      $(get_active_core_name) ($(get_active_core_version))"
+    echo " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} / ${C_CYN}https://${DOM_PANEL}${C_RES} (http://${CURRENT_IP}:9090/ui)"
     echo " - IP-адрес сервера:   ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
     echo " - Основной роутер:    ${GW_IP}"
-    echo " - Панель Sing-Box:    ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} (http://${CURRENT_IP}:9090/ui)"
     echo " - Панель AdGuard:     ${C_CYN}https://${DOM_ADGUARD}${C_RES} (http://${CURRENT_IP}:3000)"
     echo " - Портал сертификата: ${C_CYN}http://${DOM_CA}${C_RES}"
+    echo " - Переключение ядра:  ${C_GRN}gw core [singbox|mihomo]${C_RES} │ Панели: ${C_GRN}gw ui [zashboard|metacubexd]${C_RES}"
     echo " - Быстрый вызов:      ${C_GRN}gw${C_RES} (или ${C_GRN}gateway${C_RES})"
     ui_box_top "=================================================="
     print_quick_access_card

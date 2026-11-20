@@ -1,6 +1,6 @@
 diagnose_failed_nodes() {
-    if ! pgrep sing-box >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-        echo "${C_RED}[X] Служба Sing-Box не запущена или не найден jq.${C_RES}"
+    if ! is_core_running || ! command -v jq >/dev/null 2>&1; then
+        echo "${C_RED}[X] Служба $(get_active_core_name) не запущена или не найден jq.${C_RES}"
         return 1
     fi
     load_gateway_env
@@ -14,7 +14,7 @@ diagnose_failed_nodes() {
     ui_box_top "🩺 Поштучная диагностика и оживление нод без пинга (⚡)"
     FAILED_LIST=$(printf "%s" "$API_JSON" | jq -r '
         .proxies | to_entries[]
-        | select(.value.type != "Selector" and .value.type != "URLTest" and .value.type != "Direct" and .value.type != "Reject" and .value.type != "Pass")
+        | select(.value.type != "Selector" and .value.type != "URLTest" and .value.type != "Direct" and .value.type != "Reject" and .value.type != "Pass" and .key != "⛔ Нет рабочих нод")
         | select(((.value.history // []) | if length > 0 then .[-1].delay else 0 end) == 0)
         | .key
     ' 2>/dev/null || true)
@@ -45,14 +45,14 @@ diagnose_failed_nodes() {
         fi
     done
     ui_box_sep
-    echo "${C_DIM}[i] Все оживленные ноды уже обновили свой пинг в панели Zashboard!${C_RES}"
+    echo "${C_DIM}[i] Все оживленные ноды уже обновили свой пинг в панели $(get_active_ui_name)!${C_RES}"
     return 0
 }
 
 # Мини-пульт управления группами и нодами прямо из SSH-терминала (через Clash API)
 manage_nodes_cli_menu() {
-    if ! pgrep sing-box >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-        echo "${C_RED}[X] Служба Sing-Box не запущена или не найден jq.${C_RES}"
+    if ! is_core_running || ! command -v jq >/dev/null 2>&1; then
+        echo "${C_RED}[X] Служба $(get_active_core_name) не запущена или не найден jq.${C_RES}"
         return 1
     fi
     load_gateway_env
@@ -66,13 +66,15 @@ manage_nodes_cli_menu() {
 
         clear
         ui_box_top "⚡ Мини-пульт управления группами и нодами (SSH)"
-        AUTO_NOW=$(printf "%s" "$API_JSON" | jq -r '.proxies["⚡ Авто (Самый быстрый)"].now // "не выбрана"')
-        echo " • Авто-выбор сейчас: ${C_GRN}${AUTO_NOW}${C_RES}"
+        for GRP_M in "⚡ Авто (Самый быстрый)" "🤖 Авто-ИИ" "🇩🇪 Авто-DE" "🇺🇸 Авто-US" "🎮 Авто-Гейминг"; do
+            M_NOW=$(printf "%s" "$API_JSON" | jq -r --arg g "$GRP_M" '.proxies[$g].now // empty' 2>/dev/null)
+            [ -n "$M_NOW" ] && printf " • %-24s -> %s%s%s\n" "$GRP_M" "$C_GRN" "$M_NOW" "$C_RES"
+        done
         ui_box_sep
         echo "${C_BLD}Топ-8 самых быстрых нод по замеру пинга:${C_RES}"
         printf "%s" "$API_JSON" | jq -r '
             [.proxies | to_entries[]
-             | select(.value.type != "Selector" and .value.type != "URLTest" and .value.type != "Direct" and .value.type != "Reject" and .value.type != "Pass")
+             | select(.value.type != "Selector" and .value.type != "URLTest" and .value.type != "Direct" and .value.type != "Reject" and .value.type != "Pass" and .key != "⛔ Нет рабочих нод")
              | {name: .key, type: .value.type, delay: ((.value.history // []) | if length > 0 then .[-1].delay else 0 end)}
              | select(.delay > 0)]
             | sort_by(.delay) | .[:8] | to_entries[]
@@ -100,7 +102,7 @@ manage_nodes_cli_menu() {
         echo "  ${C_CYN}[r]${C_RES} Запустить общий замер пинга всех нод"
         echo "  ${C_CYN}[0]${C_RES} Назад"
         printf "Выберите номер группы [1-%d / d / r / 0]: " "$G_IDX"
-        read -r G_SEL < /dev/tty || true
+        read -r G_SEL < /dev/tty || break
         G_SEL=$(printf "%s" "$G_SEL" | tr -d ' \t\r\n')
 
         case "$G_SEL" in
@@ -111,11 +113,11 @@ manage_nodes_cli_menu() {
             d|D)
                 diagnose_failed_nodes || true
                 printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty
+                read -r _ < /dev/tty || true
                 ;;
             r|R)
                 echo "Запуск тестирования задержки всех нод..."
-                reload_singbox_api
+                core_reload_api
                 sleep 1
                 ;;
             *[!0-9]*)

@@ -1,26 +1,49 @@
-install_zashboard_ui() {
-    TARGET_UI_VER="${1:-}"
-    [ -z "$TARGET_UI_VER" ] && TARGET_UI_VER=$(fetch_latest_github_tag "$UI_REPO") || true
-    case "$TARGET_UI_VER" in v*) ;; *) TARGET_UI_VER="v3.30.0" ;; esac
+install_singbox_binary() {
+    detect_os
+    check_github_mirror
 
-    echo "Загрузка и установка веб-панели Zashboard ${TARGET_UI_VER}..."
-    rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
-    mkdir -p /tmp/sb_ui_extract
+    SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
+    case "$SB_TAG" in v*) ;; *) SB_TAG="v1.14.3-extended-2.7.3" ;; esac
+    LATEST_SB_TAG="$SB_TAG"
+    SB_VER_NO_V="${SB_TAG#v}"
 
-    if download_file "$UI_TAR_URL" "/tmp/sb_ui.tar.gz" && tar -xzf /tmp/sb_ui.tar.gz -C /tmp/sb_ui_extract 2>/dev/null; then
-        rm -rf "${SB_DIR}/ui"
-        mkdir -p "${SB_DIR}/ui"
-        cp -rf /tmp/sb_ui_extract/*/* "${SB_DIR}/ui/" 2>/dev/null || cp -rf /tmp/sb_ui_extract/* "${SB_DIR}/ui/"
-        [ -n "$TARGET_UI_VER" ] && echo "$TARGET_UI_VER" > "$UI_VER_FILE" || true
-        LATEST_UI_TAG="$TARGET_UI_VER"
-        rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
-        echo "${C_GRN}[✓] Веб-панель Zashboard ${TARGET_UI_VER} успешно установлена в ${SB_DIR}/ui.${C_RES}"
-        return 0
-    else
-        rm -rf /tmp/sb_ui.tar.gz /tmp/sb_ui_extract
-        echo "${C_RED}[X] Ошибка загрузки или распаковки веб-панели Zashboard!${C_RES}"
-        return 1
+    INSTALLED_SB_VER=""
+    if [ -x /usr/bin/sing-box ]; then
+        RAW_V=$(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || true)
+        [ -n "$RAW_V" ] && INSTALLED_SB_VER="v${RAW_V#v}" || true
     fi
+
+    if [ "$INSTALLED_SB_VER" = "$SB_TAG" ]; then
+        echo "${C_GRN}[✓] Ядро Sing-Box Extended ${INSTALLED_SB_VER} (${SB_ARCH}) актуально.${C_RES}"
+        return 0
+    fi
+
+    echo "Загрузка Sing-Box Extended ${SB_TAG} (${SB_ARCH})..."
+    rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+    SB_ASSET="sing-box-${SB_VER_NO_V}-linux-${SB_ARCH}.tar.gz"
+    SB_URL="https://github.com/shtorm-7/sing-box-extended/releases/download/${SB_TAG}/${SB_ASSET}"
+    if download_file "$SB_URL" "/tmp/sing-box.tar.gz" && verify_github_asset_sha256 "shtorm-7/sing-box-extended" "$SB_ASSET" "/tmp/sing-box.tar.gz"; then
+        mkdir -p /tmp/sb_extract
+        if tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb_extract 2>/dev/null; then
+            SB_BIN=$(find /tmp/sb_extract -type f -name "sing-box" | head -n 1)
+            if [ -n "$SB_BIN" ] && [ -f "$SB_BIN" ]; then
+                chmod +x "$SB_BIN"
+                if "$SB_BIN" version >/dev/null 2>&1; then
+                    service_ctl sing-box stop
+                    mv -f "$SB_BIN" /usr/bin/sing-box
+                    rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+                    echo "${C_GRN}[✓] Sing-Box Extended безопасно обновлен до ${SB_TAG}.${C_RES}"
+                    return 0
+                else
+                    echo "${C_RED}[X] Ошибка: скачанный бинарник sing-box поврежден, оставлена текущая версия.${C_RES}"
+                fi
+            fi
+        fi
+    else
+        echo "${C_RED}[X] Не удалось скачать Sing-Box Extended ${SB_TAG}.${C_RES}"
+    fi
+    rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+    [ -x /usr/bin/sing-box ] && return 0 || return 1
 }
 
 # Криптографическая проверка SHA-256 скачанного архива через GitHub Releases API
@@ -47,54 +70,21 @@ verify_github_asset_sha256() {
     return 0
 }
 
-# Атомарное обновление бинарников Sing-Box Extended, AdGuard Home и Zashboard (с верификацией SHA-256)
+# Атомарное обновление активного ядра (Sing-Box Extended / Mihomo), AdGuard Home и выбранной веб-панели (SHA-256)
 update_cores_only() {
     CHECK_UI_UPDATE="${1:-no}"
     detect_os
     check_github_mirror
+    load_gateway_env
 
-    SB_TAG=$(fetch_latest_github_tag "shtorm-7/sing-box-extended")
-    case "$SB_TAG" in v*) ;; *) SB_TAG="v1.14.3-extended-2.7.3" ;; esac
-    LATEST_SB_TAG="$SB_TAG"
-    SB_VER_NO_V="${SB_TAG#v}"
-
-    INSTALLED_SB_VER=""
-    if [ -x /usr/bin/sing-box ]; then
-        RAW_V=$(/usr/bin/sing-box version 2>/dev/null | head -n 1 | awk '{print $3}' || true)
-        [ -n "$RAW_V" ] && INSTALLED_SB_VER="v${RAW_V#v}" || true
-    fi
-
-    if [ "$INSTALLED_SB_VER" = "$SB_TAG" ]; then
-        echo "${C_GRN}[✓] Ядро Sing-Box Extended ${INSTALLED_SB_VER} (${SB_ARCH}) актуально.${C_RES}"
+    if [ "$(get_active_core)" = "mihomo" ]; then
+        install_mihomo_binary || true
     else
-        echo "Загрузка Sing-Box Extended ${SB_TAG} (${SB_ARCH})..."
-        rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
-        SB_ASSET="sing-box-${SB_VER_NO_V}-linux-${SB_ARCH}.tar.gz"
-        SB_URL="https://github.com/shtorm-7/sing-box-extended/releases/download/${SB_TAG}/${SB_ASSET}"
-        if download_file "$SB_URL" "/tmp/sing-box.tar.gz" && verify_github_asset_sha256 "shtorm-7/sing-box-extended" "$SB_ASSET" "/tmp/sing-box.tar.gz"; then
-            mkdir -p /tmp/sb_extract
-            if tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb_extract 2>/dev/null; then
-                SB_BIN=$(find /tmp/sb_extract -type f -name "sing-box" | head -n 1)
-                if [ -n "$SB_BIN" ] && [ -f "$SB_BIN" ]; then
-                    chmod +x "$SB_BIN"
-                    if "$SB_BIN" version >/dev/null 2>&1; then
-                        service_ctl sing-box stop
-                        mv -f "$SB_BIN" /usr/bin/sing-box
-                        echo "${C_GRN}[✓] Sing-Box Extended безопасно обновлен до ${SB_TAG}.${C_RES}"
-                    else
-                        echo "${C_RED}[X] Ошибка: скачанный бинарник sing-box поврежден, оставлена текущая версия.${C_RES}"
-                    fi
-                fi
-            fi
-            rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
-        else
-            rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
-            echo "${C_RED}[X] Не удалось скачать Sing-Box Extended ${SB_TAG}.${C_RES}"
-        fi
+        install_singbox_binary || true
     fi
 
     AGH_TAG=$(fetch_latest_github_tag "AdguardTeam/AdGuardHome")
-    case "$AGH_TAG" in v*) ;; *) AGH_TAG="v0.107.60" ;; esac
+    case "$AGH_TAG" in v*) ;; *) AGH_TAG="v1.0.0" ;; esac
     LATEST_AGH_TAG="$AGH_TAG"
     INSTALLED_AGH_VER=""
     if [ -x /usr/bin/AdGuardHome ]; then
@@ -128,21 +118,31 @@ update_cores_only() {
     fi
 
     if [ "$CHECK_UI_UPDATE" = "yes" ]; then
-        UI_TAG=$(fetch_latest_github_tag "$UI_REPO")
-        case "$UI_TAG" in v*) ;; *) UI_TAG="v3.30.0" ;; esac
+        CUR_UI_T=$(get_active_ui)
+        CUR_UI_N=$(get_active_ui_name)
+        if [ "$CUR_UI_T" = "metacubexd" ]; then
+            UI_TAG=$(fetch_latest_github_tag "$METACUBEXD_REPO")
+            case "$UI_TAG" in v*) ;; *) UI_TAG="v1.275.2" ;; esac
+        else
+            UI_TAG=$(fetch_latest_github_tag "$ZASHBOARD_REPO")
+            case "$UI_TAG" in v*) ;; *) UI_TAG="v3.30.0" ;; esac
+        fi
         LATEST_UI_TAG="$UI_TAG"
         INSTALLED_UI_VER=""
+        INSTALLED_UI_TYPE=""
         [ -f "$UI_VER_FILE" ] && INSTALLED_UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
+        [ -f "$UI_TYPE_FILE" ] && INSTALLED_UI_TYPE=$(cat "$UI_TYPE_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
 
-        if [ -f "${SB_DIR}/ui/index.html" ] && [ -n "$UI_TAG" ] && [ "$INSTALLED_UI_VER" = "$UI_TAG" ]; then
-            echo "${C_GRN}[✓] Веб-панель Zashboard ${INSTALLED_UI_VER} актуальна.${C_RES}"
+        if [ -f "${UI_DIR}/index.html" ] && [ "$INSTALLED_UI_TYPE" = "$CUR_UI_T" ] && [ -n "$UI_TAG" ] && [ "$INSTALLED_UI_VER" = "$UI_TAG" ]; then
+            echo "${C_GRN}[✓] Веб-панель ${CUR_UI_N} ${INSTALLED_UI_VER} актуальна.${C_RES}"
         else
-            install_zashboard_ui "$UI_TAG" || true
+            install_web_ui "$CUR_UI_T" "$UI_TAG" || true
         fi
     fi
 
     cat << VC_EOF > "$VER_CACHE_FILE" 2>/dev/null || true
 LATEST_SB_TAG='${LATEST_SB_TAG}'
+LATEST_MIHOMO_TAG='${LATEST_MIHOMO_TAG}'
 LATEST_AGH_TAG='${LATEST_AGH_TAG}'
 LATEST_UI_TAG='${LATEST_UI_TAG}'
 VC_EOF
@@ -152,6 +152,8 @@ VC_EOF
 # Создание системных служб автозапуска Alpine OpenRC (с защитой сетевого шлюза от OOM-killer)
 setup_init_scripts() {
     calc_hardware_limits
+    load_gateway_env || true
+    ACT_CORE_S=$(get_active_core)
 
     cat << INIT_SB_ALP > /etc/init.d/sing-box
 #!/sbin/openrc-run
@@ -169,8 +171,6 @@ respawn_max=10
 retry="TERM/10/KILL/5"
 export GOGC=50
 export GOMEMLIMIT=${SB_GOMEMLIMIT}
-export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
-export ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS=true
 
 depend() {
     need net
@@ -184,6 +184,14 @@ start_pre() {
 }
 INIT_SB_ALP
     chmod +x /etc/init.d/sing-box
+
+    setup_mihomo_init_script
+
+    if [ "$ACT_CORE_S" = "mihomo" ]; then
+        AFTER_CORE="mihomo"
+    else
+        AFTER_CORE="sing-box"
+    fi
 
     cat << INIT_AGH_ALP > /etc/init.d/adguardhome
 #!/sbin/openrc-run
@@ -202,16 +210,34 @@ export GOMEMLIMIT=${AGH_GOMEMLIMIT}
 
 depend() {
     need net
-    after sing-box
+    after ${AFTER_CORE}
 }
 INIT_AGH_ALP
     chmod +x /etc/init.d/adguardhome
 
-    service_ctl sing-box enable
-    service_ctl sing-box restart
+    if [ "$ACT_CORE_S" = "mihomo" ]; then
+        service_ctl sing-box stop
+        service_ctl sing-box disable
+        service_ctl mihomo enable
+        service_ctl mihomo restart
+    else
+        service_ctl mihomo stop
+        service_ctl mihomo disable
+        service_ctl sing-box enable
+        service_ctl sing-box restart
+    fi
     sleep 2
     service_ctl adguardhome enable
     service_ctl adguardhome restart
+
+    mkdir -p /etc/local.d
+    cat << 'BOOT_GUARD_EOF' > /etc/local.d/50-gateway-boot-guard.start
+#!/bin/sh
+# Немедленный запуск протокола восстановления после загрузки (питание, LUKS2, сеть)
+[ -x /usr/bin/gateway ] && /usr/bin/gateway watchdog >/dev/null 2>&1 &
+BOOT_GUARD_EOF
+    chmod +x /etc/local.d/50-gateway-boot-guard.start 2>/dev/null || true
+    rc-update add local default >/dev/null 2>&1 || true
     return 0
 }
 

@@ -54,10 +54,18 @@ if [ -n "$BASH_VERSION" ]; then
         local cur prev
         cur="${COMP_WORDS[COMP_CWORD]}"
         prev="${COMP_WORDS[COMP_CWORD-1]}"
-        local commands="status test doctor restart reload update autoupdate watchdog check unlock lock eject safe-reboot safe-poweroff logs proxy domain ssl links storage disk homelab lxc backup passwd answers motd help"
+        local commands="status selftest test doctor restart reload core ui update autoupdate watchdog check unlock lock eject safe-reboot safe-poweroff logs proxy domain killswitch ssl links storage disk homelab lxc backup passwd answers motd help"
         case "$prev" in
             gateway|gw)
                 COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+                return 0
+                ;;
+            core|engine)
+                COMPREPLY=($(compgen -W "singbox mihomo status" -- "$cur"))
+                return 0
+                ;;
+            ui|panel|dashboard)
+                COMPREPLY=($(compgen -W "zashboard metacubexd status" -- "$cur"))
                 return 0
                 ;;
             lxc|container|containers)
@@ -70,6 +78,10 @@ if [ -n "$BASH_VERSION" ]; then
                 ;;
             domain|domains)
                 COMPREPLY=($(compgen -W "direct proxy test check" -- "$cur"))
+                return 0
+                ;;
+            killswitch|kill-switch|ks)
+                COMPREPLY=($(compgen -W "on off status" -- "$cur"))
                 return 0
                 ;;
             ssl|cert)

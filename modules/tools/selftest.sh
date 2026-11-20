@@ -2,29 +2,31 @@ run_self_test() {
     set +e
     detect_os
     ui_box_top "⚡ [SELF-TEST 2.0] МАТРИЦА ЗДОРОВЬЯ И ОТКЛИКА ШЛЮЗА (${OS_NAME})"
+    load_gateway_env
+    calc_hardware_limits
     WAIT_CNT=0
     while [ "$WAIT_CNT" -lt 10 ]; do
-        if pgrep sing-box >/dev/null 2>&1 && ip link show singbox-tun >/dev/null 2>&1; then
+        if is_core_running && ip link show "$CORE_TUN_IF" >/dev/null 2>&1; then
             break
         fi
         sleep 1
         WAIT_CNT=$((WAIT_CNT + 1))
     done
 
-    load_gateway_env
-    calc_hardware_limits
     LAN_IF_NOW=$(get_lan_ifname)
     is_dhcp_server_enabled && DHCP_ST="${C_GRN}● ВКЛ${C_RES}" || DHCP_ST="${C_DIM}○ ВЫКЛ${C_RES}"
     ui_box_row "Сеть сервера: ${C_BLD}[${OS_NAME} (${LAN_IF_NOW}): $(get_current_lan_ip)]${C_RES} ▸ [Роутер: ${GW_IP}] │ DHCP: ${DHCP_ST}"
+    ui_box_row "Активное ядро: ${C_GRN}$(get_active_core_name)${C_RES} ($(get_active_core_version)) │ Веб-панель: ${C_CYN}$(get_active_ui_name)${C_RES}"
     print_proxy_slots_report
 
     ui_box_sep "СОСТОЯНИЕ ЯДРА И СЕТЕВОГО СТЕКА"
-    SB_PID=$(pgrep sing-box 2>/dev/null | head -n 1 || true)
+    SB_PID=$(get_core_pid)
+    ACT_C_NAME=$(get_active_core_name)
     if [ -n "$SB_PID" ]; then
         SB_RSS=$(awk '/^VmRSS:/ {printf "%.1f МБ", $2/1024}' "/proc/${SB_PID}/status" 2>/dev/null || echo "активен")
-        ui_box_row "${C_GRN}[✔]${C_RES} Sing-Box Extended: ${C_GRN}● ЗАПУЩЕН${C_RES} (PID ${SB_PID}, ОЗУ: ${SB_RSS} / лимит ${SB_GOMEMLIMIT})"
+        ui_box_row "${C_GRN}[✔]${C_RES} ${ACT_C_NAME}: ${C_GRN}● ЗАПУЩЕН${C_RES} (PID ${SB_PID}, ОЗУ: ${SB_RSS} / лимит ${SB_GOMEMLIMIT})"
     else
-        ui_box_row "${C_RED}[✖] Sing-Box Extended: ОСТАНОВЛЕН (исправить: gateway doctor)${C_RES}"
+        ui_box_row "${C_RED}[✖] ${ACT_C_NAME}: ОСТАНОВЛЕН (исправить: gateway doctor)${C_RES}"
     fi
 
     AGH_PID=$(pgrep AdGuardHome 2>/dev/null | head -n 1 || true)
@@ -35,10 +37,22 @@ run_self_test() {
         ui_box_row "${C_RED}[✖] AdGuard Home (:53): ОСТАНОВЛЕН (исправить: gateway doctor)${C_RES}"
     fi
 
-    if ip link show singbox-tun >/dev/null 2>&1; then
-        ui_box_row "${C_GRN}[✔]${C_RES} Виртуальный интерфейс (singbox-tun): ${C_GRN}● АКТИВЕН${C_RES} (MTU 1492, mixed stack)"
+    if ip link show "$CORE_TUN_IF" >/dev/null 2>&1; then
+        TUN_MTU=$(ip link show "$CORE_TUN_IF" 2>/dev/null | sed -n 's/.*mtu \([0-9]*\).*/\1/p' | head -n 1)
+        TUN_STACK="system"
+        if [ "$(get_active_core)" = "mihomo" ] && [ -f "$MIHOMO_CONF" ]; then
+            TUN_STACK=$(sed -n '/^tun:/,/^[a-z]/ s/^[[:space:]]*stack:[[:space:]]*\([a-zA-Z]*\).*/\1/p' "$MIHOMO_CONF" 2>/dev/null | head -n 1)
+        elif [ -f "$SB_CONF" ]; then
+            if command -v jq >/dev/null 2>&1; then
+                TUN_STACK=$(jq -r '.inbounds[]? | select(.type=="tun") | .stack // "system"' "$SB_CONF" 2>/dev/null | head -n 1)
+            else
+                TUN_STACK=$(sed -n '/"type":[[:space:]]*"tun"/,/}/ s/.*"stack":[[:space:]]*"\([^"]*\)".*/\1/p' "$SB_CONF" 2>/dev/null | head -n 1)
+            fi
+        fi
+        [ -z "$TUN_STACK" ] && TUN_STACK="system" || true
+        ui_box_row "${C_GRN}[✔]${C_RES} Виртуальный интерфейс (${CORE_TUN_IF}): ${C_GRN}● АКТИВЕН${C_RES} (MTU ${TUN_MTU:-1400}, ${TUN_STACK} stack)"
     else
-        ui_box_row "${C_RED}[✖] Виртуальный интерфейс (singbox-tun): НЕ НАЙДЕН${C_RES}"
+        ui_box_row "${C_RED}[✖] Виртуальный интерфейс (${CORE_TUN_IF}): НЕ НАЙДЕН${C_RES}"
     fi
 
     RP_STAT=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo "unknown")
@@ -52,10 +66,31 @@ run_self_test() {
         ui_box_row "${C_GRN}[✔]${C_RES} Защита от утечек: Блок Type 65 (HTTPS/ECH), IPv6 Drop, DoT/DoQ 853 Reject и DNS 53 Redirect"
     fi
 
-    if [ -f "$SB_CONF" ] && [ -n "$SB_PID" ]; then
-        ui_box_sep "МАТРИЦА ЗАДЕРЖЕК (PING MATRIX)"
-        ACTIVE_NODE=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null | jq -r '.proxies["⚡ Авто (Самый быстрый)"].now // empty' 2>/dev/null)
-        [ -n "$ACTIVE_NODE" ] && ui_box_row "Активная нода (Авто): ${C_CYN}${C_BLD}${ACTIVE_NODE}${C_RES}"
+    if [ -f "$(get_active_core_conf)" ] && [ -n "$SB_PID" ]; then
+        ui_box_sep "МАТРИЦА ЗАДЕРЖЕК И ГРУПП (PING MATRIX)"
+        PX_JSON=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
+        if [ -n "$PX_JSON" ] && command -v jq >/dev/null 2>&1; then
+            for GRP_T in "⚡ Авто (Самый быстрый)" "🤖 Нейросети (ИИ)" "🧱 Roblox" "▶️ YouTube & Медиа" "🧲 Торренты" "🇩🇪 Германия" "🇺🇸 США" "🎮 Гейминг"; do
+                G_NOW=$(printf "%s" "$PX_JSON" | jq -r --arg g "$GRP_T" '
+                    .proxies[$g].now as $n |
+                    if ($n // "") == "" then ""
+                    elif (.proxies[$n].now // "") != "" then "\($n) -> \(.proxies[$n].now)"
+                    else $n end
+                ' 2>/dev/null)
+                [ -n "$G_NOW" ] && ui_box_row "▸ ${GRP_T}: ${C_CYN}${C_BLD}${G_NOW}${C_RES}"
+            done
+        fi
+        DNS_AI_IP=$(nslookup chatgpt.com 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 !~ /^127\./ {print $2; exit}')
+        DNS_RU_IP=$(nslookup ya.ru 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 !~ /^127\./ {print $2; exit}')
+        DNS_DDR_IP=$(nslookup -type=A _dns.resolver.arpa 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 !~ /^127\./ {print $2; exit}')
+        DNS_DOH_IP=$(nslookup -type=A use-application-dns.net 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 !~ /^127\./ {print $2; exit}')
+        if [ -z "$DNS_DDR_IP" ] && [ -z "$DNS_DOH_IP" ] && ! nslookup -type=A -port=1053 _dns.resolver.arpa 127.0.0.1 >/dev/null 2>&1; then
+            DNS_DDR_TXT="${C_GRN}OK${C_RES}"
+        else
+            DNS_DDR_TXT="${C_RED}FAIL${C_RES}"
+        fi
+        ui_box_row "▸ Anti-Leak DNS (:53): chatgpt=${C_CYN}${DNS_AI_IP:-n/a}${C_RES} │ ya.ru=${C_GRN}${DNS_RU_IP:-n/a}${C_RES} │ DDR Block=${DNS_DDR_TXT}"
+
         CF_TRACE=$(curl -fsS --curves X25519:P-256 --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
         if [ -n "$CF_TRACE" ]; then
             ui_box_row "Внешний выход (Cloudflare Trace): ${C_GRN}${CF_TRACE}${C_RES}"
@@ -86,15 +121,18 @@ run_gateway_quick_check() {
     load_gateway_env
     ui_box_top "🩺 НЕИНВАЗИВНЫЙ АУДИТ СИСТЕМЫ (GATEWAY CHECK)"
 
-    # 1. Синтаксис Sing-Box
-    if [ -x /usr/bin/sing-box ] && [ -s "$SB_CONF" ]; then
-        if /usr/bin/sing-box check -c "$SB_CONF" -D /etc/sing-box >/dev/null 2>&1; then
-            ui_box_row "${C_GRN}[✔]${C_RES} Sing-Box Config:      ${C_GRN}КОРРЕКТЕН${C_RES} (${SB_CONF})"
+    # 1. Синтаксис активного ядра (Sing-Box Extended / Mihomo)
+    CUR_C_BIN=$(get_active_core_bin)
+    CUR_C_CONF=$(get_active_core_conf)
+    CUR_C_NAME=$(get_active_core_name)
+    if [ -x "$CUR_C_BIN" ] && [ -s "$CUR_C_CONF" ]; then
+        if core_check_config; then
+            ui_box_row "${C_GRN}[✔]${C_RES} ${CUR_C_NAME} Config:  ${C_GRN}КОРРЕКТЕН${C_RES} (${CUR_C_CONF})"
         else
-            ui_box_row "${C_RED}[✖] Sing-Box Config:      ОШИБКА ВАЛИДАЦИИ СИНТАКСИСА${C_RES}"
+            ui_box_row "${C_RED}[✖] ${CUR_C_NAME} Config:  ОШИБКА ВАЛИДАЦИИ СИНТАКСИСА${C_RES}"
         fi
     else
-        ui_box_row "${C_YEL}[▲] Sing-Box Config:      НЕ НАЙДЕН (${SB_CONF})${C_RES}"
+        ui_box_row "${C_YEL}[▲] ${CUR_C_NAME} Config:  НЕ НАЙДЕН (${CUR_C_CONF})${C_RES}"
     fi
 
     # 2. Синтаксис Caddy
@@ -186,15 +224,15 @@ print_gateway_motd() {
 
     # Статус ядер шлюза
     SB_ST="${C_RED}○${C_RES}"
-    pgrep sing-box >/dev/null 2>&1 && SB_ST="${C_GRN}●${C_RES}"
+    is_core_running && SB_ST="${C_GRN}●${C_RES}"
     AGH_ST="${C_RED}○${C_RES}"
     pgrep AdGuardHome >/dev/null 2>&1 && AGH_ST="${C_GRN}●${C_RES}"
     TUN_ST="${C_RED}○${C_RES}"
-    ip link show singbox-tun >/dev/null 2>&1 && TUN_ST="${C_GRN}●${C_RES}"
+    ip link show "$CORE_TUN_IF" >/dev/null 2>&1 && TUN_ST="${C_GRN}●${C_RES}"
 
     # SSL / Домен
-    if [ "${SSL_MODE:-local}" = "duckdns" ] && [ -n "${DUCKDNS_DOMAIN:-}" ]; then
-        SSL_INFO="Let's Encrypt Wildcard (*.${DUCKDNS_DOMAIN})"
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        SSL_INFO="Let's Encrypt Wildcard (*.${SSL_DOMAIN})"
     else
         SSL_INFO="Локальный доверенный CA (*.lan)"
     fi
@@ -224,7 +262,7 @@ print_gateway_motd() {
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Сеть:${C_RES}         LAN: %s (%s) │ Роутер: %s\n" "$LAN_IP_CUR" "$LAN_DEV_CUR" "$ROUTER_IP"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Память (RAM):${C_RES} %s\n" "$RAM_LINE"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Хранилище:${C_RES}    %s\n" "$ST_INFO"
-    printf "${C_BLU}║${C_RES}  ${C_BLD}• Ядро шлюза:${C_RES}   Sing-Box [%b] │ AdGuard Home (:53) [%b] │ singbox-tun [%b]\n" "$SB_ST" "$AGH_ST" "$TUN_ST"
+    printf "${C_BLU}║${C_RES}  ${C_BLD}• Ядро шлюза:${C_RES}   %s [%b] │ AdGuard Home (:53) [%b] │ %s [%b] │ UI: %s\n" "$(get_active_core_name)" "$SB_ST" "$AGH_ST" "$CORE_TUN_IF" "$TUN_ST" "$(get_active_ui_name)"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Homelab:${C_RES}     %s\n" "$HL_SUMMARY"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• SSL / Домен:${C_RES}  %s\n" "$SSL_INFO"
     UPDATE_BADGE=$(get_gateway_update_badge 2>/dev/null || echo "")

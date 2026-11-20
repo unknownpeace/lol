@@ -44,8 +44,6 @@ except Exception:
     pass
 " 2>/dev/null || true
         fi
-    elif [ -f /var/lib/misc/dnsmasq.leases ]; then
-        LEASE_F="/var/lib/misc/dnsmasq.leases"
     fi
 
     echo " ${C_CYN}--- Обнаруженные устройства в локальной сети (ARP + DHCP) ---${C_RES}"

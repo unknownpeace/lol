@@ -7,6 +7,7 @@ get_agh_admin_user() {
 
 # Автоматическая синхронизация DNS Rewrites (*.lan -> LAN_IP с enabled: true) в AdGuardHome.yaml
 sync_agh_homelab_rewrites() {
+    [ -z "${SSL_TYPE:-}" ] && load_gateway_env || true
     TARGET_LAN_IP="${1:-$(get_current_lan_ip)}"
     [ -f "$AGH_CONF" ] || return 0
     AGH_WAS_RUNNING="no"
@@ -15,16 +16,13 @@ sync_agh_homelab_rewrites() {
         rc-service adguardhome stop >/dev/null 2>&1 || /etc/init.d/adguardhome stop >/dev/null 2>&1 || true
     fi
 
-    DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan vaultwarden.lan forgejo.lan downloads.lan torrents.lan code.lan"
+    DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan vaultwarden.lan forgejo.lan downloads.lan torrents.lan code.lan"
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN} vaultwarden.${SSL_DOMAIN} forgejo.${SSL_DOMAIN} downloads.${SSL_DOMAIN} torrents.${SSL_DOMAIN} code.${SSL_DOMAIN} adguard.${SSL_DOMAIN} zashboard.${SSL_DOMAIN} singbox.${SSL_DOMAIN}"
+        DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN} vaultwarden.${SSL_DOMAIN} forgejo.${SSL_DOMAIN} downloads.${SSL_DOMAIN} torrents.${SSL_DOMAIN} code.${SSL_DOMAIN} adguard.${SSL_DOMAIN} zashboard.${SSL_DOMAIN} singbox.${SSL_DOMAIN} mihomo.${SSL_DOMAIN} panel.${SSL_DOMAIN}"
     fi
 
     awk -v lip="$TARGET_LAN_IP" -v dom_list="$DOMS_STR" '
-        BEGIN { in_flt=0; in_rew=0 }
-        /^filtering:/ { in_flt=1; print; next }
-        in_flt && /^[^[:space:]]/ { in_flt=0; in_rew=0; print; next }
-        in_flt && /^[[:space:]]*rewrites:/ {
+        function print_rewrites() {
             print "  rewrites:"
             cnt = split(dom_list, doms, " ")
             for (i = 1; i <= cnt; i++) {
@@ -32,17 +30,66 @@ sync_agh_homelab_rewrites() {
                 print "      answer: " lip
                 print "      enabled: true"
             }
-            in_rew=1
+            wrote_rew = 1
+        }
+        BEGIN { seen_flt = 0; in_flt = 0; in_rew = 0; wrote_rew = 0 }
+        /^filtering:[[:space:]]*\{/ {
+            seen_flt = 1
+            print "filtering:"
+            line = $0
+            sub(/^filtering:[[:space:]]*\{[[:space:]]*/, "", line)
+            sub(/\}[[:space:]]*$/, "", line)
+            n = split(line, kv, ",")
+            has_prot = 0; has_filt = 0
+            for (i = 1; i <= n; i++) {
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", kv[i])
+                if (kv[i] != "") {
+                    print "  " kv[i]
+                    if (kv[i] ~ /^protection_enabled:/) has_prot = 1
+                    if (kv[i] ~ /^filtering_enabled:/) has_filt = 1
+                }
+            }
+            if (!has_prot) print "  protection_enabled: true"
+            if (!has_filt) print "  filtering_enabled: true"
+            print_rewrites()
+            next
+        }
+        /^filtering:[[:space:]]*$/ {
+            seen_flt = 1
+            in_flt = 1
+            print
+            next
+        }
+        in_flt && /^[^[:space:]]/ {
+            if (!wrote_rew) print_rewrites()
+            in_flt = 0
+            in_rew = 0
+            print
+            next
+        }
+        in_flt && /^[[:space:]]*rewrites:/ {
+            print_rewrites()
+            in_rew = 1
             next
         }
         in_rew {
             if (/^[[:space:]]*-/ || /^[[:space:]]+(domain|answer|enabled):/) {
                 next
             } else {
-                in_rew=0
+                in_rew = 0
             }
         }
         { print }
+        END {
+            if (!seen_flt) {
+                print "filtering:"
+                print "  protection_enabled: true"
+                print "  filtering_enabled: true"
+                print_rewrites()
+            } else if (in_flt && !wrote_rew) {
+                print_rewrites()
+            }
+        }
     ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$"
     atomic_commit_tmp "${AGH_CONF}.tmp.$$" "$AGH_CONF" 0600 "root:root" || true
 

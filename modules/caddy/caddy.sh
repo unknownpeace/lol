@@ -101,7 +101,7 @@ build_pki_portal() {
   <div class="card">
     <h2>🏠 Все сервисы вашего домашнего сервера</h2>
     <ul>
-      <li><a href="https://${DOM_ZASHBOARD}/ui/">https://${DOM_ZASHBOARD}</a> (или <a href="https://${DOM_SINGBOX}/ui/">https://${DOM_SINGBOX}</a>) — Панель Sing-Box (Zashboard)</li>
+      <li><a href="https://${DOM_ZASHBOARD}/ui/">https://${DOM_ZASHBOARD}</a> (или <a href="https://${DOM_PANEL}/ui/">https://${DOM_PANEL}</a>) — Панель шлюза (Zashboard / MetaCubeXD)</li>
       <li><a href="https://${DOM_ADGUARD}">https://${DOM_ADGUARD}</a> — Панель AdGuard Home</li>
       <li><a href="https://${DOM_VAULTWARDEN}">https://${DOM_VAULTWARDEN}</a> — Vaultwarden (Пароли)</li>
       <li><a href="https://${DOM_YTDLP}">https://${DOM_YTDLP}</a> — MeTube (Загрузчик видео/аудио)</li>
@@ -135,7 +135,7 @@ sync_caddy_main_config() {
     }
 }
 
-https://zashboard.${SSL_DOMAIN}, https://singbox.${SSL_DOMAIN} {
+https://zashboard.${SSL_DOMAIN}, https://singbox.${SSL_DOMAIN}, https://mihomo.${SSL_DOMAIN}, https://panel.${SSL_DOMAIN} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
     encode zstd gzip
     @root_ui path /
@@ -193,7 +193,7 @@ https://${DOM_ADGUARD} {
     }
 }
 
-https://${DOM_ZASHBOARD}, https://${DOM_SINGBOX} {
+https://${DOM_ZASHBOARD}, https://${DOM_SINGBOX}, https://${DOM_MIHOMO}, https://${DOM_PANEL} {
     tls internal
     encode zstd gzip
     @root_ui path /
@@ -386,7 +386,6 @@ remove_caddy_site() {
 # Синхронизация HTTPS-конфигураций Caddy для всех установленных модулей Homelab
 sync_all_caddy_sites() {
     load_gateway_env
-    load_homelab_env 2>/dev/null || true
     is_module_enabled "vaultwarden" && register_caddy_site "vaultwarden" "${DOM_VAULTWARDEN:-vaultwarden.lan}" "${PORT_VAULTWARDEN:-8222}" "no" || true
     is_module_enabled "forgejo"     && register_caddy_site "forgejo" "${DOM_FORGEJO:-forgejo.lan}" "${PORT_FORGEJO:-3001}" "no" || true
     is_module_enabled "code"        && register_caddy_site "code" "${DOM_CODE:-code.lan}" "${PORT_CODE:-8443}" "yes" || true

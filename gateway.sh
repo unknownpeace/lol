@@ -55,6 +55,7 @@ fi
 . "${GATEWAY_DIR}/lib/constants.sh"
 . "${GATEWAY_DIR}/lib/ui.sh"
 . "${GATEWAY_DIR}/lib/core.sh"
+. "${GATEWAY_DIR}/lib/routing_rules.sh"
 . "${GATEWAY_DIR}/lib/env.sh"
 . "${GATEWAY_DIR}/lib/env_store.sh"
 . "${GATEWAY_DIR}/lib/metrics.sh"
@@ -67,16 +68,18 @@ fi
 # Загрузка AdGuard Home
 . "${GATEWAY_DIR}/modules/adguard/adguard.sh"
 
-# Загрузка модулей ядра Sing-Box Extended
+# Загрузка модулей ядер (Sing-Box Extended, Mihomo) и единого диспетчера ядра/панели
 . "${GATEWAY_DIR}/modules/singbox/rulesets.sh"
 . "${GATEWAY_DIR}/modules/singbox/config.sh"
 . "${GATEWAY_DIR}/modules/singbox/service.sh"
 . "${GATEWAY_DIR}/modules/singbox/providers.sh"
-. "${GATEWAY_DIR}/modules/singbox/apply.sh"
 . "${GATEWAY_DIR}/modules/singbox/route_inspect.sh"
 . "${GATEWAY_DIR}/modules/singbox/node_diag.sh"
 . "${GATEWAY_DIR}/modules/singbox/warp.sh"
 . "${GATEWAY_DIR}/modules/singbox/setup.sh"
+. "${GATEWAY_DIR}/modules/mihomo/setup.sh"
+. "${GATEWAY_DIR}/modules/mihomo/config.sh"
+. "${GATEWAY_DIR}/modules/core/engine.sh"
 
 # Загрузка подсистемы дисков и хранилища
 . "${GATEWAY_DIR}/modules/storage/storage_unlock.sh"

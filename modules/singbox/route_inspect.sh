@@ -1,4 +1,5 @@
 inspect_domain_route() {
+    load_gateway_env >/dev/null 2>&1 || true
     TEST_IN="${1:-}"
     if [ -z "$TEST_IN" ]; then
         printf "\nВведите домен или ссылку для проверки (например, https://instagram.com или vaultwarden.lan): "
@@ -73,7 +74,7 @@ inspect_domain_route() {
     DIR_CODE=$(printf "%s" "$DIR_RES" | awk '{print $1}')
     DIR_MS=$(printf "%s" "$DIR_RES" | awk '$2+0 > 0 {printf "%.0f ms", $2*1000; ok=1} END {if (!ok) print "заблокирован/таймаут"}')
 
-    echo "   -> Через Sing-Box: HTTP ${PRX_CODE} | TLS: ${C_GRN}${PRX_MS}${C_RES}"
+    echo "   -> Через $(get_active_core_name): HTTP ${PRX_CODE} | TLS: ${C_GRN}${PRX_MS}${C_RES}"
     echo "   -> Напрямую (LAN): HTTP ${DIR_CODE} | TLS: ${C_YEL}${DIR_MS}${C_RES}"
     [ ! -t 0 ] && return 0
 
@@ -90,14 +91,14 @@ inspect_domain_route() {
             load_gateway_env
             awk -v d="$CLEAN_SUFFIX" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.localdomain"}' "$USER_DIRECT_FILE" > "${USER_DIRECT_FILE}.tmp" && mv "${USER_DIRECT_FILE}.tmp" "$USER_DIRECT_FILE"
             grep -qxF "$CLEAN_SUFFIX" "$USER_PROXY_FILE" 2>/dev/null || echo "$CLEAN_SUFFIX" >> "$USER_PROXY_FILE"
-            apply_and_verify_singbox "Перевод домена ${CLEAN_SUFFIX} в прокси" || true
+            apply_and_verify_core "Перевод домена ${CLEAN_SUFFIX} в прокси" || true
             ;;
         2)
             backup_gateway_state
             load_gateway_env
-            awk -v d="$CLEAN_SUFFIX" 'NF && $0 != d {print; kept++} END {if (kept+0 == 0) print "+.chatgpt.com"}' "$USER_PROXY_FILE" > "${USER_PROXY_FILE}.tmp" && mv "${USER_PROXY_FILE}.tmp" "$USER_PROXY_FILE"
+            awk -v d="$CLEAN_SUFFIX" 'NF && $0 != d {print}' "$USER_PROXY_FILE" > "${USER_PROXY_FILE}.tmp" && mv "${USER_PROXY_FILE}.tmp" "$USER_PROXY_FILE"
             grep -qxF "$CLEAN_SUFFIX" "$USER_DIRECT_FILE" 2>/dev/null || echo "$CLEAN_SUFFIX" >> "$USER_DIRECT_FILE"
-            apply_and_verify_singbox "Перевод домена ${CLEAN_SUFFIX} напрямую (DIRECT)" || true
+            apply_and_verify_core "Перевод домена ${CLEAN_SUFFIX} напрямую (DIRECT)" || true
             ;;
     esac
     return 0

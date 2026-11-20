@@ -27,8 +27,9 @@ setup_wsdd_and_avahi() {
     # 1. Настройка wsdd (Web Services Dynamic Discovery для Windows 10/11 без SMB1)
     if [ -f /etc/init.d/wsdd ]; then
         cat << WSDD_EOF > /etc/conf.d/wsdd
-# Привязка строго к физическому LAN-интерфейсу и IPv4 (в обход singbox-tun)
-WSDD_OPTS="-4 -i ${LAN_IF} -w WORKGROUP -n ${HN_SHORT}"
+# Привязка строго к физическому LAN-интерфейсу и IPv4 (в обход ${CORE_TUN_IF})
+WSDD_WORKGROUP="WORKGROUP"
+WSDD_OPTS="-4 -i ${LAN_IF} -n ${HN_SHORT}"
 command_args="-4 -i ${LAN_IF} -w WORKGROUP -n ${HN_SHORT}"
 WSDD_EOF
         service_ctl wsdd enable
@@ -149,7 +150,7 @@ configure_samba_credentials() {
     PROMPT_MODE="${1:-auto}"
     load_gateway_env
 
-    if [ "$PROMPT_MODE" = "interactive" ]; then
+    if [ "$PROMPT_MODE" = "interactive" ] && [ -t 0 ]; then
         printf "Введите имя пользователя для сетевой папки Samba [Enter = %s]: " "${SMB_USER:-${AGH_USER:-homelab}}"
         read -r IN_SMBU < /dev/tty || true
         IN_SMBU=$(printf "%s" "$IN_SMBU" | tr -d ' \t\r\n')

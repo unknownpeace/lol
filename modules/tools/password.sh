@@ -24,7 +24,7 @@ change_unified_password() {
 
     save_gateway_env
     save_homelab_env
-    generate_singbox_config
+    core_generate_config
 
     service_ctl adguardhome stop
     command -v htpasswd >/dev/null 2>&1 || apk add --no-cache apache2-utils >/dev/null 2>&1 || true
@@ -71,6 +71,26 @@ change_unified_password() {
         is_module_enabled "vaultwarden" && service_ctl vaultwarden restart || true
     fi
 
+    # Синхронизация RPC-пароля в Transmission (если модуль установлен)
+    TR_SETTINGS_FILE="/var/lib/transmission/config/settings.json"
+    if [ -f "$TR_SETTINGS_FILE" ] || is_module_enabled "torrent"; then
+        TR_USER="${SMB_USER:-${AGH_USER:-admin}}"
+        TR_PASS="${ADMIN_PASS:-admin}"
+        service_ctl transmission-daemon stop >/dev/null 2>&1 || true
+        if [ -f "$TR_SETTINGS_FILE" ] && command -v jq >/dev/null 2>&1; then
+            if jq --arg u "$TR_USER" --arg p "$TR_PASS" '.["rpc-username"] = $u | .["rpc-password"] = $p' "$TR_SETTINGS_FILE" > "${TR_SETTINGS_FILE}.tmp.$$" 2>/dev/null; then
+                mv -f "${TR_SETTINGS_FILE}.tmp.$$" "$TR_SETTINGS_FILE"
+                chmod 600 "$TR_SETTINGS_FILE" 2>/dev/null || true
+                chown "transmission:${MEDIA_GROUP:-media}" "$TR_SETTINGS_FILE" 2>/dev/null || true
+            else
+                rm -f "${TR_SETTINGS_FILE}.tmp.$$" 2>/dev/null || true
+            fi
+        fi
+        if is_module_enabled "torrent"; then
+            service_ctl transmission-daemon start >/dev/null 2>&1 || true
+        fi
+    fi
+
     # Синхронизация BasicAuth в Caddy для защищенных модулей
     if [ -x /usr/sbin/caddy ] && [ -d "$CADDY_CONFD" ]; then
         is_module_enabled "ytdlp" && register_caddy_site "ytdlp" "$DOM_YTDLP" "$PORT_YTDLP" "yes" >/dev/null 2>&1 || true
@@ -78,8 +98,33 @@ change_unified_password() {
         is_module_enabled "code" && register_caddy_site "code" "$DOM_CODE" "$PORT_CODE" "yes" >/dev/null 2>&1 || true
     fi
 
-    service_ctl sing-box restart || true
+    service_ctl "$(get_active_core_service)" restart || true
     service_ctl adguardhome start || true
-    echo "${C_GRN}[✓] Единый пароль успешно синхронизирован (Sing-Box, AdGuard Home, Samba, Vaultwarden, Caddy)!${C_RES}"
+
+    PW_IDX=0
+    while [ "$PW_IDX" -lt 10 ]; do
+        CORE_READY=0
+        AGH_READY=0
+        if curl -fsS -m 1 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
+            CORE_READY=1
+        fi
+        if pgrep AdGuardHome >/dev/null 2>&1; then
+            if curl -fsS -m 1 -u "${CUR_AGH_USER:-${AGH_USER:-admin}}:${ADMIN_PASS}" "http://127.0.0.1:3000/control/status" >/dev/null 2>&1 || \
+               ss -tln 2>/dev/null | grep -q ':3000 '; then
+                AGH_READY=1
+            fi
+        fi
+        [ "$CORE_READY" -eq 1 ] && [ "$AGH_READY" -eq 1 ] && break
+        sleep 1
+        PW_IDX=$((PW_IDX + 1))
+    done
+
+    if is_sub_enabled && command -v jq >/dev/null 2>&1; then
+        _PROV_J=$(curl -fsS -m 2 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/providers/proxies" 2>/dev/null || true)
+        _EMPTY_SUB=$(printf "%s" "$_PROV_J" | jq -r '[.providers // {} | to_entries[] | select((.value.vehicleType == "Remote" or .value.vehicleType == "HTTP") and ((.value.proxies // []) | length == 0))] | length' 2>/dev/null || echo "0")
+        [ "${_EMPTY_SUB:-0}" -gt 0 ] && core_reload_api >/dev/null 2>&1 || true
+    fi
+
+    echo "${C_GRN}[✓] Единый пароль успешно синхронизирован (Шлюз, AdGuard Home, Samba, Vaultwarden, Transmission, Caddy)!${C_RES}"
     return 0
 }
