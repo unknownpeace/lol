@@ -1,3 +1,4 @@
+#!/bin/sh
 sync_all_homelab_permissions() {
     load_gateway_env
     init_homelab_storage

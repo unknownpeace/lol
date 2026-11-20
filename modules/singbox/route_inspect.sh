@@ -1,3 +1,4 @@
+#!/bin/sh
 inspect_domain_route() {
     load_gateway_env >/dev/null 2>&1 || true
     TEST_IN="${1:-}"

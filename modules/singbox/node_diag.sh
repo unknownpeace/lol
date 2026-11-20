@@ -1,3 +1,4 @@
+#!/bin/sh
 diagnose_failed_nodes() {
     if ! is_core_running || ! command -v jq >/dev/null 2>&1; then
         echo "${C_RED}[X] Служба $(get_active_core_name) не запущена или не найден jq.${C_RES}"

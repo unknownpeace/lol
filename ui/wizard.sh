@@ -1,3 +1,4 @@
+#!/bin/sh
 prompt_homelab_modules_wizard() {
     PRE_SEL="${1:-}"
     init_homelab_registry

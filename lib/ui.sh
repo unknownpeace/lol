@@ -1,3 +1,4 @@
+#!/bin/sh
 init_colors() {
     if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
         C_RES=$(printf '\033[0m')

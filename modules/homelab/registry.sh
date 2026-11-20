@@ -1,3 +1,4 @@
+#!/bin/sh
 ensure_alpine_community_repo() {
     if [ -f /etc/apk/repositories ]; then
         sed -i 's|^#[[:space:]]*\(https\?://.*/v[0-9.]*/community\)|\1|' /etc/apk/repositories 2>/dev/null || true

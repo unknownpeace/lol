@@ -1,3 +1,4 @@
+#!/bin/sh
 print_homelab_services_table() {
     init_homelab_registry
     load_gateway_env

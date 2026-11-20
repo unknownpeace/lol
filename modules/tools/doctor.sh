@@ -1,3 +1,4 @@
+#!/bin/sh
 heal_default_gateway_route() {
     LAN_IF_WD=$(get_lan_ifname)
     if [ -n "${GW_IP:-}" ] && ! ip -4 route show default 2>/dev/null | grep -q "via ${GW_IP}"; then

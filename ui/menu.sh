@@ -1,3 +1,4 @@
+#!/bin/sh
 show_homelab_menu() {
     init_homelab_registry
     load_gateway_env

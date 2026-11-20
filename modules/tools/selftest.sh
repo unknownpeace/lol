@@ -1,3 +1,4 @@
+#!/bin/sh
 run_self_test() {
     set +e
     detect_os

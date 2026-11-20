@@ -1,3 +1,4 @@
+#!/bin/sh
 is_external_storage_mounted() {
     awk -v mp="${STORAGE_ROOT:-/srv/storage}" '$2 == mp {found=1} END {exit !found}' /proc/mounts 2>/dev/null
 }

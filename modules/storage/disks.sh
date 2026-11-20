@@ -1,3 +1,4 @@
+#!/bin/sh
 ensure_disk_tools() {
     ensure_alpine_community_repo
     NEED_APK="no"

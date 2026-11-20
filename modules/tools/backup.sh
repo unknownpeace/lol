@@ -1,3 +1,4 @@
+#!/bin/sh
 create_unified_backup() {
     INCLUDE_MEDIA="${1:-no}"
     STAGE_DIR="/var/lib/gateway_backup_stage"

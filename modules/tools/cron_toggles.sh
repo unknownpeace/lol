@@ -1,3 +1,4 @@
+#!/bin/sh
 is_autoupdate_enabled() {
     grep -q "/usr/bin/gateway autoupdate" "$CRON_FILE" 2>/dev/null
 }

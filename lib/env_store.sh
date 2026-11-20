@@ -1,3 +1,4 @@
+#!/bin/sh
 clean_clipboard_line() {
     printf "%s" "${1:-}" | tr -d '\r\n\000\007\010\013\014\033' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
     return 0

@@ -1,3 +1,4 @@
+#!/bin/sh
 install_singbox_binary() {
     detect_os
     check_github_mirror

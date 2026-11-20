@@ -1,3 +1,4 @@
+#!/bin/sh
 scan_lan_subnet() {
     CUR_LAN=$(get_current_lan_ip)
     LAN_SUB="${CUR_LAN%.*}"

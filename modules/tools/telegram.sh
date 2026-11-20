@@ -1,3 +1,4 @@
+#!/bin/sh
 send_telegram_msg() {
     MSG_TEXT="$1"
     load_gateway_env

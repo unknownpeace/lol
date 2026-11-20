@@ -1,3 +1,4 @@
+#!/bin/sh
 rotate_gateway_logs() {
     for LOG_F in "$SB_LOG_FILE" "$MIHOMO_LOG_FILE" "$AUTOUPDATE_LOG" /var/log/caddy.log /var/log/vaultwarden.log /var/log/metube.log /var/log/code-server.log /var/log/transmission/transmission.log; do
         if [ -f "$LOG_F" ]; then

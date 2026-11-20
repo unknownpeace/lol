@@ -1,3 +1,4 @@
+#!/bin/sh
 # Генерация эталонного /etc/sing-box/config.json (Sing-Box Extended 1.14.3: Zero-Leak ИИ, Гейминг, Германия, США, .lan)
 generate_singbox_config() {
     _PREV_CORE="${CORE_ENGINE:-}"

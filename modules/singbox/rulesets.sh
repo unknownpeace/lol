@@ -1,3 +1,4 @@
+#!/bin/sh
 sanitize_domain_entry() {
     RAW_IN_DOM=$(clean_clipboard_line "$1")
     [ -z "$RAW_IN_DOM" ] && return 1

@@ -1,3 +1,4 @@
+#!/bin/sh
 get_nft_bypass_saddr_clause() {
     if [ ! -s "$USER_BYPASS_IPS" ]; then
         printf ""

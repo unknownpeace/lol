@@ -1,3 +1,4 @@
+#!/bin/sh
 check_singbox_config() {
     /usr/bin/sing-box check -c "$SB_CONF" -D "$SB_DIR" >/dev/null 2>&1
 }

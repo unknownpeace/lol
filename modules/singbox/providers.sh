@@ -1,3 +1,4 @@
+#!/bin/sh
 print_proxy_slots_report() {
     load_gateway_env
     if [ "${ALLOW_RU_NODES:-no}" = "yes" ]; then

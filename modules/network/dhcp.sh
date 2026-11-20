@@ -1,3 +1,4 @@
+#!/bin/sh
 # Зондирование сети на наличие активного стороннего DHCP-сервера (роутера)
 detect_external_dhcp_server() {
     T_IF="${1:-$(get_lan_ifname)}"

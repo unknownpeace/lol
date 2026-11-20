@@ -1,3 +1,4 @@
+#!/bin/sh
 get_ram_usage_pct() {
     awk '
         /^MemTotal:/ { t=$2 }

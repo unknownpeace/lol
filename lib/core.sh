@@ -1,3 +1,4 @@
+#!/bin/sh
 atomic_write_file() {
     AW_TARGET="$1"
     AW_MODE="${2:-0600}"

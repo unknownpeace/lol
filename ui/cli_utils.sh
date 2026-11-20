@@ -1,3 +1,4 @@
+#!/bin/sh
 resolve_homelab_module_id() {
     RAW_M=$(printf "%s" "${1:-}" | tr 'A-Z' 'a-z' | tr -d ' \t\r\n')
     case "$RAW_M" in

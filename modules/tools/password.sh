@@ -1,3 +1,4 @@
+#!/bin/sh
 change_unified_password() {
     NEW_PASS=$(printf "%s" "$1" | tr -d '\r\n')
     SYNC_SMB_ANS="${2:-ask}"
