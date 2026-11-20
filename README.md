@@ -7,17 +7,17 @@
 <p>
   <a href="README.ru.md"><img src="https://img.shields.io/badge/🇷🇺_Версия_на_русском-README.ru.md-1f6feb?style=for-the-badge" alt="Russian README"></a>
   <a href="#-quick-start-in-2-minutes"><img src="https://img.shields.io/badge/⚡_Quick_Start-2_Minutes-2ea44f?style=for-the-badge" alt="Quick Start"></a>
-  <a href="#️-legal-disclaimer"><img src="https://img.shields.io/badge/⚖️_Legal_Disclaimer-Read_First-6e7681?style=for-the-badge" alt="Disclaimer"></a>
+  <a href="#-legal-disclaimer"><img src="https://img.shields.io/badge/⚖️_Legal_Disclaimer-Read_First-6e7681?style=for-the-badge" alt="Disclaimer"></a>
 </p>
 
 [![CI Status](https://github.com/unknownpeace/lol/actions/workflows/ci.yml/badge.svg)](https://github.com/unknownpeace/lol/actions/workflows/ci.yml)
 [![Alpine Linux](https://img.shields.io/badge/Alpine_Linux-3.21--3.24%2B-0D597F?logo=alpinelinux&logoColor=white)](https://alpinelinux.org)
-[![OpenRC Native](https://img.shields.io/badge/Init-OpenRC_Native_(Zero_Docker)-2ea043)](https://wiki.alpinelinux.org/wiki/OpenRC)
+[![OpenRC Native](https://img.shields.io/badge/Init-OpenRC_Native_%28Zero_Docker%29-2ea043)](https://wiki.alpinelinux.org/wiki/OpenRC)
 [![Sing-Box Extended](https://img.shields.io/badge/Core_1-Sing--Box_Extended_v1.14.3-8957e5)](https://github.com/shtorm-7/sing-box-extended)
 [![Mihomo](https://img.shields.io/badge/Core_2-Mihomo_v1.19.34-1f6feb)](https://github.com/MetaCubeX/mihomo)
 [![AdGuard Home](https://img.shields.io/badge/DNS-AdGuard_Home_v1.0.0-68bc71)](https://github.com/AdguardTeam/AdGuardHome)
 [![Web UI](https://img.shields.io/badge/Web_UI-Zashboard_%7C_MetaCubeXD-fb8500)](https://github.com/Zephyruso/zashboard)
-[![LUKS2](https://img.shields.io/badge/Storage-LUKS2_Argon2id-d97706)](#️-fault-tolerance--luks2-storage)
+[![LUKS2](https://img.shields.io/badge/Storage-LUKS2_Argon2id-d97706)](#-fault-tolerance--luks2-storage)
 [![License: MIT](https://img.shields.io/badge/License-MIT-eab308.svg)](LICENSE)
 
 </div>
@@ -48,19 +48,19 @@ Your router remains the primary DHCP server (`192.168.1.5`) and instructs LAN de
 
 ```mermaid
 flowchart TB
-    ISP(["🌐 Internet / ISP"]) <--> RTR["📡 Main LAN Router\n(DHCP Server, WAN Uplink)"]
+    ISP(["🌐 Internet / ISP"]) <--> RTR["📡 Main LAN Router · DHCP Server · WAN Uplink"]
     RTR <-->|"Single Ethernet Port"| GW
-    RTR <--> LAN["💻 LAN Clients\n(PCs, Consoles, TV, Phones)"]
+    RTR <--> LAN["💻 LAN Clients · PCs · Consoles · TV · Phones"]
 
     subgraph GW ["🖥️ Alpine Linux Sidecar Gateway & Homelab (OpenRC)"]
         direction TB
-        NFT["🔥 nftables & Kill-Switch\n(DNS :53 redirect, DoT :853 reject, IPv6 drop, Open NAT)"]
-        AGH["🛡️ AdGuard Home (:53)\nAd/Tracker Filtering + Local *.lan Rewrites"]
-        CORE["⚡ Routing Engine (:1053 / gateway-tun)\nSing-Box Extended v1.14.3 ⇄ Mihomo v1.19.34"]
-        UI["🎛️ Live Web UI (:9090/ui)\nZashboard ⇄ MetaCubeXD"]
-        CADDY["🔐 Caddy HTTPS (:80/:443)\nLocal PKI (ca.lan) ⇄ DuckDNS Wildcard LE"]
-        HL["🏠 Homelab Services (127.0.0.1)\nVaultwarden · Forgejo · MeTube · Transmission · Code · SMB3"]
-        LUKS[("💾 External Storage /srv/storage\next4 / btrfs / f2fs + LUKS2 🔒")]
+        NFT["🔥 nftables & Kill-Switch · DNS :53 · DoT :853 · Open NAT"]
+        AGH["🛡️ AdGuard Home :53 · Filtering + Local *.lan"]
+        CORE["⚡ Routing Engine :1053 · gateway-tun · Sing-Box Extended ⇄ Mihomo"]
+        UI["🎛️ Live Web UI :9090/ui · Zashboard ⇄ MetaCubeXD"]
+        CADDY["🔐 Caddy HTTPS :80/:443 · Local PKI ⇄ DuckDNS Wildcard LE"]
+        HL["🏠 Homelab Services · Vaultwarden · Forgejo · MeTube · Transmission · SMB3"]
+        LUKS[("💾 External Storage /srv/storage · ext4 / btrfs / f2fs + LUKS2 🔒")]
 
         NFT --> AGH --> CORE
         CORE --- UI

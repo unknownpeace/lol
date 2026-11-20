@@ -1,0 +1,40 @@
+name: "🐛 Bug Report"
+description: "Report an issue on Alpine Linux / OpenRC"
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please sanitize any passwords, DuckDNS tokens, or private subscription URLs before submitting.
+  - type: input
+    id: alpine_version
+    attributes:
+      label: "Alpine Linux version & hardware"
+      placeholder: "e.g., Alpine Linux 3.24.4 x86_64 on Z83II / N100 / VM"
+    validations:
+      required: true
+  - type: dropdown
+    id: core_engine
+    attributes:
+      label: "Active core & Web UI"
+      options:
+        - "Sing-Box Extended + Zashboard"
+        - "Sing-Box Extended + MetaCubeXD"
+        - "Mihomo + Zashboard"
+        - "Mihomo + MetaCubeXD"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: "What happened?"
+      placeholder: "Describe the expected vs. actual behavior and steps to reproduce."
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: "Diagnostics (`gw check` / `gw status` / `gw logs core 30`)"
+      render: shell
+      placeholder: "Paste sanitized output from `gw check` or service logs here."

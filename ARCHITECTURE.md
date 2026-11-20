@@ -34,7 +34,7 @@
 │   └── homelab.env.example     # Хранилище, пользователи, диски
 ├── lib/
 │   ├── constants.sh            # Глобальные пути, CORE_TUN_IF="gateway-tun", фильтры подписок, DEFAULT_ROUTER_IP="192.168.1.5"
-│   ├── core.sh                 # Атомарная запись, блокировки, service_ctl, get_lan_ifname, get_default_router_ip
+│   ├── core.sh                 # Атомарная запись, lock-файлы, service_ctl, get_lan_ifname, get_default_router_ip
 │   ├── routing_rules.sh        # Единый источник правды списков доменов (ИИ, Game CDN, Bootstrap, DDR, Homelab .lan)
 │   ├── env.sh                  # Валидация конфигов (sing-box check и mihomo -t) и проверки состояний
 │   ├── env_store.sh            # Безопасное сохранение/чтение gateway.env (вкл. CORE_ENGINE, WEB_UI) и homelab.env
@@ -73,7 +73,7 @@
 2. **`dns_local` (`type: "udp"`)** — запросы локальной сети (`.lan`, `.home.arpa`, `.local`, `private_domain`) уходят на основной роутер (`${GW_IP}:53`).
 3. **`dns_ru` (`type: "https"`, `77.88.8.1`, `common.dot.dns.yandex.net`, `DIRECT`)** — реальные IP для РФ (`category-ru`), торрент-трекеров, `user_direct_domains`, `google_domain` (не-AI) и **всех игровых платформ и CDN** (`steam`, `epicgames`, `riot`, `ea`, `ubisoft`, `blizzard`, `playstation`, `xbox`, `nintendo`), чтобы не ломать античиты и NAT.
 4. **`dns_bootstrap` (`type: "https"`, `9.9.9.9`, `dns.quad9.net`, `DIRECT`)** — надёжный высокопараллельный `default_domain_resolver` для загрузки подписок, узлов, rule-set'ов GitHub и пакетов `alpinelinux.org`.
-5. **`dns_fakeip` (`type: "fakeip"`, `198.18.0.0/15`)** — выдаётся для `A`-запросов `user_proxy_domains`, всех ИИ-доменов, медиа/мессенджеров/блокировок и общего fallback (`query_type: ["A"]`).
+5. **`dns_fakeip` (`type: "fakeip"`, `198.18.0.0/15`)** — выдаётся для `A`-запросов `user_proxy_domains`, всех ИИ-доменов, медиа/мессенджеров/расширенных прокси-списков и общего fallback (`query_type: ["A"]`).
 6. **`dns_ai` (`type: "https"`, `1.1.1.1`, `detour: "🤖 Нейросети (ИИ)"`)** — обслуживает не-A запросы ИИ-доменов строго через ИИ-туннель (Zero-Leak).
 7. **`dns_proxy` (`type: "https"`, `8.8.8.8`, `detour: "⚡ Авто (Самый быстрый)"`)** — финальный резолвер прокси-контура.
 - В начале `dns.rules` жёстко блокируются DoH-canary/DDR/iCloud Private Relay (`NXDOMAIN`) и `HTTPS`/`SVCB`/`AAAA` (`NOERROR`).
@@ -89,7 +89,7 @@
 - **`🧱 Roblox`** (`selector`: по умолчанию **`🇩🇪 Германия`**, переключается в `⚡ Авто`, `🇺🇸 США`, `🎮 Авто-Гейминг`, `DIRECT`)
 - **`💬 Мессенджеры`** (`Telegram`, `WhatsApp`, `Discord` + voice IPs; без глобального перехвата STUN)
 - **`▶️ YouTube & Медиа`** (`YouTube`, `Spotify`, `Twitch` + явные медиа-суффиксы)
-- **`🛑 Обход блокировок`** (`user_proxy_domains` с высшим приоритетом, `ru_bundle`, `refilter_ip`, `meta_domain`, `facebook_ip`, `tiktok_domain`, `cloudflare`)
+- **Группа пользовательских/расширенных прокси-правил** (`user_proxy_domains` с высшим приоритетом, `refilter_ip`, `meta_domain`, `facebook_ip`, `tiktok_domain`, `cloudflare` и др. наборы правил)
 - **`🌐 Google & Android`** (по умолчанию `DIRECT`, правило размещено **после** всех ИИ-правил)
 - **`🧲 Торренты`** (`selector`: по умолчанию **`DIRECT`**, переключается на `🇩🇪 Германия`, `🇺🇸 США`, `⚡ Авто` или любую ноду подписки)
 - **`📺 Устройства (Full-VPN)`** (создаётся динамически при наличии IP в `force_proxy_devices.conf`)
@@ -100,14 +100,14 @@
 1. `dns-in` / `protocol: dns` -> `hijack-dns`, `sniff`, `clash_mode` (`direct`/`global`).
 2. `ip_is_private`, `.lan`/`.home.arpa`/`.local`, системный bootstrap, `bypass_devices`, `private`/`user_direct_domains`/`ntp` -> `DIRECT`; порт `853` -> `reject`.
 3. `bittorrent`, `torrent_domain` (и порты `6881-6889`, `51413` в Mihomo) -> **`🧲 Торренты`** (по умолчанию `DIRECT`, с возможностью выбора ноды/региона из подписки).
-4. QUIC (`udp/443` `reject`) для `user_proxy_domains`, ИИ, YouTube, Meta, Discord, TikTok, `ru_bundle` (игры не затрагиваются!).
-5. `user_proxy_domains` -> `🛑 Обход блокировок` (высший пользовательский приоритет).
+4. QUIC (`udp/443` `reject`) для `user_proxy_domains`, ИИ, YouTube, Meta, Discord, TikTok и расширенных списков маршрутизации (игры не затрагиваются!).
+5. `user_proxy_domains` -> пользовательский прокси-пул (высший пользовательский приоритет).
 6. `force_proxy_devices` -> `📺 Устройства (Full-VPN)`.
 7. Явные ИИ-домены + наборы `ai_domain`, `google_gemini_domain`, `openai_domain`, `anthropic_domain`, `perplexity_domain`, `xai_domain`, `cursor_domain`, `copilot_domain` -> **`🤖 Нейросети (ИИ)`** (по умолчанию `🤖 Авто-ИИ`, строго **до** `google_domain`!).
 8. `youtube_domain`/`spotify_domain`/`twitch_domain` + `SPOTIFY_EXTRA_DOMAINS`/`TWITCH_EXTRA_DOMAINS` -> `▶️ YouTube & Медиа`.
 9. `telegram`/`whatsapp`/`discord` -> `💬 Мессенджеры`.
-10. Игровые CDN (`steamcontent.com`, `epicgames-download1.akamaized.net` и др.) -> `DIRECT`; игровые платформы -> `🎮 Гейминг`; `roblox_domain` + `ROBLOX_EXTRA_DOMAINS` -> **`🧱 Roblox`** (по умолчанию `🇩🇪 Германия`, строго до `ru_bundle`).
-11. `google_domain` -> `🌐 Google & Android`; блокировки/Cloudflare/TikTok -> `🛑 Обход блокировок`; `ru_domain`/`ru_ip` -> `DIRECT`.
+10. Игровые CDN (`steamcontent.com`, `epicgames-download1.akamaized.net` и др.) -> `DIRECT`; игровые платформы -> `🎮 Гейминг`; `roblox_domain` + `ROBLOX_EXTRA_DOMAINS` -> **`🧱 Roblox`** (по умолчанию `🇩🇪 Германия`, приоритетнее расширенных списков).
+11. `google_domain` -> `🌐 Google & Android`; расширенные списки маршрутизации (Cloudflare/TikTok и др.) -> пользовательский прокси-пул; `ru_domain`/`ru_ip` -> `DIRECT`.
 
 ---
 

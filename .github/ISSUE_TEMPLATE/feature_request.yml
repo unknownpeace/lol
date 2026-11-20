@@ -1,0 +1,19 @@
+name: "✨ Feature Request"
+description: "Suggest a new Homelab module, CLI improvement, or core enhancement"
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Use case / problem statement"
+      placeholder: "What workflow or limitation would this solve?"
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: "Proposed design (Alpine Linux + OpenRC compatible)"
+      placeholder: "Describe how the feature should work without Docker or non-Alpine dependencies."
+    validations:
+      required: true

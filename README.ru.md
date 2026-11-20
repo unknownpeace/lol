@@ -12,12 +12,12 @@
 
 [![CI Status](https://github.com/unknownpeace/lol/actions/workflows/ci.yml/badge.svg)](https://github.com/unknownpeace/lol/actions/workflows/ci.yml)
 [![Alpine Linux](https://img.shields.io/badge/Alpine_Linux-3.21--3.24%2B-0D597F?logo=alpinelinux&logoColor=white)](https://alpinelinux.org)
-[![OpenRC Native](https://img.shields.io/badge/Init-OpenRC_Native_(Zero_Docker)-2ea043)](https://wiki.alpinelinux.org/wiki/OpenRC)
+[![OpenRC Native](https://img.shields.io/badge/Init-OpenRC_Native_%28Zero_Docker%29-2ea043)](https://wiki.alpinelinux.org/wiki/OpenRC)
 [![Sing-Box Extended](https://img.shields.io/badge/Core_1-Sing--Box_Extended_v1.14.3-8957e5)](https://github.com/shtorm-7/sing-box-extended)
 [![Mihomo](https://img.shields.io/badge/Core_2-Mihomo_v1.19.34-1f6feb)](https://github.com/MetaCubeX/mihomo)
 [![AdGuard Home](https://img.shields.io/badge/DNS-AdGuard_Home_v1.0.0-68bc71)](https://github.com/AdguardTeam/AdGuardHome)
 [![Web UI](https://img.shields.io/badge/Web_UI-Zashboard_%7C_MetaCubeXD-fb8500)](https://github.com/Zephyruso/zashboard)
-[![LUKS2](https://img.shields.io/badge/Storage-LUKS2_Argon2id-d97706)](#️-отказоустойчивость-и-шифрование-luks2)
+[![LUKS2](https://img.shields.io/badge/Storage-LUKS2_Argon2id-d97706)](#-отказоустойчивость-и-шифрование-luks2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-eab308.svg)](LICENSE)
 
 </div>
@@ -48,19 +48,19 @@
 
 ```mermaid
 flowchart TB
-    ISP(["🌐 Интернет / Провайдер"]) <--> RTR["📡 Основной роутер LAN\n(DHCP-сервер, шлюз WAN)"]
+    ISP(["🌐 Интернет / Провайдер"]) <--> RTR["📡 Основной роутер LAN · DHCP-сервер · Шлюз WAN"]
     RTR <-->|"Ethernet (1 порт)"| GW
-    RTR <--> LAN["💻 Устройства в LAN\n(ПК, консоли, ТВ, смартфоны)"]
+    RTR <--> LAN["💻 Устройства в LAN · ПК · Консоли · ТВ · Смартфоны"]
 
     subgraph GW ["🖥️ Alpine Linux Sidecar Gateway & Homelab (OpenRC)"]
         direction TB
-        NFT["🔥 nftables & Kill-Switch\n(DNS :53 redirect, DoT :853 reject, IPv6 drop, Open NAT)"]
-        AGH["🛡️ AdGuard Home (:53)\nФильтрация рекламы + локальные *.lan"]
-        CORE["⚡ Ядро маршрутизации (:1053 / gateway-tun)\nSing-Box Extended v1.14.3 ⇄ Mihomo v1.19.34"]
-        UI["🎛️ Веб-панель (:9090/ui)\nZashboard ⇄ MetaCubeXD"]
-        CADDY["🔐 Caddy HTTPS (:80/:443)\nLocal PKI (ca.lan) ⇄ DuckDNS Wildcard LE"]
-        HL["🏠 Сервисы Homelab (127.0.0.1)\nVaultwarden · Forgejo · MeTube · Transmission · Code · SMB3"]
-        LUKS[("💾 Внешний диск /srv/storage\next4 / btrfs / f2fs + LUKS2 🔒")]
+        NFT["🔥 nftables & Kill-Switch · DNS :53 · DoT :853 · Open NAT"]
+        AGH["🛡️ AdGuard Home :53 · Фильтрация + Локальные *.lan"]
+        CORE["⚡ Ядро маршрутизации :1053 · gateway-tun · Sing-Box Extended ⇄ Mihomo"]
+        UI["🎛️ Веб-панель :9090/ui · Zashboard ⇄ MetaCubeXD"]
+        CADDY["🔐 Caddy HTTPS :80/:443 · Local PKI ⇄ DuckDNS Wildcard LE"]
+        HL["🏠 Сервисы Homelab · Vaultwarden · Forgejo · MeTube · Transmission · SMB3"]
+        LUKS[("💾 Внешний диск /srv/storage · ext4 / btrfs / f2fs + LUKS2 🔒")]
 
         NFT --> AGH --> CORE
         CORE --- UI
