@@ -17,6 +17,9 @@ ensure_alpine_community_repo() {
 # Инициализация реестра модулей Homelab (/etc/sing-box/homelab/modules.state)
 # Формат: ID|ENABLED|OPENRC_SVC|PORT|DOMAIN|SYS_USER|TITLE
 init_homelab_registry() {
+    if is_openwrt 2>/dev/null || [ -f /etc/openwrt_release ]; then
+        return 0
+    fi
     umask 022
     mkdir -p "$HOMELAB_DIR" "$HOMELAB_LIB_DIR"
     chmod 755 "$HOMELAB_LIB_DIR" 2>/dev/null || true
