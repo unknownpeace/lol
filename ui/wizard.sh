@@ -640,6 +640,7 @@ AGH_EOF
 
     # ЭТАП 5: Регистрация и запуск служб шлюза
     setup_init_scripts
+    is_openwrt && install_openwrt_luci_app >/dev/null 2>&1 || true
 
     write_resolv_conf "nameserver 127.0.0.1
 nameserver ${GW_IP}

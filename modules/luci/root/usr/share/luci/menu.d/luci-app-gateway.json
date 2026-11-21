@@ -1,0 +1,58 @@
+{
+	"admin/gateway": {
+		"title": "Sidecar Gateway",
+		"order": 35,
+		"action": {
+			"type": "firstchild",
+			"recurse": true
+		},
+		"depends": {
+			"acl": [ "luci-app-gateway" ]
+		}
+	},
+
+	"admin/gateway/overview": {
+		"title": "Обзор",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "gateway/overview"
+		}
+	},
+
+	"admin/gateway/network": {
+		"title": "Ядро и сеть",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "gateway/network"
+		}
+	},
+
+	"admin/gateway/proxies": {
+		"title": "Прокси и маршруты",
+		"order": 30,
+		"action": {
+			"type": "view",
+			"path": "gateway/proxies"
+		}
+	},
+
+	"admin/gateway/services": {
+		"title": "Telegram и бэкап",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "gateway/services"
+		}
+	},
+
+	"admin/gateway/system": {
+		"title": "Обновление и логи",
+		"order": 50,
+		"action": {
+			"type": "view",
+			"path": "gateway/system"
+		}
+	}
+}

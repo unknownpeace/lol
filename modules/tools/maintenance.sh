@@ -196,6 +196,7 @@ self_update_gateway() {
     else
         pgrep AdGuardHome >/dev/null 2>&1 || service_ctl adguardhome start || true
     fi
+    is_openwrt && install_openwrt_luci_app >/dev/null 2>&1 || true
 
     # 5. Итоговый отчет о готовности
     ui_step_progress 5 5 "Верификация состояния обновленной системы..."

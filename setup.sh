@@ -41,6 +41,16 @@ ln -sf "${GATEWAY_DIR}/gateway.sh" "$INSTALL_BIN"
 chmod +x "$INSTALL_BIN"
 ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gw 2>/dev/null || true
 chmod +x /usr/bin/gw 2>/dev/null || true
+if [ -f /etc/openwrt_release ] && [ -d /usr/share/luci/menu.d ] && [ -f "${GATEWAY_DIR}/modules/luci/install.sh" ]; then
+    (
+        . "${GATEWAY_DIR}/lib/constants.sh"
+        . "${GATEWAY_DIR}/lib/ui.sh"
+        . "${GATEWAY_DIR}/lib/core.sh"
+        . "${GATEWAY_DIR}/modules/luci/install.sh"
+        detect_os >/dev/null 2>&1 || true
+        install_openwrt_luci_app
+    ) >/dev/null 2>&1 || true
+fi
 
 # 3.5. Установка динамического MOTD и автодополнения в /etc/profile.d
 mkdir -p /etc/profile.d

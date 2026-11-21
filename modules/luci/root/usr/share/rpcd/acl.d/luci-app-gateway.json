@@ -1,0 +1,35 @@
+{
+	"luci-app-gateway": {
+		"description": "Grant access to Universal Sidecar Gateway management in LuCI",
+		"read": {
+			"ubus": {
+				"gateway": [
+					"status",
+					"trace",
+					"domain_inspect",
+					"update_check",
+					"get_logs",
+					"job_poll"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"gateway": [
+					"set_dhcp",
+					"set_killswitch",
+					"set_cron",
+					"set_network",
+					"set_subscription",
+					"node_add",
+					"node_delete",
+					"domain_rule",
+					"device_rule",
+					"set_telegram",
+					"set_password",
+					"job_start"
+				]
+			}
+		}
+	}
+}

@@ -116,6 +116,7 @@ fi
 . "${GATEWAY_DIR}/modules/tools/doctor.sh"
 . "${GATEWAY_DIR}/modules/tools/backup.sh"
 . "${GATEWAY_DIR}/modules/tools/selftest.sh"
+. "${GATEWAY_DIR}/modules/luci/install.sh"
 
 # Загрузка TUI интерфейса и CLI диспетчера
 . "${GATEWAY_DIR}/ui/wizard.sh"
