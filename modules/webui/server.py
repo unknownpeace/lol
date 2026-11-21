@@ -6,7 +6,9 @@ import hmac
 import json
 import mimetypes
 import os
+import select
 import signal
+import socket
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +23,7 @@ ENV_FILE = os.environ.get("GATEWAY_ENV_FILE", "/etc/sing-box/gateway.env")
 
 BIND_HOST = os.environ.get("GATEWAY_WEBUI_HOST", "127.0.0.1")
 BIND_PORT = int(os.environ.get("GATEWAY_WEBUI_PORT", "8095"))
+CONSOLE_PORT = int(os.environ.get("GATEWAY_WEBUI_CONSOLE_PORT", "8096"))
 AUTH_MODE = os.environ.get("GATEWAY_WEBUI_AUTH", "caddy").strip().lower()
 
 ALLOWED_METHODS = {
@@ -41,6 +44,10 @@ ALLOWED_METHODS = {
     "update_check",
     "get_logs",
     "lxc_autostart",
+    "lxc_templates",
+    "lxc_console_token",
+    "lxc_exec",
+    "lxc_config",
     "storage_clean_cache",
     "job_start",
     "job_poll",
@@ -54,6 +61,7 @@ class _BodyReadError(Exception):
     def __init__(self, code, message):
         self.code = code
         self.message = message
+
 
 mimetypes.init()
 mimetypes.add_type("application/javascript; charset=utf-8", ".js")
@@ -167,9 +175,7 @@ class GatewayWebHandler(BaseHTTPRequestHandler):
                 if len(buf) + chunk_size > MAX_BODY_BYTES:
                     raise _BodyReadError(413, "Слишком большой объем запроса")
                 buf.extend(self._read_exact(chunk_size))
-                crlf = self.rfile.read(2)
-                if crlf not in (b"\r\n", b"\n\r", b"\n"):
-                    pass
+                _ = self.rfile.read(2)
             return bytes(buf)
 
         try:
@@ -224,6 +230,74 @@ class GatewayWebHandler(BaseHTTPRequestHandler):
         )
         return False
 
+    def _proxy_console(self):
+        """Transparently proxy HTTP and WebSocket traffic for /console* to local ttyd."""
+        try:
+            upstream = socket.create_connection(("127.0.0.1", CONSOLE_PORT), timeout=8)
+        except OSError:
+            self._send_bytes(
+                503,
+                "text/plain; charset=utf-8",
+                "Веб-консоль ttyd недоступна".encode("utf-8"),
+            )
+            return
+
+        self.close_connection = True
+        try:
+            req_lines = [f"{self.command} {self.path} HTTP/1.1"]
+            is_ws = False
+            for k, v in self.headers.items():
+                kl = k.lower()
+                if kl in ("authorization", "proxy-connection", "keep-alive"):
+                    continue
+                if kl == "upgrade" and "websocket" in v.lower():
+                    is_ws = True
+                if kl == "connection":
+                    continue
+                req_lines.append(f"{k}: {v}")
+            req_lines.append("Connection: Upgrade" if is_ws else "Connection: close")
+            raw_req = ("\r\n".join(req_lines) + "\r\n\r\n").encode("utf-8")
+            upstream.sendall(raw_req)
+
+            if is_ws:
+                self._relay_sockets(self.connection, upstream)
+            else:
+                while True:
+                    chunk = upstream.recv(65536)
+                    if not chunk:
+                        break
+                    self.connection.sendall(chunk)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            try:
+                upstream.close()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _relay_sockets(sock_a, sock_b):
+        sock_a.setblocking(False)
+        sock_b.setblocking(False)
+        sockets = [sock_a, sock_b]
+        while True:
+            readable, _, exceptional = select.select(sockets, [], sockets, 60.0)
+            if exceptional:
+                break
+            if not readable:
+                continue
+            for s in readable:
+                other = sock_b if s is sock_a else sock_a
+                try:
+                    data = s.recv(65536)
+                except (BlockingIOError, OSError):
+                    data = b""
+                if not data:
+                    return
+                other.setblocking(True)
+                other.sendall(data)
+                other.setblocking(False)
+
     def _serve_static(self, req_path):
         rel = req_path.lstrip("/")
         if not rel or rel == "index.html":
@@ -259,6 +333,9 @@ class GatewayWebHandler(BaseHTTPRequestHandler):
         if not self._check_auth():
             return
         parsed = urlparse(self.path)
+        if parsed.path == "/console" or parsed.path.startswith("/console/"):
+            self._proxy_console()
+            return
         if parsed.path.startswith("/api/"):
             self._send_json(405, {"ok": False, "error": "Используйте POST запрос"})
             return

@@ -241,6 +241,27 @@ _collect_alpine_storage_json() {
         _st_fs=$(awk -v mp="$_st_mp" '$2 == mp {print $3; exit}' /proc/mounts 2>/dev/null || true)
     fi
     _st_badge=$(get_storage_disk_badge 2>/dev/null || true)
+    _dirs_tmp="/tmp/gw_api_stdirs.$$"
+    : > "$_dirs_tmp"
+    for _dspec in \
+        "Music|${STORAGE_MUSIC:-${_st_root}/Music}" \
+        "Videos|${STORAGE_VIDEOS:-${_st_root}/Videos}" \
+        "Downloads|${STORAGE_DOWNLOADS:-${_st_root}/Downloads}" \
+        "Incomplete|${STORAGE_INCOMPLETE:-${_st_root}/Incomplete}" \
+        "Backups|${STORAGE_BACKUPS:-${_st_root}/Backups}" \
+        "LXC|${_st_root}/lxc" \
+        "Git-Repos|${_st_root}/git-repos" \
+        "Workspace|${_st_root}/workspace"; do
+        _dn="${_dspec%%|*}"
+        _dp="${_dspec#*|}"
+        if [ -d "$_dp" ]; then
+            _ds=$(timeout 2 du -sh "$_dp" 2>/dev/null | awk '{print $1}' || echo "0")
+            [ -z "$_ds" ] && _ds="0"
+            printf "%s\t%s\t%s\n" "$_dn" "$_dp" "$_ds" >> "$_dirs_tmp"
+        fi
+    done
+    _dirs_json=$(jq -Rn '[inputs | select(length > 0) | split("\t") | {name: .[0], path: .[1], size: .[2]}]' < "$_dirs_tmp" 2>/dev/null || echo '[]')
+    rm -f "$_dirs_tmp" 2>/dev/null || true
     jq -cn \
         --arg root "$_st_root" \
         --argjson ext_expected "$_st_exp" \
@@ -253,6 +274,7 @@ _collect_alpine_storage_json() {
         --arg fs_type "${_st_fs:-}" \
         --arg device "${_st_dev:-}" \
         --arg badge "${_st_badge:-}" \
+        --argjson dirs "$_dirs_json" \
         '{
             root: $root,
             ext_expected: $ext_expected,
@@ -264,7 +286,8 @@ _collect_alpine_storage_json() {
             disk_total: $disk_total,
             fs_type: $fs_type,
             device: $device,
-            badge: $badge
+            badge: $badge,
+            dirs: $dirs
         }'
 }
 
@@ -277,6 +300,14 @@ _collect_alpine_lxc_json() {
     command -v lxc-create >/dev/null 2>&1 && _lxc_inst="true"
     _br_up="false"
     ip link show lxcbr0 >/dev/null 2>&1 && _br_up="true"
+    _arch=$(get_lxc_system_arch 2>/dev/null || echo "amd64")
+    _lxc_ver=$(lxc-create --version 2>/dev/null | head -n 1 | tr -d '\r\n' || echo "")
+    _con_ready="false"
+    if command -v ttyd >/dev/null 2>&1; then
+        if [ -L /run/openrc/started/gateway-console ] || pgrep ttyd >/dev/null 2>&1; then
+            _con_ready="true"
+        fi
+    fi
     _cts_json='[]'
     if [ "$_lxc_inst" = "true" ]; then
         _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
@@ -287,20 +318,42 @@ _collect_alpine_lxc_json() {
                 [ -d "$_ct_dir" ] || continue
                 [ -f "${_ct_dir}/config" ] || continue
                 _ct_name=$(basename "$_ct_dir")
+                _ct_conf="${_ct_dir}/config"
                 _st="STOPPED"
+                _pid=""
                 _ip=""
                 _mem=""
                 if command -v lxc-info >/dev/null 2>&1; then
                     _inf=$(lxc-info -n "$_ct_name" 2>/dev/null || true)
                     if printf "%s\n" "$_inf" | grep -q "State:.*RUNNING"; then
                         _st="RUNNING"
-                        _ip=$(printf "%s\n" "$_inf" | awk '/IP:/ {print $2}' | paste -sd "," - 2>/dev/null || true)
+                        _pid=$(printf "%s\n" "$_inf" | awk '/PID:/ {print $2; exit}' || true)
+                        _ip=$(printf "%s\n" "$_inf" | awk '/IP:/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $2}' | paste -sd "," - | sed 's/,/, /g' 2>/dev/null || true)
                         _mem=$(printf "%s\n" "$_inf" | awk '/Memory use:/ {print $3 " " $4; exit}' 2>/dev/null || true)
                     fi
                 fi
                 _auto="false"
-                grep -q "^lxc\.start\.auto[[:space:]]*=[[:space:]]*1" "${_ct_dir}/config" 2>/dev/null && _auto="true"
-                _snaps=""
+                grep -q "^lxc\.start\.auto[[:space:]]*=[[:space:]]*1" "$_ct_conf" 2>/dev/null && _auto="true"
+                _nest="false"
+                grep -qE "GW_NESTING_BEGIN|nesting\.conf" "$_ct_conf" 2>/dev/null && _nest="true"
+                _stor_mnt="false"
+                grep -qE "GW_STORAGE_BEGIN|[[:space:]]mnt/storage[[:space:]]" "$_ct_conf" 2>/dev/null && _stor_mnt="true"
+                _net_mode="nat"
+                grep -q "^lxc\.net\.0\.type[[:space:]]*=[[:space:]]*macvlan" "$_ct_conf" 2>/dev/null && _net_mode="macvlan"
+                _stat_ip=$(awk -F= '/^[[:space:]]*lxc\.net\.0\.ipv4\.address/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$_ct_conf" 2>/dev/null || true)
+                _mem_lim=$(awk -F= '/^[[:space:]]*lxc\.cgroup2\.memory\.max/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$_ct_conf" 2>/dev/null || true)
+                _cpu_lim=$(awk -F= '/^[[:space:]]*lxc\.cgroup2\.cpu\.max/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); split($2,a," "); if (a[1]>0) { q=(a[2]>0?a[2]:100000); v=a[1]/q; if (v == int(v)) printf "%d", v; else printf "%.1f", v } exit}' "$_ct_conf" 2>/dev/null || true)
+                _os_pretty=""
+                if [ -r "${_ct_dir}/rootfs/etc/os-release" ]; then
+                    _os_pretty=$(awk -F= '/^PRETTY_NAME=/ {v=$2; gsub(/^["'\'']|["'\'']$/, "", v); print v; exit}' "${_ct_dir}/rootfs/etc/os-release" 2>/dev/null || true)
+                fi
+                [ -z "$_os_pretty" ] && [ -r "${_ct_dir}/.gw_os" ] && _os_pretty=$(tr -d '\r\n' < "${_ct_dir}/.gw_os" 2>/dev/null || true)
+                _disk_use=""
+                if [ -d "${_ct_dir}/rootfs" ]; then
+                    _disk_use=$(timeout 2 du -sh "${_ct_dir}/rootfs" 2>/dev/null | awk '{print $1}' || true)
+                fi
+                _snaps_tmp="/tmp/gw_api_snaps.$$"
+                : > "$_snaps_tmp"
                 if [ -d "${_ct_dir}/snaps" ]; then
                     for _sd in "${_ct_dir}/snaps/"*; do
                         [ -d "$_sd" ] || continue
@@ -311,34 +364,59 @@ _collect_alpine_lxc_json() {
                         else
                             _dt=$(date -r "$_sd" '+%Y-%m-%d %H:%M' 2>/dev/null || true)
                         fi
-                        if [ -z "$_snaps" ]; then
-                            _snaps="${_sn}@${_dt}"
-                        else
-                            _snaps="${_snaps};${_sn}@${_dt}"
-                        fi
+                        _cmt=""
+                        [ -f "${_sd}/comment" ] && _cmt=$(tr -d '\r\n\t' < "${_sd}/comment" 2>/dev/null | cut -c1-120 || true)
+                        jq -cn --arg name "$_sn" --arg date "$_dt" --arg comment "$_cmt" '{name: $name, date: $date, comment: $comment}' >> "$_snaps_tmp"
                     done
                 fi
-                printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$_ct_name" "$_st" "$_ip" "$_mem" "$_auto" "$_snaps" >> "$_lxc_tmp"
+                _snaps_json=$(jq -s '.' < "$_snaps_tmp" 2>/dev/null || echo '[]')
+                rm -f "$_snaps_tmp" 2>/dev/null || true
+                jq -cn \
+                    --arg name "$_ct_name" \
+                    --arg state "$_st" \
+                    --arg pid "$_pid" \
+                    --arg ipv4 "$_ip" \
+                    --arg memory "$_mem" \
+                    --arg mem_limit "$_mem_lim" \
+                    --arg cpu_limit "$_cpu_lim" \
+                    --arg disk_usage "$_disk_use" \
+                    --arg os_pretty "$_os_pretty" \
+                    --arg net_mode "$_net_mode" \
+                    --arg static_ip "$_stat_ip" \
+                    --argjson autostart "$_auto" \
+                    --argjson nesting "$_nest" \
+                    --argjson storage_mount "$_stor_mnt" \
+                    --argjson snapshots "$_snaps_json" \
+                    '{
+                        name: $name,
+                        state: $state,
+                        pid: $pid,
+                        ipv4: $ipv4,
+                        memory: $memory,
+                        mem_limit: $mem_limit,
+                        cpu_limit: $cpu_limit,
+                        disk_usage: $disk_usage,
+                        os_pretty: $os_pretty,
+                        net_mode: $net_mode,
+                        static_ip: $static_ip,
+                        autostart: $autostart,
+                        nesting: $nesting,
+                        storage_mount: $storage_mount,
+                        snapshots: $snapshots
+                    }' >> "$_lxc_tmp"
             done
         fi
-        _cts_json=$(jq -Rn '
-            [inputs | select(length > 0) | split("\t") | {
-                name: .[0],
-                state: .[1],
-                ipv4: .[2],
-                memory: .[3],
-                autostart: (.[4] == "true"),
-                snapshots: (
-                    if .[5] == "" then []
-                    else [.[5] | split(";")[] | split("@") | {name: .[0], date: (.[1] // "")}]
-                    end
-                )
-            }]
-        ' < "$_lxc_tmp" 2>/dev/null || echo '[]')
+        _cts_json=$(jq -s '.' < "$_lxc_tmp" 2>/dev/null || echo '[]')
         rm -f "$_lxc_tmp" 2>/dev/null || true
     fi
-    jq -cn --argjson installed "$_lxc_inst" --argjson bridge_up "$_br_up" --argjson containers "$_cts_json" \
-        '{installed: $installed, bridge_up: $bridge_up, containers: $containers}'
+    jq -cn \
+        --argjson installed "$_lxc_inst" \
+        --argjson bridge_up "$_br_up" \
+        --arg arch "$_arch" \
+        --arg lxc_version "$_lxc_ver" \
+        --argjson console_ready "$_con_ready" \
+        --argjson containers "$_cts_json" \
+        '{installed: $installed, bridge_up: $bridge_up, arch: $arch, lxc_version: $lxc_version, console_ready: $console_ready, containers: $containers}'
 }
 
 _collect_links_json() {
@@ -1193,13 +1271,14 @@ _cmd_get_logs() {
         check)
             TXT=$(run_gateway_quick_check </dev/null 2>&1 | _strip_ansi)
             ;;
-        webui|caddy|vaultwarden|forgejo|code|metube|transmission)
+        webui|console|caddy|vaultwarden|forgejo|code|metube|transmission)
             if is_openwrt 2>/dev/null; then
                 _json_err "Источник лога ${TGT} доступен только в Alpine Linux"; return 0
             fi
             _lf=""
             case "$TGT" in
                 webui)        _lf="/var/log/gateway-webui.log" ;;
+                console)      _lf="/var/log/gateway-console.log" ;;
                 caddy)        _lf="/var/log/caddy.log" ;;
                 vaultwarden)  _lf="/var/log/vaultwarden.log" ;;
                 code)         _lf="/var/log/code-server.log" ;;
@@ -1244,6 +1323,188 @@ _cmd_lxc_autostart() {
     else
         _json_err "Не удалось изменить автозапуск для ${CT_NAME}"
     fi
+}
+
+_cmd_lxc_templates() {
+    is_openwrt 2>/dev/null && { _json_err "LXC доступен только в Alpine Linux"; return 0; }
+    FORCE_T=$(_jq_arg "force")
+    LXC_ARCH=$(get_lxc_system_arch 2>/dev/null || echo "amd64")
+    CACHE_T="/tmp/lxc_web_catalog_${LXC_ARCH}.tsv"
+    SRC_LBL="images.linuxcontainers.org"
+
+    NEED_FETCH="no"
+    if [ "$FORCE_T" = "yes" ] || [ "$FORCE_T" = "true" ] || [ ! -s "$CACHE_T" ]; then
+        NEED_FETCH="yes"
+    elif [ -n "$(find "$CACHE_T" -mmin +60 2>/dev/null || true)" ]; then
+        NEED_FETCH="yes"
+    fi
+
+    if [ "$NEED_FETCH" = "yes" ]; then
+        _tmp_idx="/tmp/lxc_idx_raw.$$"
+        if curl -fsS --connect-timeout 8 -m 15 "https://images.linuxcontainers.org/meta/1.0/index-system" 2>/dev/null | \
+            awk -F';' -v a="$LXC_ARCH" '($3 == a && NF >= 4 && $1 != "" && $2 != "") { v = ($4 != "" ? $4 : "default"); b = ($5 != "" ? $5 : ""); print $1 "\t" $2 "\t" v "\t" b }' | \
+            sort -u > "$_tmp_idx" 2>/dev/null && [ -s "$_tmp_idx" ]; then
+            mv -f "$_tmp_idx" "$CACHE_T"
+        else
+            rm -f "$_tmp_idx" 2>/dev/null || true
+            SRC_LBL="fallback"
+        fi
+    fi
+
+    if [ ! -s "$CACHE_T" ]; then
+        SRC_LBL="fallback"
+        cat << 'FB_CAT' > "$CACHE_T"
+almalinux	9	default	offline
+alpine	3.21	default	offline
+alpine	3.22	default	offline
+alpine	3.23	default	offline
+alpine	3.24	default	offline
+alpine	edge	default	offline
+archlinux	current	default	offline
+debian	bookworm	default	offline
+debian	trixie	default	offline
+fedora	43	default	offline
+kali	current	default	offline
+rockylinux	9	default	offline
+ubuntu	jammy	default	offline
+ubuntu	noble	default	offline
+FB_CAT
+    fi
+
+    TMPLS_JSON=$(jq -Rn '
+        [inputs | select(length > 0) | split("\t") | {
+            distro: .[0],
+            release: .[1],
+            variant: .[2],
+            build: (.[3] // "")
+        }]
+    ' < "$CACHE_T" 2>/dev/null || echo '[]')
+    TOT=$(printf "%s" "$TMPLS_JSON" | jq 'length' 2>/dev/null || echo 0)
+    UPD_AT=$(date -r "$CACHE_T" '+%Y-%m-%d %H:%M' 2>/dev/null || date '+%Y-%m-%d %H:%M')
+    jq -cn \
+        --arg arch "$LXC_ARCH" \
+        --arg source "$SRC_LBL" \
+        --arg updated_at "$UPD_AT" \
+        --argjson total "$TOT" \
+        --argjson templates "$TMPLS_JSON" \
+        '{ok: true, arch: $arch, source: $source, updated_at: $updated_at, total: $total, templates: $templates}'
+}
+
+_cmd_lxc_console_token() {
+    is_openwrt 2>/dev/null && { _json_err "Веб-консоль доступна только в Alpine Linux"; return 0; }
+    CT_NAME=$(_jq_arg "name")
+    _is_safe_id "$CT_NAME" || { _json_err "Некорректное имя контейнера"; return 0; }
+    if ! lxc-info -n "$CT_NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
+        _json_err "Контейнер ${CT_NAME} остановлен — сначала запустите его"; return 0
+    fi
+    if ! command -v ttyd >/dev/null 2>&1; then
+        _json_err "Пакет ttyd не установлен (выполните: apk add ttyd && gw update)"; return 0
+    fi
+    if [ ! -L /run/openrc/started/gateway-console ] && ! pgrep ttyd >/dev/null 2>&1; then
+        [ -x /etc/init.d/gateway-console ] && rc-service gateway-console start >/dev/null 2>&1 || true
+        sleep 1
+    fi
+    if [ ! -L /run/openrc/started/gateway-console ] && ! pgrep ttyd >/dev/null 2>&1; then
+        _json_err "Служба веб-консоли gateway-console не запущена"; return 0
+    fi
+
+    # Очистка просроченных токенов старше 120 сек
+    find /tmp -maxdepth 1 -name 'gw_console_tok_*' -mmin +2 -delete 2>/dev/null || true
+
+    TOK=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -dc '0-9a-f' | head -c 32 || true)
+    [ "${#TOK}" -ne 32 ] && { _json_err "Не удалось сгенерировать токен консоли"; return 0; }
+    EXP_TS=$(( $(date +%s 2>/dev/null || echo 0) + 60 ))
+    (
+        umask 077
+        printf "%s|%s\n" "$CT_NAME" "$EXP_TS" > "/tmp/gw_console_tok_${TOK}"
+    )
+    jq -cn --arg token "$TOK" --arg url "/console/?arg=${TOK}" '{ok: true, token: $token, url: $url}'
+}
+
+_cmd_lxc_exec() {
+    is_openwrt 2>/dev/null && { _json_err "LXC доступен только в Alpine Linux"; return 0; }
+    CT_NAME=$(_jq_arg "name")
+    CMD_STR=$(_jq_arg "cmd")
+    _is_safe_id "$CT_NAME" || { _json_err "Некорректное имя контейнера"; return 0; }
+    [ -z "$(printf "%s" "$CMD_STR" | tr -d ' \t\r\n')" ] && { _json_err "Введите команду для выполнения"; return 0; }
+    [ "${#CMD_STR}" -gt 2000 ] && { _json_err "Команда слишком длинная (макс. 2000 символов)"; return 0; }
+    if ! lxc-info -n "$CT_NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
+        _json_err "Контейнер ${CT_NAME} не запущен"; return 0
+    fi
+    _exec_f="/tmp/gw_lxc_exec.$$"
+    _rc=0
+    timeout 20 lxc-attach -n "$CT_NAME" -- /bin/sh -c "$CMD_STR" </dev/null >"$_exec_f" 2>&1 || _rc=$?
+    _out=$(head -c 16000 "$_exec_f" 2>/dev/null | _strip_ansi || true)
+    rm -f "$_exec_f" 2>/dev/null || true
+    jq -cn --argjson exit_code "$_rc" --arg output "$_out" '{ok: true, exit_code: $exit_code, output: $output}'
+}
+
+_cmd_lxc_config() {
+    is_openwrt 2>/dev/null && { _json_err "LXC доступен только в Alpine Linux"; return 0; }
+    CT_NAME=$(_jq_arg "name")
+    _is_safe_id "$CT_NAME" || { _json_err "Некорректное имя контейнера"; return 0; }
+    _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
+    [ -f "${_real_path}/${CT_NAME}/config" ] || { _json_err "Контейнер ${CT_NAME} не найден"; return 0; }
+
+    MEM_IN=$(_jq_arg "mem_limit" | tr -d ' \t\r\n')
+    CPU_IN=$(_jq_arg "cpu_limit" | tr -d ' \t\r\n')
+    AUTO_IN=$(_jq_arg "autostart")
+    NEST_IN=$(_jq_arg "nesting")
+    STOR_IN=$(_jq_arg "storage_mount")
+    RPASS_IN=$(_jq_arg "root_pass" | tr -d '\r\n')
+    RESTART_IN=$(_jq_arg "restart")
+
+    case "$MEM_IN" in
+        ""|none|0) MEM_VAL="none" ;;
+        *[KkMmGg])
+            case "$MEM_IN" in
+                *[!0-9KkMmGg]*) _json_err "Некорректный лимит ОЗУ (пример: 512M, 2G)"; return 0 ;;
+                *) MEM_VAL="$MEM_IN" ;;
+            esac
+            ;;
+        *[!0-9]*) _json_err "Некорректный лимит ОЗУ (пример: 512M, 2G)"; return 0 ;;
+        *) MEM_VAL="${MEM_IN}M" ;;
+    esac
+
+    case "$CPU_IN" in
+        ""|none|0) CPU_VAL="none" ;;
+        *)
+            if printf "%s" "$CPU_IN" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+                CPU_VAL="$CPU_IN"
+            else
+                _json_err "Некорректный лимит CPU (пример: 1, 2, 0.5)"; return 0
+            fi
+            ;;
+    esac
+
+    AUTO_VAL="__KEEP__"
+    [ -n "$AUTO_IN" ] && { case "$AUTO_IN" in on|yes|true|1) AUTO_VAL="yes" ;; *) AUTO_VAL="no" ;; esac; }
+    NEST_VAL="__KEEP__"
+    [ -n "$NEST_IN" ] && { case "$NEST_IN" in on|yes|true|1) NEST_VAL="yes" ;; *) NEST_VAL="no" ;; esac; }
+    STOR_VAL="__KEEP__"
+    [ -n "$STOR_IN" ] && { case "$STOR_IN" in on|yes|true|1) STOR_VAL="yes" ;; *) STOR_VAL="no" ;; esac; }
+
+    if ! lxc_apply_config_updates "$CT_NAME" "$MEM_VAL" "$CPU_VAL" "$AUTO_VAL" "$NEST_VAL" "$STOR_VAL" >/dev/null 2>&1; then
+        _json_err "Не удалось обновить конфигурацию ${CT_NAME}"; return 0
+    fi
+
+    if [ -n "$RPASS_IN" ]; then
+        if lxc-info -n "$CT_NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
+            printf "root:%s\n" "$RPASS_IN" | lxc-attach -n "$CT_NAME" -- chpasswd >/dev/null 2>&1 || true
+        elif [ -d "${_real_path}/${CT_NAME}/rootfs" ]; then
+            printf "root:%s\n" "$RPASS_IN" | chroot "${_real_path}/${CT_NAME}/rootfs" /usr/sbin/chpasswd >/dev/null 2>&1 || \
+            printf "root:%s\n" "$RPASS_IN" | chroot "${_real_path}/${CT_NAME}/rootfs" /sbin/chpasswd >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if [ "$RESTART_IN" = "yes" ] || [ "$RESTART_IN" = "true" ]; then
+        if lxc-info -n "$CT_NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
+            lxc-stop -n "$CT_NAME" -t 5 >/dev/null 2>&1 || lxc-stop -n "$CT_NAME" -k >/dev/null 2>&1 || true
+            sleep 1
+            lxc-start -n "$CT_NAME" >/dev/null 2>&1 || true
+        fi
+    fi
+    jq -cn --arg name "$CT_NAME" '{ok: true, name: $name, message: "Настройки контейнера обновлены"}'
 }
 
 _cmd_storage_clean_cache() {
@@ -1344,8 +1605,11 @@ _cmd_job_start() {
             _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
             [ -f "${_real_path}/${A1}/config" ] || { _json_err "Контейнер ${A1} не найден"; return 0; }
             case "$A2" in
-                start|stop|restart|fix-net)
-                    CMD_BODY="lxc_control '${A2}' '${A1}'"
+                start|restart|fix-net)
+                    CMD_BODY="lxc_control '${A2}' '${A1}'; _rc=\$?; if [ \$_rc -eq 0 ] && lxc-info -n '${A1}' 2>/dev/null | grep -q 'State:.*RUNNING'; then for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do lxc-info -n '${A1}' -iH 2>/dev/null | grep -q '[0-9][.][0-9]' && break; sleep 1; done; fi; (exit \$_rc)"
+                    ;;
+                stop)
+                    CMD_BODY="lxc_control 'stop' '${A1}'"
                     ;;
                 snap_create)
                     CMD_BODY="lxc_manage_snapshots '${A1}' 'create'"
@@ -1354,7 +1618,7 @@ _cmd_job_start() {
                     _sn="${A2#snap_restore:}"
                     _is_safe_id "$_sn" || { _json_err "Некорректное имя снимка"; return 0; }
                     [ -d "${_real_path}/${A1}/snaps/${_sn}" ] || { _json_err "Снимок ${_sn} не найден"; return 0; }
-                    CMD_BODY="echo '[*] Восстановление ${A1} из снимка ${_sn}...' && lxc-stop -n '${A1}' -k 2>/dev/null || true; sleep 1; if lxc-snapshot -n '${A1}' -r '${_sn}'; then lxc-start -n '${A1}' && echo '[✓] Контейнер ${A1} восстановлен из ${_sn} и запущен.'; else echo '[X] Ошибка восстановления снимка ${_sn}' >&2; false; fi"
+                    CMD_BODY="echo '[*] Восстановление ${A1} из снимка ${_sn}...' && lxc-stop -n '${A1}' -k 2>/dev/null || true; sleep 1; if lxc-snapshot -n '${A1}' -r '${_sn}'; then lxc-start -n '${A1}' && for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do lxc-info -n '${A1}' -iH 2>/dev/null | grep -q '[0-9][.][0-9]' && break; sleep 1; done && echo '[✓] Контейнер ${A1} восстановлен из ${_sn} и запущен.'; else echo '[X] Ошибка восстановления снимка ${_sn}' >&2; false; fi"
                     ;;
                 snap_delete:*)
                     _sn="${A2#snap_delete:}"
@@ -1365,6 +1629,42 @@ _cmd_job_start() {
                 *)
                     _json_err "Неизвестное действие LXC: ${A2}"; return 0 ;;
             esac
+            ;;
+        lxc_create)
+            is_openwrt 2>/dev/null && { _json_err "LXC доступен только в Alpine Linux"; return 0; }
+            if ! printf "%s" "$A1" | jq -e '.name != null and .distro != null and .release != null' >/dev/null 2>&1; then
+                _json_err "Некорректная спецификация контейнера"; return 0
+            fi
+            _spec_name=$(printf "%s" "$A1" | jq -r '.name // empty' 2>/dev/null || true)
+            _is_safe_id "$_spec_name" || { _json_err "Некорректное имя контейнера (латиница, цифры, - и _)"; return 0; }
+            _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
+            [ -e "${_real_path}/${_spec_name}" ] && { _json_err "Контейнер ${_spec_name} уже существует"; return 0; }
+            ;;
+        lxc_clone)
+            is_openwrt 2>/dev/null && { _json_err "LXC доступен только в Alpine Linux"; return 0; }
+            _is_safe_id "$A1" || { _json_err "Некорректное имя исходного контейнера"; return 0; }
+            _is_safe_id "$A2" || { _json_err "Некорректное имя клона (латиница, цифры, - и _)"; return 0; }
+            _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
+            [ -f "${_real_path}/${A1}/config" ] || { _json_err "Контейнер ${A1} не найден"; return 0; }
+            [ -e "${_real_path}/${A2}" ] && { _json_err "Контейнер ${A2} уже существует"; return 0; }
+            CMD_BODY="echo '[*] Клонирование контейнера ${A1} -> ${A2}...' && _was_run='no' && if lxc-info -n '${A1}' 2>/dev/null | grep -q 'State:.*RUNNING'; then _was_run='yes'; lxc-stop -n '${A1}' -t 10 || lxc-stop -n '${A1}' -k || true; fi && if lxc-copy -n '${A1}' -N '${A2}'; then _new_mac=\"10:66:6a:\$(hexdump -n 3 -e '/1 \":%02x\"' /dev/urandom 2>/dev/null | cut -c 2- || echo '22:33:44')\"; sed -i \"s|^lxc\\.net\\.0\\.hwaddr.*|lxc.net.0.hwaddr = \${_new_mac}|\" '${_real_path}/${A2}/config' 2>/dev/null || true; [ -f '${_real_path}/${A1}/.gw_os' ] && cp -f '${_real_path}/${A1}/.gw_os' '${_real_path}/${A2}/.gw_os' 2>/dev/null || true; [ \"\$_was_run\" = 'yes' ] && lxc-start -n '${A1}' 2>/dev/null || true; if lxc-start -n '${A2}' 2>/dev/null; then for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do lxc-info -n '${A2}' -iH 2>/dev/null | grep -q '[0-9][.][0-9]' && break; sleep 1; done; fi; echo '[✓] Клон ${A2} успешно создан и запущен!'; else [ \"\$_was_run\" = 'yes' ] && lxc-start -n '${A1}' 2>/dev/null || true; echo '[X] Ошибка клонирования ${A1}' >&2; false; fi"
+            ;;
+        lxc_delete)
+            is_openwrt 2>/dev/null && { _json_err "LXC доступен только в Alpine Linux"; return 0; }
+            _is_safe_id "$A1" || { _json_err "Некорректное имя контейнера"; return 0; }
+            _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
+            [ -f "${_real_path}/${A1}/config" ] || { _json_err "Контейнер ${A1} не найден"; return 0; }
+            CMD_BODY="echo '[*] Удаление контейнера ${A1}...' && lxc-stop -n '${A1}' -k 2>/dev/null || true; sleep 1; if lxc-destroy -n '${A1}' -s -f; then echo '[✓] Контейнер ${A1} полностью удалён.'; else echo '[X] Ошибка удаления ${A1}' >&2; false; fi"
+            ;;
+        lxc_snap_create)
+            is_openwrt 2>/dev/null && { _json_err "LXC доступен только в Alpine Linux"; return 0; }
+            _is_safe_id "$A1" || { _json_err "Некорректное имя контейнера"; return 0; }
+            _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
+            [ -f "${_real_path}/${A1}/config" ] || { _json_err "Контейнер ${A1} не найден"; return 0; }
+            ;;
+        lxc_doctor)
+            is_openwrt 2>/dev/null && { _json_err "LXC доступен только в Alpine Linux"; return 0; }
+            CMD_BODY='ensure_lxc_subsystem "no" && check_and_heal_lxc_doctor && echo "[✓] Подсистема LXC (пакеты, cgroups v2, мост lxcbr0, lxcfs) проверена и готова!"'
             ;;
         ssl_local)
             is_openwrt 2>/dev/null && { _json_err "SSL доступен только в Alpine Linux"; return 0; }
@@ -1409,6 +1709,20 @@ _cmd_job_start() {
     JOB_ID="j_$(date +%s)_$$"
     JOB_BASE="/tmp/gw_luci_job_${JOB_ID}"
     printf "%s\n" "$JOB_ID" > /tmp/gw_luci_current.id
+
+    if [ "$ACT" = "lxc_create" ]; then
+        _spec_f="/tmp/gw_lxc_spec_${JOB_ID}.json"
+        (
+            umask 077
+            printf "%s\n" "$A1" > "$_spec_f"
+        )
+        CMD_BODY="lxc_create_from_spec '${_spec_f}'; _cr_rc=\$?; rm -f '${_spec_f}' 2>/dev/null || true; (exit \$_cr_rc)"
+    elif [ "$ACT" = "lxc_snap_create" ]; then
+        _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
+        _scom_f="/tmp/gw_lxc_scom_${JOB_ID}.txt"
+        printf "%s" "$A2" | tr -d '\r\n\t' | cut -c1-120 > "$_scom_f"
+        CMD_BODY="_bef=''; [ -d '${_real_path}/${A1}/snaps' ] && _bef=\$(ls -1 '${_real_path}/${A1}/snaps' 2>/dev/null | tr '\n' ' '); lxc_manage_snapshots '${A1}' 'create'; _sn_rc=\$?; if [ \$_sn_rc -eq 0 ] && [ -s '${_scom_f}' ] && [ -d '${_real_path}/${A1}/snaps' ]; then _new_s=\$(ls -1t '${_real_path}/${A1}/snaps' 2>/dev/null | while IFS= read -r _s; do case \" \${_bef} \" in *\" \${_s} \"*) ;; *) printf '%s' \"\$_s\"; break ;; esac; done); [ -n \"\$_new_s\" ] && cp -f '${_scom_f}' \"${_real_path}/${A1}/snaps/\${_new_s}/comment\" 2>/dev/null || true; fi; if [ \$_sn_rc -eq 0 ] && lxc-info -n '${A1}' 2>/dev/null | grep -q 'State:.*RUNNING'; then for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do lxc-info -n '${A1}' -iH 2>/dev/null | grep -q '[0-9][.][0-9]' && break; sleep 1; done; fi; rm -f '${_scom_f}' 2>/dev/null || true; (exit \$_sn_rc)"
+    fi
 
     if [ "$ACT" = "update" ]; then
         cat << JOB_UPD > "${JOB_BASE}.sh"
@@ -1496,6 +1810,10 @@ case "$METHOD" in
     update_check)        _cmd_update_check ;;
     get_logs)            _cmd_get_logs ;;
     lxc_autostart)       _cmd_lxc_autostart ;;
+    lxc_templates)       _cmd_lxc_templates ;;
+    lxc_console_token)   _cmd_lxc_console_token ;;
+    lxc_exec)            _cmd_lxc_exec ;;
+    lxc_config)          _cmd_lxc_config ;;
     storage_clean_cache) _cmd_storage_clean_cache ;;
     job_start)           _cmd_job_start ;;
     job_poll)            _cmd_job_poll ;;

@@ -1,6 +1,6 @@
 #!/bin/sh
 # ==============================================================================
-# Установщик и синхронизатор веб-панели Alpine Linux (gateway-webui)
+# Установщик и синхронизатор веб-панели Alpine Linux (gateway-webui + ttyd)
 # На OpenWrt не выполняется (там работает native LuCI luci-app-gateway).
 # ==============================================================================
 
@@ -15,6 +15,9 @@ install_alpine_webui() {
     if ! command -v python3 >/dev/null 2>&1; then
         apk add --no-cache python3 >/dev/null 2>&1 || return 1
     fi
+    if ! command -v ttyd >/dev/null 2>&1; then
+        apk add --no-cache ttyd >/dev/null 2>&1 || true
+    fi
 
     load_gateway_env >/dev/null 2>&1 || true
 
@@ -23,6 +26,34 @@ install_alpine_webui() {
     if is_module_enabled "caddy" && [ -x /usr/sbin/caddy ]; then
         BIND_HOST="127.0.0.1"
         AUTH_MODE="caddy"
+    fi
+
+    if command -v ttyd >/dev/null 2>&1 && [ -f "${SRC_WEBUI}/lxc_console.sh" ]; then
+        cat << CON_INIT > /etc/init.d/gateway-console
+#!/sbin/openrc-run
+name="gateway-console"
+description="Gateway LXC Web Console (ttyd)"
+supervisor="supervise-daemon"
+command="/usr/bin/ttyd"
+command_args="-i lo -p ${PORT_WEBUI_CONSOLE:-8096} -b /console -a -W -t fontSize=14 -t cursorBlink=true /bin/sh ${SRC_WEBUI}/lxc_console.sh"
+output_log="/var/log/gateway-console.log"
+error_log="/var/log/gateway-console.log"
+
+depend() {
+    need net
+}
+
+start_pre() {
+    checkpath -f -m 0640 /var/log/gateway-console.log
+}
+CON_INIT
+        chmod 755 /etc/init.d/gateway-console
+        if command -v rc-update >/dev/null 2>&1; then
+            rc-update add gateway-console default >/dev/null 2>&1 || true
+        fi
+        if command -v rc-service >/dev/null 2>&1; then
+            rc-service gateway-console restart >/dev/null 2>&1 || rc-service gateway-console start >/dev/null 2>&1 || true
+        fi
     fi
 
     cat << INIT_EOF > /etc/init.d/gateway-webui
@@ -38,6 +69,7 @@ error_log="/var/log/gateway-webui.log"
 export GATEWAY_DIR="${GATEWAY_DIR}"
 export GATEWAY_WEBUI_HOST="${BIND_HOST}"
 export GATEWAY_WEBUI_PORT="${PORT_WEBUI:-8095}"
+export GATEWAY_WEBUI_CONSOLE_PORT="${PORT_WEBUI_CONSOLE:-8096}"
 export GATEWAY_WEBUI_AUTH="${AUTH_MODE}"
 
 depend() {

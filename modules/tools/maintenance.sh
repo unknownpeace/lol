@@ -1,6 +1,6 @@
 #!/bin/sh
 rotate_gateway_logs() {
-    for LOG_F in "$SB_LOG_FILE" "$MIHOMO_LOG_FILE" "$AUTOUPDATE_LOG" /var/log/gateway-webui.log /var/log/caddy.log /var/log/vaultwarden.log /var/log/metube.log /var/log/code-server.log /var/log/transmission/transmission.log; do
+    for LOG_F in "$SB_LOG_FILE" "$MIHOMO_LOG_FILE" "$AUTOUPDATE_LOG" /var/log/gateway-webui.log /var/log/gateway-console.log /var/log/caddy.log /var/log/vaultwarden.log /var/log/metube.log /var/log/code-server.log /var/log/transmission/transmission.log; do
         if [ -f "$LOG_F" ]; then
             F_SIZE=$(wc -c < "$LOG_F" 2>/dev/null | tr -d ' \t\r\n' || echo "0")
             if [ "${F_SIZE:-0}" -gt 1048576 ]; then

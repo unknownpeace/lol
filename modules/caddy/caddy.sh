@@ -329,7 +329,27 @@ register_caddy_site() {
 
     LE_SITE_BLOCK=""
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        if [ "$SITE_MOD" = "vaultwarden" ]; then
+        if [ "$SITE_MOD" = "gateway" ]; then
+            CON_PORT="${PORT_WEBUI_CONSOLE:-8096}"
+            LE_SITE_BLOCK="
+${LE_DOM_HEADER} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    encode zstd gzip
+${AUTH_BLOCK}
+    handle /console* {
+        reverse_proxy 127.0.0.1:${CON_PORT} {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+        }
+    }
+    handle {
+        reverse_proxy 127.0.0.1:${SITE_PORT} {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+        }
+    }
+}"
+        elif [ "$SITE_MOD" = "vaultwarden" ]; then
             LE_SITE_BLOCK="
 ${LE_DOM_HEADER} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
@@ -366,7 +386,29 @@ ${AUTH_BLOCK}
         fi
     fi
 
-    if [ "$SITE_MOD" = "vaultwarden" ]; then
+    if [ "$SITE_MOD" = "gateway" ]; then
+        CON_PORT="${PORT_WEBUI_CONSOLE:-8096}"
+        cat << GW_SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
+${LAN_DOM_HEADER} {
+    tls internal
+    encode zstd gzip
+${AUTH_BLOCK}
+    handle /console* {
+        reverse_proxy 127.0.0.1:${CON_PORT} {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+        }
+    }
+    handle {
+        reverse_proxy 127.0.0.1:${SITE_PORT} {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+        }
+    }
+}
+${LE_SITE_BLOCK}
+GW_SITE_EOF
+    elif [ "$SITE_MOD" = "vaultwarden" ]; then
         # Чистый эталонный профиль проксирования для Vaultwarden
         cat << VW_SITE_EOF > "${CADDY_CONFD}/${SITE_MOD}.caddy"
 ${LAN_DOM_HEADER} {

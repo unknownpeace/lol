@@ -536,6 +536,195 @@ lxc_control() {
     return 0
 }
 
+# Идемпотентное обновление ресурсов и опций в config существующего контейнера
+lxc_apply_config_updates() {
+    CT_NAME="$1"
+    UPD_MEM="${2:-__KEEP__}"
+    UPD_CPU="${3:-__KEEP__}"
+    UPD_AUTO="${4:-__KEEP__}"
+    UPD_NEST="${5:-__KEEP__}"
+    UPD_STOR="${6:-__KEEP__}"
+    CT_CONF="${LXC_VAR_LIB}/${CT_NAME}/config"
+    [ -f "$CT_CONF" ] || return 1
+
+    if [ "$UPD_MEM" != "__KEEP__" ]; then
+        sed -i '/^lxc\.cgroup2\.memory\.max/d' "$CT_CONF" 2>/dev/null || true
+        if [ -n "$UPD_MEM" ] && [ "$UPD_MEM" != "none" ] && [ "$UPD_MEM" != "0" ]; then
+            echo "lxc.cgroup2.memory.max = ${UPD_MEM}" >> "$CT_CONF"
+        fi
+    fi
+
+    if [ "$UPD_CPU" != "__KEEP__" ]; then
+        sed -i '/^lxc\.cgroup2\.cpu\.max/d' "$CT_CONF" 2>/dev/null || true
+        if [ -n "$UPD_CPU" ] && [ "$UPD_CPU" != "none" ] && [ "$UPD_CPU" != "0" ]; then
+            CPU_QUOTA=$(awk -v c="$UPD_CPU" 'BEGIN { v = int((c + 0) * 100000); if (v < 10000) v = 10000; printf "%d", v }' 2>/dev/null || echo "")
+            [ -n "$CPU_QUOTA" ] && echo "lxc.cgroup2.cpu.max = ${CPU_QUOTA} 100000" >> "$CT_CONF"
+        fi
+    fi
+
+    if [ "$UPD_AUTO" != "__KEEP__" ]; then
+        sed -i '/^lxc\.start\.auto/d; /^lxc\.start\.delay/d' "$CT_CONF" 2>/dev/null || true
+        if [ "$UPD_AUTO" = "yes" ] || [ "$UPD_AUTO" = "on" ] || [ "$UPD_AUTO" = "true" ] || [ "$UPD_AUTO" = "1" ]; then
+            echo "lxc.start.auto = 1" >> "$CT_CONF"
+            echo "lxc.start.delay = 3" >> "$CT_CONF"
+        fi
+    fi
+
+    if [ "$UPD_NEST" != "__KEEP__" ]; then
+        awk '
+            /^# --- GW_NESTING_BEGIN ---/ { skip=1; next }
+            /^# --- GW_NESTING_END ---/ { skip=0; next }
+            !skip { print }
+        ' "$CT_CONF" > "${CT_CONF}.tmp.$$" && mv -f "${CT_CONF}.tmp.$$" "$CT_CONF"
+        if [ "$UPD_NEST" = "yes" ] || [ "$UPD_NEST" = "on" ] || [ "$UPD_NEST" = "true" ] || [ "$UPD_NEST" = "1" ]; then
+            cat << 'NEST_EOF' >> "$CT_CONF"
+# --- GW_NESTING_BEGIN ---
+lxc.mount.auto = proc:mixed sys:rw cgroup:rw
+lxc.mount.entry = proc dev/.lxc/proc proc create=dir,optional 0 0
+lxc.mount.entry = sys dev/.lxc/sys sysfs create=dir,optional 0 0
+# --- GW_NESTING_END ---
+NEST_EOF
+        fi
+    fi
+
+    if [ "$UPD_STOR" != "__KEEP__" ]; then
+        awk '
+            /^# --- GW_STORAGE_BEGIN ---/ { skip=1; next }
+            /^# --- GW_STORAGE_END ---/ { skip=0; next }
+            !skip { print }
+        ' "$CT_CONF" > "${CT_CONF}.tmp.$$" && mv -f "${CT_CONF}.tmp.$$" "$CT_CONF"
+        if [ "$UPD_STOR" = "yes" ] || [ "$UPD_STOR" = "on" ] || [ "$UPD_STOR" = "true" ] || [ "$UPD_STOR" = "1" ]; then
+            ST_MNT_PATH="${STORAGE_ROOT:-/srv/storage}"
+            mkdir -p "$ST_MNT_PATH" "${LXC_VAR_LIB}/${CT_NAME}/rootfs/mnt/storage" 2>/dev/null || true
+            cat << STOR_EOF >> "$CT_CONF"
+# --- GW_STORAGE_BEGIN ---
+lxc.mount.entry = ${ST_MNT_PATH} mnt/storage none bind,create=dir,rw 0 0
+# --- GW_STORAGE_END ---
+STOR_EOF
+        fi
+    fi
+    return 0
+}
+
+# Неинтерактивное создание контейнера LXC по JSON-спецификации (для Web Dashboard и CLI)
+lxc_create_from_spec() {
+    SPEC_FILE="$1"
+    if [ -z "$SPEC_FILE" ] || [ ! -s "$SPEC_FILE" ]; then
+        ui_warn_msg "Файл спецификации контейнера LXC отсутствует."
+        return 1
+    fi
+
+    CT_NAME=$(jq -r '.name // empty' "$SPEC_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9_-')
+    T_DIST=$(jq -r '.distro // empty' "$SPEC_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9._-')
+    T_REL=$(jq -r '.release // empty' "$SPEC_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9._-')
+    T_VAR=$(jq -r '.variant // "default"' "$SPEC_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9._-')
+    T_ARCH=$(jq -r '.arch // empty' "$SPEC_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9_-')
+    NET_MODE=$(jq -r '.net_mode // "nat"' "$SPEC_FILE" 2>/dev/null)
+    STATIC_IP=$(jq -r '.static_ip // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
+    STATIC_GW=$(jq -r '.static_gw // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
+    STATIC_DNS=$(jq -r '.static_dns // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
+    MEM_LIMIT=$(jq -r '.mem_limit // empty' "$SPEC_FILE" 2>/dev/null | tr -cd '0-9KkMmGg')
+    CPU_LIMIT=$(jq -r '.cpu_limit // empty' "$SPEC_FILE" 2>/dev/null | tr -cd '0-9.')
+    AUTO_EN=$(jq -r 'if .autostart == true or .autostart == "yes" then "yes" else "no" end' "$SPEC_FILE" 2>/dev/null)
+    NEST_EN=$(jq -r 'if .nesting == true or .nesting == "yes" then "yes" else "no" end' "$SPEC_FILE" 2>/dev/null)
+    STOR_EN=$(jq -r 'if .storage_mount == true or .storage_mount == "yes" then "yes" else "no" end' "$SPEC_FILE" 2>/dev/null)
+    START_NOW=$(jq -r 'if .start_now == false or .start_now == "no" then "no" else "yes" end' "$SPEC_FILE" 2>/dev/null)
+    ROOT_PASS=$(jq -r '.root_pass // empty' "$SPEC_FILE" 2>/dev/null | tr -d '\r\n')
+
+    [ -z "$T_VAR" ] && T_VAR="default"
+    [ -z "$T_ARCH" ] && T_ARCH=$(get_lxc_system_arch)
+    case "$MEM_LIMIT" in
+        ''|*[KkMmGg]) ;;
+        *) MEM_LIMIT="${MEM_LIMIT}M" ;;
+    esac
+
+    if [ -z "$CT_NAME" ] || [ -z "$T_DIST" ] || [ -z "$T_REL" ]; then
+        ui_warn_msg "Не указано имя контейнера, дистрибутив или релиз."
+        return 1
+    fi
+
+    ensure_lxc_subsystem "no"
+    REAL_LXC_PATH=$(readlink -f "$LXC_VAR_LIB" 2>/dev/null || echo "$LXC_VAR_LIB")
+    if [ -d "${REAL_LXC_PATH}/${CT_NAME}" ] || [ -d "${LXC_VAR_LIB}/${CT_NAME}" ]; then
+        ui_warn_msg "Контейнер '${CT_NAME}' уже существует!"
+        return 1
+    fi
+
+    ui_step_progress 1 4 "Загрузка образа ${T_DIST} ${T_REL} (${T_VAR}, ${T_ARCH}) с images.linuxcontainers.org..."
+    if ! lxc-create -t download -n "$CT_NAME" -- -d "$T_DIST" -r "$T_REL" -a "$T_ARCH" --variant "$T_VAR"; then
+        ui_warn_box "Не удалось загрузить или создать контейнер ${CT_NAME}." \
+                    "Проверьте доступ к images.linuxcontainers.org и корректность дистрибутива/релиза."
+        return 1
+    fi
+
+    CT_DIR="${LXC_VAR_LIB}/${CT_NAME}"
+    CT_CONF="${CT_DIR}/config"
+    printf "%s %s (%s)\n" "$T_DIST" "$T_REL" "$T_VAR" > "${CT_DIR}/.gw_os" 2>/dev/null || true
+
+    ui_step_progress 2 4 "Настройка сети (${NET_MODE}), ресурсов и монтирования..."
+    if [ -f "$CT_CONF" ]; then
+        if [ "$NET_MODE" = "macvlan" ]; then
+            LAN_IF=$(get_lan_ifname)
+            sed -i '/lxc\.net\.0\./d' "$CT_CONF"
+            cat << NET_MV_SPEC >> "$CT_CONF"
+lxc.net.0.type = macvlan
+lxc.net.0.macvlan.mode = bridge
+lxc.net.0.link = ${LAN_IF}
+lxc.net.0.flags = up
+lxc.net.0.hwaddr = 10:66:6a:$(hexdump -n 3 -e '/1 ":%02x"' /dev/urandom 2>/dev/null | cut -c 2- || echo "11:22:33")
+NET_MV_SPEC
+            [ -z "$STATIC_DNS" ] && STATIC_DNS=$(get_current_lan_ip)
+        else
+            [ -z "$STATIC_DNS" ] && STATIC_DNS="10.0.3.1"
+        fi
+
+        if [ -n "$STATIC_IP" ]; then
+            sed -i '/lxc\.net\.0\.ipv4\./d' "$CT_CONF"
+            echo "lxc.net.0.ipv4.address = ${STATIC_IP}" >> "$CT_CONF"
+            if [ -n "$STATIC_GW" ]; then
+                echo "lxc.net.0.ipv4.gateway = ${STATIC_GW}" >> "$CT_CONF"
+            elif [ "$NET_MODE" != "macvlan" ]; then
+                echo "lxc.net.0.ipv4.gateway = 10.0.3.1" >> "$CT_CONF"
+            fi
+        fi
+
+        lxc_apply_config_updates "$CT_NAME" "$MEM_LIMIT" "$CPU_LIMIT" "$AUTO_EN" "$NEST_EN" "$STOR_EN"
+    fi
+
+    ui_step_progress 3 4 "Автоконфигурация сети и DNS внутри контейнера..."
+    lxc_autoseed_container_network "$CT_NAME" "${STATIC_DNS:-10.0.3.1}"
+
+    if [ "$START_NOW" = "yes" ]; then
+        ui_step_progress 4 4 "Запуск контейнера ${CT_NAME} и ожидание IP-адреса..."
+        if lxc-start -n "$CT_NAME"; then
+            _w=0
+            while [ "$_w" -lt 8 ]; do
+                _ip_chk=$(lxc-info -n "$CT_NAME" 2>/dev/null | awk '/IP:/ {print $2; exit}' || true)
+                [ -n "$_ip_chk" ] && break
+                sleep 1
+                _w=$((_w + 1))
+            done
+        else
+            ui_warn_msg "Контейнер создан, но не смог стартовать автоматически."
+        fi
+    else
+        ui_step_progress 4 4 "Завершение подготовки (автостарт после создания пропущен)..."
+    fi
+
+    if [ -n "$ROOT_PASS" ]; then
+        if lxc-info -n "$CT_NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
+            printf "root:%s\n" "$ROOT_PASS" | lxc-attach -n "$CT_NAME" -- chpasswd >/dev/null 2>&1 || true
+        elif [ -d "${CT_DIR}/rootfs" ]; then
+            printf "root:%s\n" "$ROOT_PASS" | chroot "${CT_DIR}/rootfs" /usr/sbin/chpasswd >/dev/null 2>&1 || \
+            printf "root:%s\n" "$ROOT_PASS" | chroot "${CT_DIR}/rootfs" /sbin/chpasswd >/dev/null 2>&1 || true
+        fi
+        ui_ok_msg "Пароль пользователя root установлен."
+    fi
+
+    ui_ok_msg "Контейнер '${CT_NAME}' (${T_DIST} ${T_REL}) успешно развёрнут!"
+    return 0
+}
+
 # Управление снимками (снапшотами) контейнера
 lxc_manage_snapshots() {
     ARG1="${1:-}"

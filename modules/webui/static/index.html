@@ -33,7 +33,8 @@
       <button class="tab-btn active" data-tab="overview" role="tab" type="button">Обзор и Homelab</button>
       <button class="tab-btn" data-tab="network" role="tab" type="button">Ядро и сеть</button>
       <button class="tab-btn" data-tab="proxies" role="tab" type="button">Прокси и маршруты</button>
-      <button class="tab-btn" data-tab="infra" role="tab" type="button">LXC, Диск и SSL</button>
+      <button class="tab-btn" data-tab="lxc" role="tab" type="button">Контейнеры LXC <span class="tab-pill" id="tab-lxc-count" style="display:none"></span></button>
+      <button class="tab-btn" data-tab="storage" role="tab" type="button">Диск и SSL</button>
       <button class="tab-btn" data-tab="system" role="tab" type="button">Система и логи</button>
     </nav>
   </header>
@@ -53,6 +54,7 @@
           <button class="btn btn-secondary" id="btn-restart-gw" type="button">🔄 Перезапуск шлюза</button>
           <button class="btn btn-secondary" id="btn-doctor" type="button">🩺 Doctor (автолечение)</button>
           <button class="btn btn-secondary" id="btn-ov-apply" type="button">⚡ Применить конфиг ядра</button>
+          <button class="btn btn-secondary" id="btn-ov-go-lxc" type="button">📦 Контейнеры LXC</button>
         </div>
         <div id="trace-box" class="trace-box" style="display:none"></div>
       </div>
@@ -68,7 +70,10 @@
       <div class="card">
         <div class="card-head">
           <h2>Активные маршруты балансировщика ядра</h2>
-          <span class="muted" id="ov-groups-meta"></span>
+          <div class="btn-row-compact">
+            <input class="input input-sm" id="inp-groups-filter" type="text" placeholder="Поиск группы или узла...">
+            <span class="muted" id="ov-groups-meta"></span>
+          </div>
         </div>
         <div class="table-wrap">
           <table class="data-table">
@@ -173,6 +178,12 @@
       <div class="card">
         <div class="card-head">
           <h2>Domain X-Ray — проверка маршрутизации домена</h2>
+          <div class="btn-row-compact">
+            <button class="btn btn-xs" data-inspect-preset="chatgpt.com" type="button">chatgpt.com</button>
+            <button class="btn btn-xs" data-inspect-preset="youtube.com" type="button">youtube.com</button>
+            <button class="btn btn-xs" data-inspect-preset="ya.ru" type="button">ya.ru</button>
+            <button class="btn btn-xs" data-inspect-preset="github.com" type="button">github.com</button>
+          </div>
         </div>
         <form id="frm-inspect" class="inline-form">
           <input class="input" id="inp-inspect-domain" type="text" placeholder="Например: chatgpt.com или ya.ru">
@@ -266,6 +277,7 @@
       <div class="card">
         <div class="card-head">
           <h2>Правила устройств локальной сети (LAN IP)</h2>
+          <input class="input input-sm" id="inp-dev-filter" type="text" placeholder="Поиск по IP, MAC или имени...">
         </div>
         <form id="frm-dev-add" class="inline-form" style="margin-bottom:0.85rem">
           <input class="input" id="inp-dev-ip" type="text" placeholder="192.168.1.50">
@@ -291,34 +303,58 @@
       </div>
     </section>
 
-    <!-- TAB 4: LXC, Диск и SSL -->
-    <section class="tab-panel" id="tab-infra">
+    <!-- TAB 4: Контейнеры LXC (Studio) -->
+    <section class="tab-panel" id="tab-lxc">
       <div class="card">
         <div class="card-head">
-          <h2>Контейнеры LXC (Linux Containers)</h2>
-          <div id="infra-lxc-badges"></div>
+          <div>
+            <h2>Студия контейнеров LXC</h2>
+            <div class="muted small">Изолированные Linux-системы с полной ОС из официального каталога <span class="mono">images.linuxcontainers.org</span></div>
+          </div>
+          <div class="btn-row-compact" id="lxc-status-badges"></div>
         </div>
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Контейнер</th>
-                <th>Статус</th>
-                <th>IPv4 / Память</th>
-                <th>Автостарт</th>
-                <th>Снимки (Snapshots)</th>
-                <th>Управление</th>
-              </tr>
-            </thead>
-            <tbody id="infra-lxc-body"></tbody>
-          </table>
+
+        <div class="btn-row" style="align-items:center; justify-content:space-between">
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btn-lxc-open-create" type="button">➕ Создать контейнер</button>
+            <button class="btn btn-secondary" id="btn-lxc-doctor" type="button">🩺 Проверить и починить LXC</button>
+            <button class="btn btn-secondary" id="btn-lxc-refresh-cat" type="button">↻ Обновить каталог ОС</button>
+          </div>
+          <input class="input input-sm" id="inp-lxc-filter" type="text" placeholder="Поиск контейнера...">
         </div>
+
+        <details class="guide-box" style="margin-top:0.9rem">
+          <summary>💡 Шпаргалка: как устроены контейнеры LXC простыми словами</summary>
+          <div class="guide-grid">
+            <div>
+              <strong>Что такое LXC?</strong>
+              <p>Лёгкая изолированная Linux-система (Debian, Ubuntu, Alpine, Arch и др.), которая стартует за 1–2 секунды и делит ядро с сервером почти без накладных расходов.</p>
+            </div>
+            <div>
+              <strong>NAT (lxcbr0) или Macvlan (LAN)?</strong>
+              <p><b>NAT (10.0.3.X)</b> — изоляция с DNS AdGuard и трафиком через Sing-Box/Mihomo. <b>Macvlan</b> выдаёт отдельный IP от вашего домашнего роутера в общую локальную сеть.</p>
+            </div>
+            <div>
+              <strong>Снимки (Snapshots)</strong>
+              <p>Мгновенная точка сохранения состояния. Перед установкой сложного софта создайте снимок — откат вернёт контейнер в прежний вид в один клик.</p>
+            </div>
+            <div>
+              <strong>Консоль и общее хранилище</strong>
+              <p>Кнопка <b>💻 Консоль</b> открывает живой bash/sh прямо в браузере. При включённом общем хранилище папка сервера <span class="mono">/srv/storage</span> доступна внутри как <span class="mono">/mnt/storage</span>.</p>
+            </div>
+          </div>
+        </details>
       </div>
 
+      <div id="lxc-cards-container" class="lxc-list"></div>
+    </section>
+
+    <!-- TAB 5: Диск и SSL -->
+    <section class="tab-panel" id="tab-storage">
       <div class="two-col">
         <div class="card">
           <div class="card-head">
-            <h2>Хранилище и шифрование LUKS2</h2>
+            <h2>Единое хранилище и шифрование LUKS2</h2>
           </div>
           <div id="infra-storage-info"></div>
           <div class="btn-row" style="margin-top:0.9rem">
@@ -326,11 +362,26 @@
             <button class="btn btn-primary" id="btn-st-unlock" type="button">🔓 Разблокировать LUKS2</button>
             <button class="btn btn-danger" id="btn-st-lock" type="button">⏏️ Безопасно извлечь диск</button>
           </div>
+          <hr class="sep">
+          <div class="field-label">Занятое место по папкам <span class="mono">/srv/storage</span></div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Раздел</th>
+                  <th>Путь на сервере</th>
+                  <th>Размер</th>
+                </tr>
+              </thead>
+              <tbody id="infra-storage-dirs"></tbody>
+            </table>
+          </div>
         </div>
 
         <div class="card">
           <div class="card-head">
             <h2>HTTPS-сертификаты SSL/TLS и DuckDNS</h2>
+            <a class="btn btn-xs" id="btn-ssl-ca-portal" href="#" target="_blank" rel="noopener" style="display:none">📥 Портал PKI CA ↗</a>
           </div>
           <div id="infra-ssl-info"></div>
           <div class="btn-row" style="margin-top:0.85rem">
@@ -355,7 +406,7 @@
       </div>
     </section>
 
-    <!-- TAB 5: Система и логи -->
+    <!-- TAB 6: Система и логи -->
     <section class="tab-panel" id="tab-system">
       <div class="two-col">
         <div class="card">
@@ -445,11 +496,18 @@
         <div class="card-head">
           <h2>Просмотр системных логов (Шлюз + Homelab)</h2>
           <div class="btn-row-compact">
+            <input class="input input-sm" id="inp-log-filter" type="text" placeholder="Фильтр строк...">
+            <select class="input select-xs" id="sel-log-lines">
+              <option value="50">50 строк</option>
+              <option value="150" selected>150 строк</option>
+              <option value="400">400 строк</option>
+            </select>
             <select class="input select-sm" id="sel-log-target">
               <option value="core">Ядро шлюза (Sing-Box / Mihomo)</option>
               <option value="check">Экспресс-диагностика (gw check)</option>
               <option value="autoupdate">Автообновление (autoupdate.log)</option>
               <option value="webui">Web Dashboard (gateway-webui.log)</option>
+              <option value="console">Веб-консоль LXC (gateway-console.log)</option>
               <option value="caddy">Caddy HTTPS (caddy.log)</option>
               <option value="vaultwarden">Vaultwarden (vaultwarden.log)</option>
               <option value="forgejo">Forgejo Git (forgejo.log)</option>
@@ -458,6 +516,7 @@
               <option value="transmission">Transmission (transmission.log)</option>
             </select>
             <button class="btn btn-primary btn-sm" id="btn-log-load" type="button">Показать лог</button>
+            <button class="btn btn-secondary btn-sm" id="btn-log-copy" type="button">📋 Копировать</button>
           </div>
         </div>
         <pre class="log-view" id="sys-log-view">Выберите источник лога и нажмите «Показать лог».</pre>
@@ -466,6 +525,212 @@
   </main>
 
   <div class="toast-stack" id="toast-stack"></div>
+
+  <!-- Мастер создания LXC-контейнера -->
+  <div class="modal-backdrop" id="lxc-create-modal" style="display:none">
+    <div class="modal modal-xl">
+      <div class="modal-head">
+        <div>
+          <h3>🚀 Создание нового контейнера LXC</h3>
+          <div class="muted small" id="lxc-cat-status">Загрузка каталога официальных образов...</div>
+        </div>
+        <div class="btn-row-compact">
+          <button class="btn btn-xs" id="btn-lxc-cat-reload" type="button">↻ Обновить список</button>
+          <button class="btn btn-xs" id="btn-lxc-create-x" type="button">✕</button>
+        </div>
+      </div>
+
+      <form id="frm-lxc-create" class="modal-body modal-scroll">
+        <!-- Блок 1: Выбор официальной ОС -->
+        <div class="wizard-step">
+          <div class="wizard-step-head">
+            <span class="step-num">1</span>
+            <strong>Выбор операционной системы (официальный каталог images.linuxcontainers.org)</strong>
+            <span class="badge" id="lxc-cat-arch-badge">—</span>
+          </div>
+
+          <div class="cat-toolbar">
+            <input class="input" id="inp-cat-search" type="text" placeholder="Поиск ОС: debian, ubuntu, alpine, arch, kali, fedora...">
+            <div class="btn-row-compact" id="cat-group-btns">
+              <button class="btn btn-xs seg-btn active" data-cat="all" type="button">Все ОС</button>
+              <button class="btn btn-xs seg-btn" data-cat="popular" type="button">⭐ Популярные</button>
+              <button class="btn btn-xs seg-btn" data-cat="light" type="button">🪶 Лёгкие</button>
+              <button class="btn btn-xs seg-btn" data-cat="server" type="button">💻 Серверные</button>
+              <button class="btn btn-xs seg-btn" data-cat="sec" type="button">🔒 Инструменты</button>
+            </div>
+            <select class="input select-xs" id="sel-cat-variant">
+              <option value="all" selected>Вариант: Все</option>
+              <option value="default">Вариант: default</option>
+              <option value="cloud">Вариант: cloud</option>
+            </select>
+          </div>
+
+          <div class="distro-grid" id="lxc-distro-grid"></div>
+
+          <div class="selected-os-bar">
+            <div>
+              <label class="field-label" for="sel-lxc-distro">Выбранная ОС</label>
+              <input class="input" id="sel-lxc-distro" type="text" placeholder="debian" required>
+            </div>
+            <div>
+              <label class="field-label" for="sel-lxc-release">Версия / релиз</label>
+              <select class="input" id="sel-lxc-release"></select>
+              <input class="input" id="inp-lxc-release-manual" type="text" placeholder="bookworm / noble / 3.24" style="display:none; margin-top:0.35rem">
+            </div>
+            <div>
+              <label class="field-label" for="sel-lxc-variant">Сборка (variant)</label>
+              <select class="input" id="sel-lxc-variant"></select>
+            </div>
+            <div style="align-self:end">
+              <label class="check-row" style="margin:0; padding-bottom:0.45rem">
+                <input id="chk-lxc-manual-os" type="checkbox">
+                <span>Ввести релиз вручную</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Блок 2: Имя и Сеть -->
+        <div class="wizard-step">
+          <div class="wizard-step-head">
+            <span class="step-num">2</span>
+            <strong>Имя и сетевое подключение</strong>
+          </div>
+
+          <div class="two-col">
+            <div>
+              <label class="field-label" for="inp-lxc-name">Имя контейнера (латиница, цифры, - и _)</label>
+              <input class="input" id="inp-lxc-name" type="text" placeholder="my-debian" required pattern="[A-Za-z0-9_-]+">
+              <div class="muted small" style="margin-top:0.25rem">Станет сетевым именем и названием папки в хранилище.</div>
+            </div>
+            <div>
+              <label class="field-label" for="inp-lxc-rootpass">Пароль root (необязательно)</label>
+              <input class="input" id="inp-lxc-rootpass" type="password" placeholder="Пусто — вход без пароля через Веб-консоль">
+            </div>
+          </div>
+
+          <div class="radio-cards" style="margin-top:0.8rem">
+            <label class="radio-card selected" id="rcard-nat">
+              <input type="radio" name="lxc_net_mode" value="nat" checked>
+              <div>
+                <strong>🛡️ NAT за шлюзом (lxcbr0, 10.0.3.X)</strong>
+                <div class="muted small">Рекомендуется: AdGuard DNS + маршрутизация трафика через Sing-Box / Mihomo.</div>
+              </div>
+            </label>
+            <label class="radio-card" id="rcard-macvlan">
+              <input type="radio" name="lxc_net_mode" value="macvlan">
+              <div>
+                <strong>🏠 Прямой мост LAN (Macvlan)</strong>
+                <div class="muted small">Отдельный IP прямо от вашего основного домашнего роутера.</div>
+              </div>
+            </label>
+          </div>
+
+          <div style="margin-top:0.75rem">
+            <label class="check-row" style="margin:0">
+              <input id="chk-lxc-static-ip" type="checkbox">
+              <span>Задать статический IPv4 вручную (по умолчанию используется автоматический DHCP)</span>
+            </label>
+            <div class="three-col" id="lxc-static-ip-fields" style="display:none; margin-top:0.6rem">
+              <div>
+                <label class="field-label" for="inp-lxc-ip">IPv4 с маской CIDR</label>
+                <input class="input" id="inp-lxc-ip" type="text" placeholder="10.0.3.50/24">
+              </div>
+              <div>
+                <label class="field-label" for="inp-lxc-gw">Шлюз</label>
+                <input class="input" id="inp-lxc-gw" type="text" placeholder="10.0.3.1">
+              </div>
+              <div>
+                <label class="field-label" for="inp-lxc-dns">DNS-сервер</label>
+                <input class="input" id="inp-lxc-dns" type="text" placeholder="10.0.3.1">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Блок 3: Ресурсы и опции -->
+        <div class="wizard-step">
+          <div class="wizard-step-head">
+            <span class="step-num">3</span>
+            <strong>Ресурсы (ОЗУ / CPU) и интеграция с сервером</strong>
+          </div>
+
+          <div class="two-col">
+            <div>
+              <label class="field-label" for="inp-lxc-mem">Лимит оперативной памяти</label>
+              <div class="btn-row-compact" style="margin-bottom:0.4rem">
+                <button class="btn btn-xs" data-mem-preset="" type="button">Без лимита</button>
+                <button class="btn btn-xs" data-mem-preset="256M" type="button">256M</button>
+                <button class="btn btn-xs" data-mem-preset="512M" type="button">512M</button>
+                <button class="btn btn-xs" data-mem-preset="1G" type="button">1G</button>
+                <button class="btn btn-xs" data-mem-preset="2G" type="button">2G</button>
+              </div>
+              <input class="input" id="inp-lxc-mem" type="text" placeholder="Например: 512M или 2G (пусто = без лимита)">
+            </div>
+            <div>
+              <label class="field-label" for="inp-lxc-cpu">Лимит ядер CPU</label>
+              <div class="btn-row-compact" style="margin-bottom:0.4rem">
+                <button class="btn btn-xs" data-cpu-preset="" type="button">Без лимита</button>
+                <button class="btn btn-xs" data-cpu-preset="0.5" type="button">0.5 ядра</button>
+                <button class="btn btn-xs" data-cpu-preset="1" type="button">1 ядро</button>
+                <button class="btn btn-xs" data-cpu-preset="2" type="button">2 ядра</button>
+                <button class="btn btn-xs" data-cpu-preset="4" type="button">4 ядра</button>
+              </div>
+              <input class="input" id="inp-lxc-cpu" type="text" placeholder="Например: 1 или 2 (пусто = без лимита)">
+            </div>
+          </div>
+
+          <div class="two-col" style="margin-top:0.75rem">
+            <label class="check-row" style="margin:0">
+              <input id="chk-lxc-startnow" type="checkbox" checked>
+              <span>▶ Запустить контейнер сразу после создания</span>
+            </label>
+            <label class="check-row" style="margin:0">
+              <input id="chk-lxc-autostart" type="checkbox" checked>
+              <span>⚡ Автозапуск вместе с сервером</span>
+            </label>
+            <label class="check-row" style="margin:0">
+              <input id="chk-lxc-storage" type="checkbox">
+              <span>💾 Подключить общее хранилище (/srv/storage → /mnt/storage)</span>
+            </label>
+            <label class="check-row" style="margin:0">
+              <input id="chk-lxc-nesting" type="checkbox">
+              <span>🪆 Включить Nesting (для Docker / Podman внутри LXC)</span>
+            </label>
+          </div>
+        </div>
+      </form>
+
+      <div class="modal-foot">
+        <button class="btn btn-secondary" id="btn-lxc-create-cancel" type="button">Отмена</button>
+        <button class="btn btn-primary" id="btn-lxc-create-submit" form="frm-lxc-create" type="submit">🚀 Скачать образ и создать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модальное окно встроенного веб-терминала -->
+  <div class="modal-backdrop" id="console-modal" style="display:none">
+    <div class="modal modal-console" id="console-modal-box">
+      <div class="modal-head">
+        <div>
+          <h3 id="console-title">💻 Консоль контейнера</h3>
+          <div class="muted small" id="console-sub">Интерактивный терминал LXC</div>
+        </div>
+        <div class="btn-row-compact">
+          <button class="btn btn-xs" id="btn-con-reconnect" type="button">↻ Переподключить</button>
+          <button class="btn btn-xs" id="btn-con-fullscreen" type="button">⛶ На весь экран</button>
+          <a class="btn btn-xs" id="btn-con-newtab" href="#" target="_blank" rel="noopener">↗ Новая вкладка</a>
+          <button class="btn btn-danger btn-xs" id="btn-con-close" type="button">✕ Закрыть</button>
+        </div>
+      </div>
+      <div class="console-body">
+        <iframe id="console-frame" title="LXC Web Console"></iframe>
+      </div>
+      <div class="console-foot">
+        <span>Подключение защищено одноразовым токеном (60 сек). Для завершения сессии введите <span class="mono">exit</span> или нажмите <span class="mono">Ctrl+D</span>.</span>
+      </div>
+    </div>
+  </div>
 
   <!-- Модальное окно подтверждения -->
   <div class="modal-backdrop" id="confirm-modal" style="display:none">
@@ -492,6 +757,7 @@
         <pre class="log-view log-view-tall" id="job-log">Инициализация...</pre>
       </div>
       <div class="modal-foot">
+        <button class="btn btn-primary" id="job-open-console" type="button" style="display:none">💻 Открыть консоль</button>
         <button class="btn btn-primary" id="job-close" type="button" disabled>Закрыть</button>
       </div>
     </div>
