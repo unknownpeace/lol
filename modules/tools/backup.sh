@@ -41,6 +41,10 @@ create_unified_backup() {
     [ -f /etc/conf.d/vaultwarden ] && BACKUP_PATHS="$BACKUP_PATHS /etc/conf.d/vaultwarden"
     [ -d /var/lib/vaultwarden ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/vaultwarden"
     [ -d /etc/forgejo ] && BACKUP_PATHS="$BACKUP_PATHS /etc/forgejo"
+    [ -d /var/lib/forgejo/repos ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/forgejo/repos"
+    [ -d /var/lib/forgejo/custom ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/forgejo/custom"
+    [ -d /var/lib/forgejo/data/jwt ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/forgejo/data/jwt"
+    [ -d /var/lib/forgejo/data/attachments ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/forgejo/data/attachments"
     [ -d /var/lib/transmission/config ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/transmission/config"
     [ -d /opt/metube ] && BACKUP_PATHS="$BACKUP_PATHS /opt/metube"
     [ "$INCLUDE_MEDIA" = "yes" ] && [ -d "$STORAGE_ROOT" ] && BACKUP_PATHS="$BACKUP_PATHS $STORAGE_ROOT"
@@ -115,10 +119,12 @@ restore_unified_backup() {
     STAGE_RESTORE="/var/lib/gateway_backup_stage/sqlite_dumps"
     if [ -d "$STAGE_RESTORE" ]; then
         if [ -f "${STAGE_RESTORE}/vaultwarden.sqlite3" ]; then
+            mkdir -p /var/lib/vaultwarden
             rm -f /var/lib/vaultwarden/db.sqlite3-wal /var/lib/vaultwarden/db.sqlite3-shm 2>/dev/null || true
             cp -f "${STAGE_RESTORE}/vaultwarden.sqlite3" /var/lib/vaultwarden/db.sqlite3 2>/dev/null || true
         fi
         if [ -f "${STAGE_RESTORE}/forgejo.sqlite3" ]; then
+            mkdir -p /var/lib/forgejo/data /var/lib/forgejo/repos
             rm -f /var/lib/forgejo/data/forgejo.db-wal /var/lib/forgejo/data/forgejo.db-shm 2>/dev/null || true
             cp -f "${STAGE_RESTORE}/forgejo.sqlite3" /var/lib/forgejo/data/forgejo.db 2>/dev/null || true
         fi

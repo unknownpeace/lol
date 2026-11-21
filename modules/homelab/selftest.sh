@@ -25,9 +25,17 @@ print_homelab_services_table() {
             ST_BADGE="${C_DIM}[ ○ ВЫКЛЮЧЕН ]  ${C_RES}"
         fi
         if [ "$M_ID" = "caddy" ]; then
-            M_URL="http://ca.lan (PKI)"
+            if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+                M_URL="https://${SSL_DOMAIN} (LE)"
+            else
+                M_URL="http://ca.lan (PKI)"
+            fi
         elif [ "$M_DOM" != "_" ]; then
-            M_URL="https://${M_DOM}"
+            if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+                M_URL="https://${M_DOM%%.*}.${SSL_DOMAIN}"
+            else
+                M_URL="https://${M_DOM}"
+            fi
         else
             M_URL="\\\\$(hostname -s 2>/dev/null || echo HOMELAB)\\storage"
         fi
@@ -51,7 +59,10 @@ run_homelab_self_test() {
         ui_box_row "${C_YEL}[▲]${C_RES} Единое хранилище (${STORAGE_ROOT}): еще не инициализировано"
     fi
 
-    if find_caddy_root_cert; then
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        ui_box_row "${C_GRN}[✔]${C_RES} Let's Encrypt Wildcard: ${C_GRN}АКТИВЕН${C_RES} (*.${SSL_DOMAIN})"
+        ui_box_row "${C_GRN}[✔]${C_RES} Панели шлюза по HTTPS: ${C_CYN}https://zashboard.${SSL_DOMAIN}${C_RES} │ ${C_CYN}https://adguard.${SSL_DOMAIN}${C_RES}"
+    elif find_caddy_root_cert; then
         ui_box_row "${C_GRN}[✔]${C_RES} Локальный Root CA Caddy: ${C_GRN}СГЕНЕРИРОВАН${C_RES} (портал: http://${DOM_CA} / http://${CUR_LIP})"
         ui_box_row "${C_GRN}[✔]${C_RES} Панели шлюза по HTTPS: ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} │ ${C_CYN}https://${DOM_ADGUARD}${C_RES}"
     else
@@ -61,6 +72,11 @@ run_homelab_self_test() {
     while IFS='|' read -r M_ID M_EN M_SVC M_PORT M_DOM _M_USR M_TITLE; do
         case "$M_ID" in ''|\#*) continue ;; esac
         [ "$M_EN" = "yes" ] || continue
+
+        SHOW_DOM="$M_DOM"
+        if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ] && [ "$M_DOM" != "_" ]; then
+            SHOW_DOM="${M_DOM%%.*}.${SSL_DOMAIN}"
+        fi
 
         if rc-service "$M_SVC" status >/dev/null 2>&1; then
             SVC_TXT="${C_GRN}● ЗАПУЩЕН${C_RES}"
@@ -83,11 +99,17 @@ run_homelab_self_test() {
             [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ] && HTTP_CODE="000"
             WV_ST="WebVault:OK"
             detect_vaultwarden_web_dir >/dev/null 2>&1 || WV_ST="WebVault:FAIL"
-            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ 127.0.0.1:${M_PORT} (HTTP ${HTTP_CODE}, ${WV_ST}) ▸ ${C_CYN}https://${M_DOM}${C_RES}"
+            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ 127.0.0.1:${M_PORT} (HTTP ${HTTP_CODE}, ${WV_ST}) ▸ ${C_CYN}https://${SHOW_DOM}${C_RES}"
         else
             HTTP_CODE=$(curl -k -o /dev/null -sS --connect-timeout 2 -m 4 -w '%{http_code}' "http://127.0.0.1:${M_PORT}" 2>/dev/null || true)
-            [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ] && HTTP_CODE="000"
-            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ 127.0.0.1:${M_PORT} (HTTP ${HTTP_CODE}) ▸ ${C_CYN}https://${M_DOM}${C_RES}"
+            if [ -z "$HTTP_CODE" ] || [ "$HTTP_CODE" = "000" ]; then
+                if rc-service "$M_SVC" status >/dev/null 2>&1; then
+                    sleep 2
+                    HTTP_CODE=$(curl -k -o /dev/null -sS --connect-timeout 2 -m 4 -w '%{http_code}' "http://127.0.0.1:${M_PORT}" 2>/dev/null || true)
+                fi
+                [ -z "$HTTP_CODE" ] && HTTP_CODE="000"
+            fi
+            ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ 127.0.0.1:${M_PORT} (HTTP ${HTTP_CODE}) ▸ ${C_CYN}https://${SHOW_DOM}${C_RES}"
         fi
     done < "$HOMELAB_STATE"
     ui_box_bottom

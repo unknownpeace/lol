@@ -24,7 +24,14 @@ print_proxy_slots_report() {
     fi
 
     if is_warp_enabled; then
-        if [ -n "${WARP_LICENSE:-}" ]; then
+        _ACTIVE_CORE=$(get_active_core 2>/dev/null || echo "singbox")
+        if [ "$_ACTIVE_CORE" = "mihomo" ]; then
+            if [ -n "${WARP_LICENSE:-}" ]; then
+                SLOT3_INFO="${C_GRN}АКТИВЕН${C_RES} (4 ноды UDP AWG WARP+ -> '☁️ Amnezia WARP')"
+            else
+                SLOT3_INFO="${C_GRN}АКТИВЕН${C_RES} (4 ноды UDP AWG 2.0 -> '☁️ Amnezia WARP')"
+            fi
+        elif [ -n "${WARP_LICENSE:-}" ]; then
             SLOT3_INFO="${C_GRN}АКТИВЕН${C_RES} (4 ноды UDP AWG WARP+ + 1 нода TCP MASQUE H2 -> '☁️ Amnezia WARP')"
         else
             SLOT3_INFO="${C_GRN}АКТИВЕН${C_RES} (4 ноды UDP AWG 2.0 + 1 нода TCP MASQUE H2 -> '☁️ Amnezia WARP')"

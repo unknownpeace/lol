@@ -212,7 +212,7 @@ print_gateway_motd() {
 
     LAN_IP_CUR=$(get_current_lan_ip)
     LAN_DEV_CUR=$(get_lan_ifname)
-    ROUTER_IP="${GW_IP:-$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via") print $(i+1)}' | head -n 1)}"
+    ROUTER_IP="${GW_IP:-$(get_default_router_ip)}"
 
     # ОЗУ
     RAM_LINE=$(awk '
@@ -260,13 +260,13 @@ print_gateway_motd() {
     ip link show "$CORE_TUN_IF" >/dev/null 2>&1 && TUN_ST="${C_GRN}●${C_RES}"
 
     echo ""
-    echo "${C_BLU}╔══════════════════════════════════════════════════════════════════════════════╗${C_RES}"
+    echo "${C_BLU}╔════════════════════════════════════════════════════════════════════════════${C_RES}"
     if is_openwrt; then
         echo "${C_BLU}║${C_RES}  ${C_CYN}🚀 UNIVERSAL SIDECAR GATEWAY // ${OS_NAME}${C_RES}"
     else
         echo "${C_BLU}║${C_RES}  ${C_CYN}🚀 UNIVERSAL SIDECAR GATEWAY & HOMELAB // ALPINE LINUX${C_RES}"
     fi
-    echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
+    echo "${C_BLU}╠════════════════════════════════════════════════════════════════════════════${C_RES}"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Хост / ОС:${C_RES}    %-24s │ Uptime: %-10s │ Load: %s\n" "${HN} (${ARCH_INFO})" "$UPTIME_STR" "$LOAD_STR"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Сеть:${C_RES}         LAN: %s (%s) │ Роутер: %s\n" "$LAN_IP_CUR" "$LAN_DEV_CUR" "$ROUTER_IP"
     printf "${C_BLU}║${C_RES}  ${C_BLD}• Память (RAM):${C_RES} %s\n" "$RAM_LINE"
@@ -300,9 +300,9 @@ print_gateway_motd() {
     if [ -n "$UPDATE_BADGE" ]; then
         printf "${C_BLU}║${C_RES}  ${C_BLD}• Обновление:${C_RES}   %b\n" "$UPDATE_BADGE"
     fi
-    echo "${C_BLU}╠══════════════════════════════════════════════════════════════════════════════╣${C_RES}"
+    echo "${C_BLU}╠════════════════════════════════════════════════════════════════════════════${C_RES}"
     echo "${C_BLU}║${C_RES}  ⚡ Быстрая команда: ${C_GRN}${C_BLD}gw${C_RES} │ Меню: ${C_CYN}gateway${C_RES} │ Ссылки: ${C_CYN}gw links${C_RES} │ Доктор: ${C_CYN}gw doctor${C_RES}"
-    echo "${C_BLU}╚══════════════════════════════════════════════════════════════════════════════╝${C_RES}"
+    echo "${C_BLU}╚════════════════════════════════════════════════════════════════════════════${C_RES}"
     echo ""
 }
 

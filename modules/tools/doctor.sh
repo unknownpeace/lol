@@ -58,8 +58,7 @@ nameserver 77.88.8.8"
     if [ ! -s "$CUR_C_CONF" ] || ! core_check_config; then
         core_generate_config
     fi
-    service_ctl "$(get_active_core_service)" restart
-    sleep 2
+    core_restart_and_wait "$(get_active_core_service)" || true
     service_ctl adguardhome restart
     conntrack -F >/dev/null 2>&1 || true
     core_reload_api
@@ -226,7 +225,7 @@ run_autoupdate() {
     echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Запуск автообновления шлюза и Homelab (${OS_NAME}) ==="
     update_cores_only "yes"
     if ! is_core_running; then
-        service_ctl "$(get_active_core_service)" start
+        core_restart_and_wait "$(get_active_core_service)" || true
     fi
     if ! pgrep AdGuardHome >/dev/null 2>&1; then
         service_ctl adguardhome start

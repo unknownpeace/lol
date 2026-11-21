@@ -133,7 +133,27 @@ issue_duckdns_cert() {
     elif command -v reload_caddy_safe >/dev/null 2>&1; then
         reload_caddy_safe
     fi
-    sync_agh_homelab_rewrites
+    sync_agh_homelab_rewrites "$(get_current_lan_ip)"
+    if is_module_enabled "vaultwarden" && command -v sync_vaultwarden_config >/dev/null 2>&1; then
+        sync_vaultwarden_config >/dev/null 2>&1 || true
+        service_ctl vaultwarden restart >/dev/null 2>&1 || true
+    fi
+    if is_module_enabled "forgejo" && command -v sync_forgejo_domain_config >/dev/null 2>&1; then
+        sync_forgejo_domain_config >/dev/null 2>&1 || true
+        service_ctl forgejo restart >/dev/null 2>&1 || true
+    fi
+    if [ -f "$(get_active_core_conf)" ]; then
+        if core_generate_config >/dev/null 2>&1 && core_check_config; then
+            if is_core_running; then
+                service_ctl "$(get_active_core_service)" restart >/dev/null 2>&1 || true
+                sleep 1
+                core_reload_api >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
+    if command -v build_pki_portal >/dev/null 2>&1; then
+        build_pki_portal >/dev/null 2>&1 || true
+    fi
 
     echo "${C_GRN}[✓] Wildcard-сертификат Let's Encrypt (*.${FULL_DOMAIN}) успешно получен и установлен!${C_RES}"
     return 0
@@ -189,7 +209,27 @@ switch_to_local_pki() {
     elif command -v reload_caddy_safe >/dev/null 2>&1; then
         reload_caddy_safe
     fi
-    sync_agh_homelab_rewrites
+    sync_agh_homelab_rewrites "$(get_current_lan_ip)"
+    if is_module_enabled "vaultwarden" && command -v sync_vaultwarden_config >/dev/null 2>&1; then
+        sync_vaultwarden_config >/dev/null 2>&1 || true
+        service_ctl vaultwarden restart >/dev/null 2>&1 || true
+    fi
+    if is_module_enabled "forgejo" && command -v sync_forgejo_domain_config >/dev/null 2>&1; then
+        sync_forgejo_domain_config >/dev/null 2>&1 || true
+        service_ctl forgejo restart >/dev/null 2>&1 || true
+    fi
+    if [ -f "$(get_active_core_conf)" ]; then
+        if core_generate_config >/dev/null 2>&1 && core_check_config; then
+            if is_core_running; then
+                service_ctl "$(get_active_core_service)" restart >/dev/null 2>&1 || true
+                sleep 1
+                core_reload_api >/dev/null 2>&1 || true
+            fi
+        fi
+    fi
+    if command -v build_pki_portal >/dev/null 2>&1; then
+        build_pki_portal >/dev/null 2>&1 || true
+    fi
     echo "${C_GRN}[✓] Шлюз переведен в оффлайн-режим Local PKI (*.lan).${C_RES}"
     return 0
 }

@@ -12,11 +12,32 @@ if [ -z "${GATEWAY_DIR:-}" ]; then
     . "${GATEWAY_DIR}/lib/core.sh"
     . "${GATEWAY_DIR}/lib/env.sh"
     . "${GATEWAY_DIR}/lib/env_store.sh"
+    . "${GATEWAY_DIR}/modules/adguard/adguard.sh"
     . "${GATEWAY_DIR}/modules/caddy/ssl.sh"
     . "${GATEWAY_DIR}/modules/caddy/caddy.sh"
     . "${GATEWAY_DIR}/modules/network/firewall.sh"
     . "${GATEWAY_DIR}/modules/homelab/registry.sh"
 fi
+
+# Синхронизация DOMAIN и ROOT_URL в /etc/forgejo/app.ini под активный режим SSL (Local PKI или DuckDNS LE)
+sync_forgejo_domain_config() {
+    load_gateway_env >/dev/null 2>&1 || true
+    [ -f /etc/forgejo/app.ini ] || return 0
+    FG_EXT_DOM="${DOM_FORGEJO}"
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        FG_EXT_DOM="forgejo.${SSL_DOMAIN}"
+    fi
+    FG_GRP=$(id -gn forgejo 2>/dev/null || echo "www-data")
+    awk -v dom="$FG_EXT_DOM" '
+        /^DOMAIN[[:space:]]*=/ { print "DOMAIN = " dom; next }
+        /^ROOT_URL[[:space:]]*=/ { print "ROOT_URL = https://" dom "/"; next }
+        { print }
+    ' /etc/forgejo/app.ini > /etc/forgejo/app.ini.tmp.$$ && \
+        mv -f /etc/forgejo/app.ini.tmp.$$ /etc/forgejo/app.ini
+    chown "forgejo:${FG_GRP}" /etc/forgejo/app.ini 2>/dev/null || true
+    chmod 640 /etc/forgejo/app.ini 2>/dev/null || true
+    return 0
+}
 
 install_module_forgejo() {
     echo "${C_CYN}[*] Установка модуля Forgejo (Git Server)...${C_RES}"
@@ -82,6 +103,8 @@ FG_EOF
         chmod 640 /etc/forgejo/app.ini 2>/dev/null || true
     fi
 
+    sync_forgejo_domain_config
+
     su -s /bin/sh forgejo -c "/usr/bin/forgejo migrate --config /etc/forgejo/app.ini" >/dev/null 2>&1 || true
     service_ctl forgejo enable
     if ! service_ctl forgejo restart; then
@@ -95,9 +118,14 @@ FG_EOF
         W_FG=$((W_FG + 1))
     done
     register_caddy_site "forgejo" "$DOM_FORGEJO" "$PORT_FORGEJO" "no"
+    sync_agh_homelab_rewrites "$(get_current_lan_ip)"
     set_module_state "forgejo" "yes"
 
-    echo "${C_GRN}[✓] Forgejo запущен: https://${DOM_FORGEJO} (локальный порт 127.0.0.1:${PORT_FORGEJO})${C_RES}"
+    FG_SHOW_DOM="${DOM_FORGEJO}"
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        FG_SHOW_DOM="forgejo.${SSL_DOMAIN}"
+    fi
+    echo "${C_GRN}[✓] Forgejo запущен: https://${FG_SHOW_DOM} (локальный порт 127.0.0.1:${PORT_FORGEJO})${C_RES}"
     return 0
 }
 

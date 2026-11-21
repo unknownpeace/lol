@@ -97,7 +97,14 @@ FORCE_GRP
         DNS_FINAL_TAG="dns_ru"
     fi
 
-    SB_HOMELAB_DOMS_ARR=$(emit_json_string_array "$HOMELAB_LAN_DOMAINS")
+    SB_HOMELAB_LIST="$HOMELAB_LAN_DOMAINS"
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        SB_HOMELAB_LIST="${SB_HOMELAB_LIST} ${SSL_DOMAIN}"
+        for _le_sub in ca adguard zashboard singbox mihomo panel vaultwarden forgejo downloads ytdlp torrents torrent code; do
+            SB_HOMELAB_LIST="${SB_HOMELAB_LIST} ${_le_sub}.${SSL_DOMAIN}"
+        done
+    fi
+    SB_HOMELAB_DOMS_ARR=$(emit_json_string_array "$SB_HOMELAB_LIST")
     SB_DDR_DOMS_ARR=$(emit_json_string_array "$DDR_BLOCK_DOMAINS")
     SB_BOOTSTRAP_DOMS_ARR=$(emit_json_string_array "$BOOTSTRAP_DIRECT_DOMAINS")
     SB_GAME_CDN_DNS_ARR=$(emit_json_string_array "steamstatic.com $GAME_CDN_DIRECT_DOMAINS")
@@ -106,7 +113,7 @@ FORCE_GRP
     SB_ROBLOX_DOMS_ARR=$(emit_json_string_array "$ROBLOX_EXTRA_DOMAINS")
     SB_MEDIA_EXTRA_DOMS_ARR=$(emit_json_string_array "$SPOTIFY_EXTRA_DOMAINS $TWITCH_EXTRA_DOMAINS")
     SB_HOMELAB_HOSTS_JSON=""
-    for _hdom in $HOMELAB_LAN_DOMAINS; do
+    for _hdom in $SB_HOMELAB_LIST; do
         [ -z "$_hdom" ] && continue
         if [ -z "$SB_HOMELAB_HOSTS_JSON" ]; then
             SB_HOMELAB_HOSTS_JSON=$(printf '          "%s": ["%s"]' "$_hdom" "$CUR_LIP_SB")
@@ -664,6 +671,10 @@ ${SB_HOMELAB_HOSTS_JSON}
           ".local",
           "alpinelinux.org"
         ],
+        "outbound": "DIRECT"
+      },
+      {
+        "domain": ${SB_HOMELAB_DOMS_ARR},
         "outbound": "DIRECT"
       },
       {

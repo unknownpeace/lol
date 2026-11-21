@@ -12,13 +12,21 @@ detect_external_dhcp_server() {
 
 configure_smart_dhcp() {
     DHCP_MODE="${1:-off}"
-    CUR_LAN_IP=$(get_current_lan_ip)
+    CUR_LAN_IP="${2:-$(get_current_lan_ip)}"
     LAN_IF=$(get_lan_ifname)
     LAN_SUB="${CUR_LAN_IP%.*}"
 
     if [ "$DHCP_MODE" = "on" ]; then
+        LOCAL_DHCP_WAS_ON="no"
+        if is_dhcp_server_enabled; then
+            LOCAL_DHCP_WAS_ON="yes"
+            service_ctl adguardhome stop >/dev/null 2>&1 || true
+            sleep 1
+        fi
+
         # Защитная проверка: если в сети уже есть активный DHCP-сервер, запрещаем включение
         if detect_external_dhcp_server "$LAN_IF"; then
+            [ "$LOCAL_DHCP_WAS_ON" = "yes" ] && service_ctl adguardhome start >/dev/null 2>&1 || true
             echo "${C_RED}[X] Ошибка: В локальной сети (${LAN_IF}) обнаружен активный сторонний DHCP-сервер (роутер)!${C_RES}"
             echo "    Включение DHCP на AdGuard Home отменено во избежание конфликта адресов."
             echo "    Сначала отключите DHCP-сервер в настройках вашего роутера."
@@ -27,13 +35,13 @@ configure_smart_dhcp() {
 
         if [ -f "$AGH_CONF" ]; then
             echo "Настройка встроенного DHCPv4 в AdGuard Home..."
-            service_ctl adguardhome stop
-            sleep 1
+            if [ "$LOCAL_DHCP_WAS_ON" != "yes" ]; then
+                service_ctl adguardhome stop
+                sleep 1
+            fi
 
             awk -v iface="${LAN_IF}" -v gw="${CUR_LAN_IP}" -v r_start="${LAN_SUB}.100" -v r_end="${LAN_SUB}.239" '
-            BEGIN { in_dhcp = 0 }
-            /^dhcp:/ {
-                in_dhcp = 1
+            function print_dhcp_block() {
                 print "dhcp:"
                 print "  enabled: true"
                 print "  interface_name: " iface
@@ -51,6 +59,12 @@ configure_smart_dhcp() {
                 print "    lease_duration: 86400"
                 print "    ra_slaac_only: false"
                 print "    ra_allow_slaac: false"
+            }
+            BEGIN { in_dhcp = 0; seen_dhcp = 0 }
+            /^dhcp:/ {
+                in_dhcp = 1
+                seen_dhcp = 1
+                print_dhcp_block()
                 next
             }
             in_dhcp {
@@ -63,9 +77,15 @@ configure_smart_dhcp() {
             !in_dhcp {
                 print $0
             }
+            END {
+                if (!seen_dhcp) {
+                    print_dhcp_block()
+                }
+            }
             ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$" 2>/dev/null || true
 
             if [ -s "${AGH_CONF}.tmp.$$" ]; then
+                chmod 600 "${AGH_CONF}.tmp.$$" 2>/dev/null || true
                 mv -f "${AGH_CONF}.tmp.$$" "$AGH_CONF"
             else
                 rm -f "${AGH_CONF}.tmp.$$" 2>/dev/null || true
@@ -85,7 +105,19 @@ configure_smart_dhcp() {
         if [ -f "$AGH_CONF" ]; then
             service_ctl adguardhome stop
             sleep 1
-            sed -i '/^dhcp:/,/^[a-zA-Z0-9_]\+:/s/enabled: true/enabled: false/' "$AGH_CONF" 2>/dev/null || true
+            awk '
+            BEGIN { in_dhcp = 0 }
+            /^dhcp:/ { in_dhcp = 1; print; next }
+            in_dhcp && /^[a-zA-Z0-9_]+:/ { in_dhcp = 0 }
+            in_dhcp && /^[[:space:]]*enabled:[[:space:]]*true/ { sub(/true/, "false") }
+            { print }
+            ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$" 2>/dev/null || true
+            if [ -s "${AGH_CONF}.tmp.$$" ]; then
+                chmod 600 "${AGH_CONF}.tmp.$$" 2>/dev/null || true
+                mv -f "${AGH_CONF}.tmp.$$" "$AGH_CONF"
+            else
+                rm -f "${AGH_CONF}.tmp.$$" 2>/dev/null || true
+            fi
             is_openwrt 2>/dev/null && prepare_openwrt_dnsmasq_for_adguard
             service_ctl adguardhome start || true
         fi
@@ -204,7 +236,7 @@ apply_network_ips() {
         write_alpine_static_interfaces "$LAN_IF" "$TARGET_LAN_IP" "$GW_IP"
     fi
     if is_dhcp_server_enabled; then
-        configure_smart_dhcp "on" >/dev/null 2>&1 || true
+        configure_smart_dhcp "on" "$TARGET_LAN_IP" >/dev/null 2>&1 || true
     fi
 
     SW_SCRIPT="/tmp/switch_lan_ip.$$.sh"
@@ -250,8 +282,8 @@ SW_ALP
 nameserver ${GW_IP}
 nameserver 77.88.8.8"
 
-    ui_box_bottom
-    echo "${C_GRN}[✓] Сетевые настройки успешно сохранены (${OS_NAME}):${C_RES}"
+    ui_box_top "✅ СЕТЕВЫЕ НАСТРОЙКИ СОХРАНЕНЫ (${OS_NAME})"
+    ui_box_row "${C_GRN}[✓] Сетевые настройки успешно сохранены (${OS_NAME}):${C_RES}"
     echo " • Новый IP сервера (${LAN_IF}):   ${TARGET_LAN_IP} (маска 255.255.255.0)"
     echo " • IP основного роутера:     ${GW_IP}"
     echo " • Панель $(get_active_ui_name): http://${TARGET_LAN_IP}:9090/ui"

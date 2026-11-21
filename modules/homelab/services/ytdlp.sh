@@ -120,6 +120,7 @@ METUBE_INIT
 
     sync_dns_firewall "yes" "keep"
     register_caddy_site "ytdlp" "$DOM_METUBE" "${PORT_METUBE:-8081}" "yes"
+    sync_agh_homelab_rewrites "$(get_current_lan_ip)"
     set_module_state "ytdlp" "yes"
 
     echo "${C_GRN}[✓] MeTube успешно запущен: https://${DOM_METUBE} (порт: ${PORT_METUBE:-8081})${C_RES}"

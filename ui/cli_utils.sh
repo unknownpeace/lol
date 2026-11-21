@@ -220,42 +220,43 @@ verify_answers_file() {
     fi
 
     ui_banner "ANSWERS VERIFICATION // ПРОВЕРКА ФАЙЛА ОТВЕТОВ"
-    echo "Проверяемый файл: ${C_CYN}${IN_F}${C_RES}"
-    ui_box_sep
+    ui_box_top "📋 СВОДКА ПАРАМЕТРОВ ФАЙЛА ОТВЕТОВ"
+    ui_box_row "• Файл:             ${C_CYN}${IN_F}${C_RES}"
 
     # 1. Проверка синтаксиса sh
     if ! sh -n "$IN_F" 2>/dev/null; then
+        ui_box_bottom
         ui_warn_box "Ошибка синтаксиса в файле ответов ${IN_F}!" \
                     "Исправьте кавычки или незакрытые скобки."
         return 1
     fi
-    echo "${C_GRN}[✔] Синтаксис shell: КОРРЕКТЕН${C_RES}"
+    ui_box_row "• Синтаксис shell:  ${C_GRN}[✔] КОРРЕКТЕН${C_RES}"
 
     # 2. Изолированная безопасная загрузка переменных
     (
         parse_env_file_safely "$IN_F"
 
         # Сеть и ядро
-        printf "• Ядро / Панель:    CORE=%s │ WEB_UI=%s\n" "${CORE_ENGINE:-singbox}" "${WEB_UI:-zashboard}"
-        printf "• Сеть:             LAN IP: %s │ GW IP: %s │ Подписка: %s\n" "${TARGET_LAN_IP:-auto}" "${GW_IP:-auto}" "${SUB_URL:-warp}"
+        ui_box_row "• Ядро / Панель:    CORE=${CORE_ENGINE:-singbox} │ WEB_UI=${WEB_UI:-zashboard}"
+        ui_box_row "• Сеть:             LAN IP: ${TARGET_LAN_IP:-auto} │ GW IP: ${GW_IP:-auto} │ Подписка: ${SUB_URL:-warp}"
         # Пользователь
         if [ -n "${ADMIN_PASS:-}" ]; then
-            printf "• Администратор:    Логин: %s │ Мастер-пароль: [ЗАДАН (длина: %d)]\n" "${ADMIN_USER:-admin}" "${#ADMIN_PASS}"
+            ui_box_row "• Администратор:    Логин: ${ADMIN_USER:-admin} │ Мастер-пароль: [ЗАДАН (длина: ${#ADMIN_PASS})]"
         else
-            printf "• Администратор:    Логин: %s │ ${C_YEL}Мастер-пароль: [ПУСТО -> сгенерируется случайно]${C_RES}\n" "${ADMIN_USER:-admin}"
+            ui_box_row "• Администратор:    Логин: ${ADMIN_USER:-admin} │ ${C_YEL}Мастер-пароль: [ПУСТО -> сгенерируется случайно]${C_RES}"
         fi
         # Homelab
-        printf "• Модули Homelab:   %s\n" "${HOMELAB_MODULES:-none}"
+        ui_box_row "• Модули Homelab:   ${HOMELAB_MODULES:-none}"
         # Storage
-        printf "• Хранилище:        Диск: %s │ Действие: %s │ ФС: %s │ LUKS2: %s\n" "${STORAGE_DISK:-none}" "${STORAGE_ACTION:-mount}" "${STORAGE_FS:-ext4}" "${STORAGE_LUKS:-no}"
+        ui_box_row "• Хранилище:        Диск: ${STORAGE_DISK:-none} │ Действие: ${STORAGE_ACTION:-mount} │ ФС: ${STORAGE_FS:-ext4} │ LUKS2: ${STORAGE_LUKS:-no}"
         # SSL
         if [ "${SSL_TYPE:-local}" = "duckdns" ]; then
-            printf "• SSL / Домен:      DuckDNS (*.%s.duckdns.org) │ Токен: [ЗАДАН]\n" "${DUCKDNS_SUBDOMAIN:-не указан}"
+            ui_box_row "• SSL / Домен:      DuckDNS (*.${DUCKDNS_SUBDOMAIN:-не указан}.duckdns.org) │ Токен: [ЗАДАН]"
         else
-            printf "• SSL / Домен:      Локальный CA (*.lan)\n"
+            ui_box_row "• SSL / Домен:      Локальный CA (*.lan)"
         fi
     )
-    ui_box_sep
+    ui_box_bottom
     ui_ok_msg "Файл ответов готов к запуску через: gw install --answers ${IN_F}"
     return 0
 }
@@ -264,48 +265,52 @@ verify_answers_file() {
 print_gateway_cli_help() {
     ui_banner "GATEWAY CLI // СПРАВОЧНИК КОМАНД АДМИНИСТРАТОРА (v2026.11)"
     ui_box_top "🚀 ОСНОВНЫЕ КОМАНДЫ УПРАВЛЕНИЯ ШЛЮЗОМ И ДАШБОРДОМ"
-    ui_box_row "${C_CYN}gw${C_RES} (или ${C_CYN}gateway${C_RES})             — Главное интерактивное TUI-меню с телеметрией"
-    ui_box_row "${C_CYN}gw motd${C_RES}                     — Быстрый системный баннер (ОЗУ, диск, сеть, службы)"
-    ui_box_row "${C_CYN}gw status${C_RES} (или ${C_CYN}gw test${C_RES})        — Полный рентген и матрица здоровья (Self-Test 2.0 + Ping Matrix)"
-    ui_box_row "${C_CYN}gw doctor${C_RES} (или ${C_CYN}gw fix${C_RES})         — Умная авто-починка одной командой (ядро, DNS, nftables)"
-    ui_box_row "${C_CYN}gw passwd [новый_пароль]${C_RES}   — Ротация единого пароля администратора"
-    ui_box_row "${C_CYN}gw restart${C_RES}                  — Быстрая пересборка конфига, сброс conntrack и перезапуск шлюза"
-    ui_box_row "${C_CYN}gw update${C_RES} (или ${C_CYN}check${C_RES})        — Обновление: скрипты Git + ядра Sing-Box/Mihomo/AGH"
-    ui_box_row "${C_CYN}gw links${C_RES} (или ${C_CYN}gw urls${C_RES})         — Карточка всех веб-адресов и доступов"
-    ui_box_row "${C_CYN}gw logs [служба]${C_RES}            — Живые логи (core|sing-box|mihomo|adguard|autoupdate)"
-    ui_box_row "${C_CYN}gw core [singbox|mihomo]${C_RES}    — Горячее переключение ядра (Sing-Box Extended ⇄ Mihomo)"
-    ui_box_row "${C_CYN}gw ui [zashboard|metacubexd]${C_RES}— Смена веб-панели (:9090/ui) без перезапуска ядра"
+    ui_box_row "${C_CYN}gw${C_RES} (или ${C_CYN}gateway${C_RES})              — Главное интерактивное TUI-меню с телеметрией"
+    ui_box_row "${C_CYN}gw motd${C_RES}                      — Быстрый системный баннер (ОЗУ, диск, сеть, службы)"
+    ui_box_row "${C_CYN}gw status${C_RES} (или ${C_CYN}gw test${C_RES})         — Полный рентген и матрица здоровья (Self-Test 2.0 + Ping Matrix)"
+    ui_box_row "${C_CYN}gw doctor${C_RES} (или ${C_CYN}gw fix${C_RES})          — Умная авто-починка одной командой (ядро, DNS, nftables)"
+    ui_box_row "${C_CYN}gw passwd [новый_пароль]${C_RES}    — Ротация единого пароля администратора"
+    ui_box_row "${C_CYN}gw restart${C_RES}                   — Быстрая пересборка конфига, сброс conntrack и перезапуск шлюза"
+    ui_box_row "${C_CYN}gw update${C_RES} (или ${C_CYN}check${C_RES})         — Обновление: скрипты Git + ядра Sing-Box/Mihomo/AGH"
+    ui_box_row "${C_CYN}gw links${C_RES} (или ${C_CYN}gw urls${C_RES})          — Карточка всех веб-адресов и доступов"
+    if is_openwrt 2>/dev/null; then
+        ui_box_row "${C_CYN}gw logs [служба]${C_RES}             — Живые логи (core|sing-box|mihomo|adguard|autoupdate)"
+    else
+        ui_box_row "${C_CYN}gw logs [служба]${C_RES}             — Живые логи (core|sing-box|mihomo|adguard|caddy|vaultwarden|metube|code|samba|forgejo|transmission|autoupdate)"
+    fi
+    ui_box_row "${C_CYN}gw core [singbox|mihomo]${C_RES}     — Горячее переключение ядра (Sing-Box Extended ⇄ Mihomo)"
+    ui_box_row "${C_CYN}gw ui [zashboard|metacubexd]${C_RES} — Смена веб-панели (:9090/ui) без перезапуска ядра"
     ui_box_sep "🤖 АВТОМАТИЧЕСКАЯ УСТАНОВКА И ФАЙЛЫ ОТВЕТОВ (ZERO-TOUCH)"
-    ui_box_row "${C_CYN}gw install --answers <файл>${C_RES} — Полная тихая установка шлюза без единого вопроса"
-    ui_box_row "${C_CYN}gw answers template [файл]${C_RES}  — Сгенерировать подробный шаблон файла ответов (Answers File)"
-    ui_box_row "${C_CYN}gw answers verify [файл]${C_RES}    — Проверить корректность заполнения файла ответов перед установкой"
+    ui_box_row "${C_CYN}gw install --answers <файл>${C_RES}  — Полная тихая установка шлюза без единого вопроса"
+    ui_box_row "${C_CYN}gw answers template [файл]${C_RES}   — Сгенерировать подробный шаблон файла ответов (Answers File)"
+    ui_box_row "${C_CYN}gw answers verify [файл]${C_RES}     — Проверить корректность заполнения файла ответов перед установкой"
     if ! is_openwrt 2>/dev/null; then
         ui_box_sep "🔐 ЗАЩИТА ПИТАНИЯ, ДИСКИ LUKS2 И БЕЗОПАСНОЕ ВЫКЛЮЧЕНИЕ"
-        ui_box_row "${C_GRN}gw unlock${C_RES}                   — Быстрая разблокировка LUKS2-накопителя после ребута + старт Homelab"
-        ui_box_row "${C_YEL}gw lock${C_RES} (или ${C_YEL}gw eject${C_RES})         — Безопасная остановка медиа-сервисов, sync, umount и закрытие LUKS2"
-        ui_box_row "${C_CYN}gw disk${C_RES}                     — Интерактивный менеджер внешних дисков (LUKS2 / ext4 / btrfs / f2fs)"
+        ui_box_row "${C_GRN}gw unlock${C_RES}                    — Быстрая разблокировка LUKS2-накопителя после ребута + старт Homelab"
+        ui_box_row "${C_YEL}gw lock${C_RES} (или ${C_YEL}gw eject${C_RES})          — Безопасная остановка медиа-сервисов, sync, umount и закрытие LUKS2"
+        ui_box_row "${C_CYN}gw disk${C_RES}                      — Интерактивный менеджер внешних дисков (LUKS2 / ext4 / btrfs / f2fs)"
     fi
-    ui_box_row "${C_CYN}gw safe-reboot${C_RES}              — Корректная перезагрузка с остановкой служб и sync"
-    ui_box_row "${C_CYN}gw safe-poweroff${C_RES}            — Безопасное отключение питания устройства"
+    ui_box_row "${C_CYN}gw safe-reboot${C_RES}               — Корректная перезагрузка с остановкой служб и sync"
+    ui_box_row "${C_CYN}gw safe-poweroff${C_RES}             — Безопасное отключение питания устройства"
     ui_box_sep "🌐 БЫСТРОЕ УПРАВЛЕНИЕ ПРОКСИ И ДОМЕНАМИ НА ЛЕТУ"
-    ui_box_row "${C_CYN}gw proxy add <url|key|warp>${C_RES} — Добавить подписку (Слот 1), ключ URI (Слот 2) или включить WARP"
-    ui_box_row "${C_CYN}gw domain direct <url|dom>${C_RES}  — Направить сайт/домен всегда НАПРЯМУЮ (в обход туннеля)"
-    ui_box_row "${C_CYN}gw domain proxy <url|dom>${C_RES}   — Направить сайт/домен принудительно В ПРОКСИ (через туннель)"
-    ui_box_row "${C_CYN}gw killswitch [on|off|status]${C_RES}— Аппаратный Kill-Switch (nftables: блокировка мимо TUN)"
+    ui_box_row "${C_CYN}gw proxy add <url|key|warp>${C_RES}  — Добавить подписку (Слот 1), ключ URI (Слот 2) или включить WARP"
+    ui_box_row "${C_CYN}gw domain direct <url|dom>${C_RES}   — Направить сайт/домен всегда НАПРЯМУЮ (в обход туннеля)"
+    ui_box_row "${C_CYN}gw domain proxy <url|dom>${C_RES}    — Направить сайт/домен принудительно В ПРОКСИ (через туннель)"
+    ui_box_row "${C_CYN}gw killswitch [on|off|status]${C_RES} — Аппаратный Kill-Switch (nftables: блокировка мимо TUN)"
     if ! is_openwrt 2>/dev/null; then
         ui_box_sep "📦 УПРАВЛЕНИЕ КОНТЕЙНЕРАМИ LXC И СНАПШОТАМИ"
-        ui_box_row "${C_CYN}gw lxc${C_RES} (или ${C_CYN}gw lxc list${C_RES})    — Таблица контейнеров (статус, IP, память, автозапуск, снапшоты)"
-        ui_box_row "${C_CYN}gw lxc create${C_RES}               — Интерактивный мастер создания контейнера (Alpine, Debian, Ubuntu, Arch...)"
+        ui_box_row "${C_CYN}gw lxc${C_RES} (или ${C_CYN}gw lxc list${C_RES})     — Таблица контейнеров (статус, IP, память, автозапуск, снапшоты)"
+        ui_box_row "${C_CYN}gw lxc create${C_RES}                — Интерактивный мастер создания контейнера (Alpine, Debian, Ubuntu, Arch...)"
         ui_box_row "${C_CYN}gw lxc start|stop|restart <имя>${C_RES} — Управление состоянием контейнера"
-        ui_box_row "${C_CYN}gw lxc attach <имя>${C_RES}         — Открыть сессию терминала root внутри контейнера (lxc-attach)"
+        ui_box_row "${C_CYN}gw lxc attach <имя>${C_RES}          — Открыть сессию терминала root внутри контейнера (lxc-attach)"
         ui_box_row "${C_CYN}gw lxc snap <имя> [create|list|restore|delete]${C_RES} — Управление мгновенными снимками (снапшотами)"
         ui_box_row "${C_CYN}gw lxc autostart <имя> [on|off]${C_RES} — Настройка автозапуска контейнера при включении сервера"
-        ui_box_row "${C_CYN}gw lxc fix-net <имя>${C_RES}         — Автоисправление сети контейнера (DHCP/resolv.conf)"
-        ui_box_row "${C_CYN}gw lxc menu${C_RES}                 — Интерактивное TUI-меню LXC виртуализации"
+        ui_box_row "${C_CYN}gw lxc fix-net <имя>${C_RES}          — Автоисправление сети контейнера (DHCP/resolv.conf)"
+        ui_box_row "${C_CYN}gw lxc menu${C_RES}                  — Интерактивное TUI-меню LXC виртуализации"
         ui_box_sep "🏠 МОДУЛИ HOMELAB И ЕДИНЫЙ БЭКАП"
-        ui_box_row "${C_CYN}gw homelab${C_RES}                  — Открыть интерактивное меню управления домашним сервером (Пункт 13)"
-        ui_box_row "${C_CYN}gw homelab install <1-7>${C_RES}    — Установить модуль (caddy|samba|vaultwarden|forgejo|code|metube|torrent)"
-        ui_box_row "${C_CYN}gw homelab restart <1-7>${C_RES}    — Перезапустить выбранный модуль Homelab"
+        ui_box_row "${C_CYN}gw homelab${C_RES}                   — Открыть интерактивное меню управления домашним сервером (Пункт 13)"
+        ui_box_row "${C_CYN}gw homelab install <1-7>${C_RES}     — Установить модуль (caddy|samba|vaultwarden|forgejo|code|metube|torrent)"
+        ui_box_row "${C_CYN}gw homelab restart <1-7>${C_RES}     — Перезапустить выбранный модуль Homelab"
     else
         ui_box_sep "📦 РЕЗЕРВНОЕ КОПИРОВАНИЕ КОНФИГУРАЦИИ"
     fi

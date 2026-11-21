@@ -133,40 +133,128 @@ core_check_config() {
     fi
 }
 
+core_restart_and_wait() {
+    _SVC="${1:-$(get_active_core_service)}"
+    [ -z "${ADMIN_PASS:-}" ] && load_gateway_env >/dev/null 2>&1 || true
+    service_ctl "$_SVC" stop
+    _STOP_W=0
+    while [ "$_STOP_W" -lt 8 ]; do
+        is_core_running || break
+        sleep 1
+        _STOP_W=$((_STOP_W + 1))
+    done
+    service_ctl "$_SVC" start
+    _START_W=0
+    while [ "$_START_W" -lt 15 ]; do
+        if is_core_running && ip link show "$CORE_TUN_IF" >/dev/null 2>&1 && \
+           curl -fsS --connect-timeout 1 -m 2 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/version" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        _START_W=$((_START_W + 1))
+    done
+    is_core_running && ip link show "$CORE_TUN_IF" >/dev/null 2>&1 && return 0
+    return 1
+}
+
+_core_delay_group() {
+    _grp_tag="$1"
+    _tmo_ms="${2:-5000}"
+    _curl_max="${3:-20}"
+    _enc_g=$(jq -rn --arg s "$_grp_tag" '$s|@uri')
+    curl -g -fsS --connect-timeout 2 -m "$_curl_max" -H "Authorization: Bearer ${ADMIN_PASS}" \
+        "http://127.0.0.1:9090/group/${_enc_g}/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=${_tmo_ms}" >/dev/null 2>&1 || true
+}
+
 core_reload_api() {
     is_core_running || return 0
     load_gateway_env
-    API_PROX_JSON=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/providers/proxies" 2>/dev/null || true)
-    P_LIST=""
-    if [ -n "$API_PROX_JSON" ] && command -v jq >/dev/null 2>&1; then
-        P_LIST=$(printf "%s" "$API_PROX_JSON" | jq -r '.providers | keys[]?' 2>/dev/null || true)
-    fi
-    for P_TAG in $P_LIST; do
-        if ! curl -fsS --connect-timeout 2 -m 15 -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
-            "http://127.0.0.1:9090/providers/proxies/${P_TAG}" >/dev/null 2>&1; then
-            sleep 2
-            curl -fsS --connect-timeout 2 -m 15 -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
-                "http://127.0.0.1:9090/providers/proxies/${P_TAG}" >/dev/null 2>&1 || true
+    command -v jq >/dev/null 2>&1 || return 0
+
+    _API_WAIT=0
+    while [ "$_API_WAIT" -lt 12 ]; do
+        if curl -fsS --connect-timeout 1 -m 2 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/version" >/dev/null 2>&1; then
+            break
         fi
+        sleep 1
+        _API_WAIT=$((_API_WAIT + 1))
     done
 
-    PROX_JSON=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
-    if [ -n "$PROX_JSON" ] && command -v jq >/dev/null 2>&1; then
+    API_PROX_JSON=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/providers/proxies" 2>/dev/null || true)
+    HAS_REAL_PROV=0
+    if [ -n "$API_PROX_JSON" ]; then
+        PROV_TAGS=$(printf "%s" "$API_PROX_JSON" | jq -r '.providers | to_entries[]? | select(.value.vehicleType=="HTTP" or .value.vehicleType=="File" or .value.vehicleType=="Remote" or .value.vehicleType=="Local") | .key' 2>/dev/null || true)
+        if [ -n "$PROV_TAGS" ]; then
+            HAS_REAL_PROV=1
+            printf "%s\n" "$PROV_TAGS" | while IFS= read -r P_TAG; do
+                [ -z "$P_TAG" ] && continue
+                ENC_P=$(jq -rn --arg s "$P_TAG" '$s|@uri')
+                _PUT_CODE=$(curl -g -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 -m 15 -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
+                    "http://127.0.0.1:9090/providers/proxies/${ENC_P}" 2>/dev/null || echo "000")
+                case "$_PUT_CODE" in
+                    200|204|503) ;;
+                    *)
+                        sleep 2
+                        curl -g -fsS --connect-timeout 2 -m 15 -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
+                            "http://127.0.0.1:9090/providers/proxies/${ENC_P}" >/dev/null 2>&1 || true
+                        ;;
+                esac
+            done
+        fi
+    fi
+
+    # Wait adaptively for async remote provider hydration (Sing-Box Extended 503 updating)
+    PROX_JSON=""
+    _WAIT_I=0
+    _PREV_UNHYDRATED=-1
+    _STABLE_CNT=0
+    while [ "$_WAIT_I" -lt 25 ]; do
+        PROX_JSON=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
+        [ "$HAS_REAL_PROV" -eq 0 ] && break
+        [ -z "$PROX_JSON" ] && break
+        _UNHYDRATED=$(printf "%s" "$PROX_JSON" | jq -r '[.proxies | to_entries[] | select(.value.type=="URLTest" and ((.value.all|length) <= 1))] | length' 2>/dev/null || echo "0")
+        [ "$_UNHYDRATED" -eq 0 ] && break
+        _AUTO_LEN=$(printf "%s" "$PROX_JSON" | jq -r '(.proxies["⚡ Авто (Самый быстрый)"].all | length) // 0' 2>/dev/null || echo "0")
+        if [ "$_AUTO_LEN" -gt 3 ] && [ "$_UNHYDRATED" -eq "$_PREV_UNHYDRATED" ]; then
+            _STABLE_CNT=$((_STABLE_CNT + 1))
+            [ "$_STABLE_CNT" -ge 3 ] && break
+        else
+            _STABLE_CNT=0
+        fi
+        _PREV_UNHYDRATED="$_UNHYDRATED"
+        sleep 1
+        _WAIT_I=$((_WAIT_I + 1))
+    done
+
+    if [ -n "$PROX_JSON" ]; then
         printf "%s" "$PROX_JSON" | jq -r '.proxies | to_entries[] | select(.value.type=="URLTest" and .key!="⚡ Авто (Самый быстрый)") | .key' 2>/dev/null | {
             while IFS= read -r G_TAG; do
                 [ -z "$G_TAG" ] && continue
-                ENC_G=$(jq -rn --arg s "$G_TAG" '$s|@uri')
-                curl -g -fsS --connect-timeout 2 -m 8 -H "Authorization: Bearer ${ADMIN_PASS}" \
-                    "http://127.0.0.1:9090/group/${ENC_G}/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=3500" >/dev/null 2>&1 || true &
+                _core_delay_group "$G_TAG" 5000 20 &
             done
             wait
         }
-        HAS_MAIN_AUTO=$(printf "%s" "$PROX_JSON" | jq -r 'if .proxies["⚡ Авто (Самый быстрый)"].type=="URLTest" then "1" else "0" end' 2>/dev/null || echo "0")
-        if [ "$HAS_MAIN_AUTO" = "1" ]; then
-            ENC_MAIN=$(jq -rn --arg s "⚡ Авто (Самый быстрый)" '$s|@uri')
-            curl -g -fsS --connect-timeout 2 -m 8 -H "Authorization: Bearer ${ADMIN_PASS}" \
-                "http://127.0.0.1:9090/group/${ENC_MAIN}/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=3500" >/dev/null 2>&1 || true
+
+        # Retry any populated URLTest group still stuck on dummy fallback after concurrent burst
+        PROX_JSON=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
+        if [ -n "$PROX_JSON" ]; then
+            printf "%s" "$PROX_JSON" | jq -r '.proxies | to_entries[] | select(.value.type=="URLTest" and .key!="⚡ Авто (Самый быстрый)" and ((.value.all|length) > 1) and .value.now=="⛔ Нет рабочих нод") | .key' 2>/dev/null | while IFS= read -r STUCK_G; do
+                [ -z "$STUCK_G" ] && continue
+                _core_delay_group "$STUCK_G" 5500 20
+            done
+
+            HAS_MAIN_AUTO=$(printf "%s" "$PROX_JSON" | jq -r 'if .proxies["⚡ Авто (Самый быстрый)"].type=="URLTest" then "1" else "0" end' 2>/dev/null || echo "0")
+            if [ "$HAS_MAIN_AUTO" = "1" ]; then
+                _core_delay_group "⚡ Авто (Самый быстрый)" 5000 20
+                MAIN_NOW=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null | \
+                    jq -r 'if .proxies["⚡ Авто (Самый быстрый)"].now=="⛔ Нет рабочих нод" and ((.proxies["⚡ Авто (Самый быстрый)"].all|length) > 1) then "1" else "0" end' 2>/dev/null || echo "0")
+                if [ "$MAIN_NOW" = "1" ]; then
+                    sleep 1
+                    _core_delay_group "⚡ Авто (Самый быстрый)" 5500 20
+                fi
+            fi
         fi
+        sleep 1
     fi
     return 0
 }
@@ -274,21 +362,10 @@ apply_and_verify_core() {
         return 1
     fi
 
-    service_ctl "$ACT_SVC" restart
-
-    WAIT_OK="no"
-    W_IDX=0
-    while [ "$W_IDX" -lt 12 ]; do
-        if is_core_running && ip link show "$CORE_TUN_IF" >/dev/null 2>&1 && \
-           curl -fsS -m 1 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
-            WAIT_OK="yes"
-            break
-        fi
-        sleep 1
-        W_IDX=$((W_IDX + 1))
-    done
-    if [ "$WAIT_OK" = "no" ] && is_core_running && ip link show "$CORE_TUN_IF" >/dev/null 2>&1; then
+    if core_restart_and_wait "$ACT_SVC"; then
         WAIT_OK="yes"
+    else
+        WAIT_OK="no"
     fi
 
     if [ "$WAIT_OK" = "yes" ]; then
@@ -395,7 +472,7 @@ switch_core_engine() {
         core_reload_api
         rm -f "$VER_CACHE_FILE"
         echo "${C_GRN}[✓] Ядро успешно переключено на ${TARGET_NAME} ($(get_active_core_version))! TUN: ${CORE_TUN_IF}${C_RES}"
-        if [ "$TARGET_CORE" = "mihomo" ] && is_warp_enabled && [ ! -f "$SB_CONF" ]; then
+        if [ "$TARGET_CORE" = "mihomo" ] && is_warp_enabled; then
             echo "${C_DIM}[i] Примечание: в Mihomo слот WARP работает через 4 узла AmneziaWG UDP; MASQUE H2 доступен в Sing-Box Extended.${C_RES}"
         fi
         return 0

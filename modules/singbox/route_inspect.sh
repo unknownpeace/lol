@@ -17,7 +17,7 @@ inspect_domain_route() {
     CLEAN_HOST="${CLEAN_SUFFIX#+.}"
 
     echo ""
-    ui_box_top "🕵️ Рентген маршрута для домена: ${C_BLD}${CLEAN_HOST}${C_RES}${C_CYN}"
+    ui_box_top "🕵️ Рентген маршрута для домена: ${CLEAN_HOST}"
 
     # 1. Проверка принадлежности к локальной зоне Homelab (.lan)
     case "$CLEAN_HOST" in
@@ -27,12 +27,14 @@ inspect_domain_route() {
     esac
 
     # 2. Проверка в пользовательских списках
+    RULE_EXT=".srs"
+    [ "$(get_active_core 2>/dev/null)" = "mihomo" ] && RULE_EXT=".mrs"
     if grep -qxF "$CLEAN_SUFFIX" "$USER_DIRECT_FILE" 2>/dev/null; then
         echo " • Списки пользователя: ${C_YEL}Принудительно НАПРЯМУЮ (${USER_DIRECT_FILE})${C_RES}"
     elif grep -qxF "$CLEAN_SUFFIX" "$USER_PROXY_FILE" 2>/dev/null; then
         echo " • Списки пользователя: ${C_GRN}Принудительно В ПРОКСИ (${USER_PROXY_FILE})${C_RES}"
     else
-        echo " • Списки пользователя: ${C_DIM}Не числится (маршрутизируется по базам .srs)${C_RES}"
+        echo " • Списки пользователя: ${C_DIM}Не числится (маршрутизируется по базам ${RULE_EXT})${C_RES}"
     fi
 
     # 3. DNS-резолв через AdGuard Home -> Sing-Box
@@ -77,9 +79,9 @@ inspect_domain_route() {
 
     echo "   -> Через $(get_active_core_name): HTTP ${PRX_CODE} | TLS: ${C_GRN}${PRX_MS}${C_RES}"
     echo "   -> Напрямую (LAN): HTTP ${DIR_CODE} | TLS: ${C_YEL}${DIR_MS}${C_RES}"
+    ui_box_bottom
     [ ! -t 0 ] && return 0
 
-    ui_box_sep
     echo "Быстрое действие для ${CLEAN_SUFFIX}:"
     echo " 1) Направить этот домен В ПРОКСИ (добавить в ${USER_PROXY_FILE})"
     echo " 2) Направить этот домен НАПРЯМУЮ (добавить в ${USER_DIRECT_FILE})"

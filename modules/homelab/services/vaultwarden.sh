@@ -12,6 +12,7 @@ if [ -z "${GATEWAY_DIR:-}" ]; then
     . "${GATEWAY_DIR}/lib/core.sh"
     . "${GATEWAY_DIR}/lib/env.sh"
     . "${GATEWAY_DIR}/lib/env_store.sh"
+    . "${GATEWAY_DIR}/modules/adguard/adguard.sh"
     . "${GATEWAY_DIR}/modules/caddy/ssl.sh"
     . "${GATEWAY_DIR}/modules/caddy/caddy.sh"
     . "${GATEWAY_DIR}/modules/network/firewall.sh"
@@ -40,6 +41,11 @@ sync_vaultwarden_config() {
     mkdir -p /var/lib/vaultwarden/attachments /var/lib/vaultwarden/sends /var/lib/vaultwarden/icon_cache /var/lib/vaultwarden/tmp
     WEB_VAULT_DIR=$(detect_vaultwarden_web_dir || true)
 
+    VW_EXT_DOM="${DOM_VAULTWARDEN}"
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        VW_EXT_DOM="vaultwarden.${SSL_DOMAIN}"
+    fi
+
     ESC_VW_ADM=$(escape_single_quotes "${ADMIN_PASS:-admin}")
     umask 077
     cat << VW_EOF > /etc/conf.d/vaultwarden
@@ -49,7 +55,7 @@ export DATABASE_URL="sqlite:///var/lib/vaultwarden/db.sqlite3"
 export ENABLE_DB_WAL="true"
 export ROCKET_ADDRESS="127.0.0.1"
 export ROCKET_PORT="${PORT_VAULTWARDEN}"
-export DOMAIN="https://${DOM_VAULTWARDEN}"
+export DOMAIN="https://${VW_EXT_DOM}"
 export WEB_VAULT_ENABLED="true"
 export WEB_VAULT_FOLDER="${WEB_VAULT_DIR}"
 export SIGNUPS_ALLOWED="true"
@@ -69,7 +75,7 @@ VW_EOF
     umask 022
 
     if [ -f /var/lib/vaultwarden/config.json ] && command -v jq >/dev/null 2>&1; then
-        jq --arg dom "https://${DOM_VAULTWARDEN}" --arg adm "${ADMIN_PASS:-admin}" \
+        jq --arg dom "https://${VW_EXT_DOM}" --arg adm "${ADMIN_PASS:-admin}" \
            '.domain = $dom | .web_vault_enabled = true | .admin_token = $adm' \
            /var/lib/vaultwarden/config.json > /var/lib/vaultwarden/config.json.tmp 2>/dev/null && \
            mv -f /var/lib/vaultwarden/config.json.tmp /var/lib/vaultwarden/config.json 2>/dev/null || true
@@ -85,9 +91,10 @@ VW_EOF
     [ -d "${WEB_VAULT_DIR%/}" ] && chmod -R a+rX "${WEB_VAULT_DIR%/}" 2>/dev/null || true
 
     CUR_LIP_VW=$(get_current_lan_ip)
-    if [ -n "$CUR_LIP_VW" ] && ! grep -qE "^${CUR_LIP_VW}[[:space:]].*${DOM_VAULTWARDEN}" /etc/hosts 2>/dev/null; then
+    if [ -n "$CUR_LIP_VW" ] && ! grep -qE "^${CUR_LIP_VW}[[:space:]].*${VW_EXT_DOM}" /etc/hosts 2>/dev/null; then
         sed -i "/${DOM_VAULTWARDEN}/d" /etc/hosts 2>/dev/null || true
-        printf "%s\t%s %s\n" "$CUR_LIP_VW" "$DOM_VAULTWARDEN" "$DOM_CA" >> /etc/hosts 2>/dev/null || true
+        [ -n "${SSL_DOMAIN:-}" ] && sed -i "/vaultwarden\.${SSL_DOMAIN}/d" /etc/hosts 2>/dev/null || true
+        printf "%s\t%s %s %s\n" "$CUR_LIP_VW" "$DOM_VAULTWARDEN" "$VW_EXT_DOM" "$DOM_CA" >> /etc/hosts 2>/dev/null || true
     fi
     return 0
 }
@@ -157,7 +164,11 @@ VW_INIT_EOF
     sync_agh_homelab_rewrites "$(get_current_lan_ip)"
     set_module_state "vaultwarden" "yes"
 
-    echo "${C_GRN}[✓] Vaultwarden запущен: https://${DOM_VAULTWARDEN} (Админ-панель: https://${DOM_VAULTWARDEN}/admin)${C_RES}"
+    VW_SHOW_DOM="${DOM_VAULTWARDEN}"
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        VW_SHOW_DOM="vaultwarden.${SSL_DOMAIN}"
+    fi
+    echo "${C_GRN}[✓] Vaultwarden запущен: https://${VW_SHOW_DOM} (Админ-панель: https://${VW_SHOW_DOM}/admin)${C_RES}"
     return 0
 }
 

@@ -105,8 +105,8 @@ DEF_EOF
 lxc_list_containers() {
     ensure_lxc_subsystem "yes"
     ui_box_top "📦 СПИСОК КОНТЕЙНЕРОВ LXC (LINUX CONTAINERS)"
-    printf "  ${C_CYN}%-16s %-12s %-16s %-10s %-8s %-10s${C_RES}\n" "ИМЯ" "СТАТУС" "IPV4" "ПАМЯТЬ" "АВТО" "СНАПШОТЫ"
-    echo "  ──────────────────────────────────────────────────────────────────────────"
+    ui_box_row "${C_CYN}ИМЯ              СТАТУС       IPV4             ПАМЯТЬ     АВТО     СНАПШОТЫ${C_RES}"
+    ui_box_row "─────────────────────────────────────────────────────────────────────────────"
 
     REAL_LXC_PATH=$(readlink -f "$LXC_VAR_LIB" 2>/dev/null || echo "$LXC_VAR_LIB")
     CT_FOUND=0
@@ -145,15 +145,23 @@ lxc_list_containers() {
             SNAPS_COUNT=$(ls -1 "${CT_DIR}/snaps" 2>/dev/null | wc -l || echo 0)
         fi
 
-        # Цветовая подсветка
+        # Цветовая подсветка (фиксированная визуальная ширина 12 символов)
         if [ "$STATE" = "RUNNING" ]; then
-            STATE_FMT="${C_GRN}● RUNNING${C_RES} "
+            STATE_FMT="${C_GRN}● RUNNING${C_RES}   "
         else
-            STATE_FMT="${C_DGR}○ STOPPED${C_RES} "
+            STATE_FMT="${C_DIM}○ STOPPED${C_RES}   "
         fi
 
-        printf "  %-16s %b %-16s %-10s %-8s %-10s\n" \
-               "$CT_NAME" "$STATE_FMT" "$IPV4" "$MEM_USE" "$AUTO_VAL" "${SNAPS_COUNT} шт."
+        # Компенсация UTF-8 кириллицы для столбца АВТО (визуальная ширина 8 символов)
+        if [ "$AUTO_VAL" = "да" ]; then
+            AUTO_FMT="да      "
+        else
+            AUTO_FMT="нет     "
+        fi
+
+        CT_ROW=$(printf "%-16s %b %-16s %-10s %s %s" \
+            "$CT_NAME" "$STATE_FMT" "$IPV4" "$MEM_USE" "$AUTO_FMT" "${SNAPS_COUNT} шт.")
+        ui_box_row "$CT_ROW"
     done
 
     if [ "$CT_FOUND" -eq 0 ]; then
@@ -242,7 +250,7 @@ lxc_create_wizard() {
 
     LXC_ARCH=$(get_lxc_system_arch)
 
-    echo "${C_BOLD}Введите имя нового контейнера (латиница, цифры, дефис):${C_RES}"
+    echo "${C_BLD}Введите имя нового контейнера (латиница, цифры, дефис):${C_RES}"
     read -r CT_NAME
     CT_NAME=$(echo "$CT_NAME" | tr -cd 'a-zA-Z0-9_-')
     if [ -z "$CT_NAME" ]; then
@@ -579,7 +587,7 @@ lxc_manage_snapshots() {
             fi
             ui_box_bottom
             ;;
-        restore)
+        restore|revert)
             if [ -z "$SNAPNAME" ]; then
                 ui_info_msg "Доступные снимки:"
                 lxc-snapshot -n "$NAME" -L 2>/dev/null || true
@@ -601,7 +609,7 @@ lxc_manage_snapshots() {
                 fi
             fi
             ;;
-        delete)
+        delete|del|rm)
             if [ -z "$SNAPNAME" ]; then
                 echo "Введите имя снимка для удаления (например: snap0):"
                 read -r SNAPNAME
@@ -653,7 +661,7 @@ lxc_interactive_menu() {
         ui_banner "LXC // УПРАВЛЕНИЕ КОНТЕЙНЕРАМИ И СНАПШОТАМИ"
         lxc_list_containers
 
-        echo "  ${C_BOLD}Действия:${C_RES}"
+        echo "  ${C_BLD}Действия:${C_RES}"
         echo "  1) ➕ Создать новый контейнер (Alpine, Debian, Ubuntu, Arch...)"
         echo "  2) ▶  Запустить контейнер"
         echo "  3) ⏹  Остановить контейнер"

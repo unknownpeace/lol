@@ -8,7 +8,7 @@ set -e
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 # Автоматическое определение GATEWAY_DIR
-if [ -z "${GATEWAY_DIR:-}" ]; then
+if [ -z "${GATEWAY_DIR:-}" ] || [ ! -f "${GATEWAY_DIR}/gateway.sh" ]; then
     TARGET_EXEC="${BASH_SOURCE:-$0}"
     case "$TARGET_EXEC" in
         */*) ;;
@@ -19,8 +19,10 @@ if [ -z "${GATEWAY_DIR:-}" ]; then
     esac
     REAL_EXEC=$(readlink -f "$TARGET_EXEC" 2>/dev/null || true)
     [ -z "$REAL_EXEC" ] && REAL_EXEC="$TARGET_EXEC"
-    if [ -f "$REAL_EXEC" ]; then
-        GATEWAY_DIR="$(cd -P "$(dirname "$REAL_EXEC")" && pwd)"
+    _CAND_DIR=""
+    [ -f "$REAL_EXEC" ] && _CAND_DIR="$(cd -P "$(dirname "$REAL_EXEC")" && pwd)"
+    if [ -n "$_CAND_DIR" ] && [ -f "${_CAND_DIR}/gateway.sh" ]; then
+        GATEWAY_DIR="$_CAND_DIR"
     else
         GATEWAY_DIR="/opt/gateway"
     fi

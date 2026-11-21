@@ -7,7 +7,7 @@ set -e
 # ==============================================================================
 
 # Определение реального каталога расположения шлюза (с поддержкой symlink, readlink -f и PATH)
-if [ -z "${GATEWAY_DIR:-}" ]; then
+if [ -z "${GATEWAY_DIR:-}" ] || [ ! -f "${GATEWAY_DIR}/gateway.sh" ]; then
     TARGET="${BASH_SOURCE:-$0}"
     case "$TARGET" in
         */*) ;;
@@ -17,8 +17,10 @@ if [ -z "${GATEWAY_DIR:-}" ]; then
             ;;
     esac
     REAL_TARGET=$(readlink -f "$TARGET" 2>/dev/null || true)
-    if [ -n "$REAL_TARGET" ] && [ -f "$REAL_TARGET" ]; then
-        GATEWAY_DIR="$(cd -P "$(dirname "$REAL_TARGET")" && pwd)"
+    _CAND_DIR=""
+    [ -n "$REAL_TARGET" ] && [ -f "$REAL_TARGET" ] && _CAND_DIR="$(cd -P "$(dirname "$REAL_TARGET")" && pwd)"
+    if [ -n "$_CAND_DIR" ] && [ -f "${_CAND_DIR}/gateway.sh" ]; then
+        GATEWAY_DIR="$_CAND_DIR"
     else
         while [ -h "$TARGET" ]; do
             DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
@@ -28,21 +30,24 @@ if [ -z "${GATEWAY_DIR:-}" ]; then
                 *) TARGET="$DIR/$TARGET" ;;
             esac
         done
-        if [ ! -f "$TARGET" ]; then
+        _CAND_DIR=""
+        [ -f "$TARGET" ] && _CAND_DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
+        if [ -z "$_CAND_DIR" ] || [ ! -f "${_CAND_DIR}/gateway.sh" ]; then
             for cand in "/opt/gateway/gateway.sh" "/etc/gateway/gateway.sh" "./gateway.sh"; do
                 if [ -f "$cand" ]; then
                     TARGET="$cand"
+                    _CAND_DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
                     break
                 fi
             done
         fi
-        GATEWAY_DIR="$(cd -P "$(dirname "$TARGET")" && pwd)"
+        GATEWAY_DIR="${_CAND_DIR:-/opt/gateway}"
     fi
 fi
 export GATEWAY_DIR
 
 # Автоматическая привязка глобальных команд /usr/bin/gateway и /usr/bin/gw (при наличии прав)
-if [ -d "/usr/bin" ] && [ -w "/usr/bin" ]; then
+if [ -d "/usr/bin" ] && [ -w "/usr/bin" ] && [ -f "${GATEWAY_DIR}/gateway.sh" ]; then
     if [ ! -L "/usr/bin/gateway" ] || [ "$(readlink -f /usr/bin/gateway 2>/dev/null)" != "${GATEWAY_DIR}/gateway.sh" ]; then
         ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gateway 2>/dev/null || true
     fi

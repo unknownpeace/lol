@@ -648,7 +648,7 @@ manage_external_disks_menu() {
                 read -r _ < /dev/tty || true
                 ;;
             5)
-                rm -rf "${STORAGE_INC_TORRENTS:?}/"* "${STORAGE_INC_YTDLP:?}/"* 2>/dev/null || true
+                rm -rf "${STORAGE_INC_TORRENTS:?}/"* "${STORAGE_INC_YTDLP:?}/"* "${STORAGE_INCOMPLETE:?}/metube/"* 2>/dev/null || true
                 sync_all_homelab_permissions
                 ui_ok_msg "Права доступа синхронизированы, временные буферы загрузок очищены!"
                 printf "\nНажмите Enter для продолжения..."

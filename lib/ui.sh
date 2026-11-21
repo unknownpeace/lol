@@ -47,13 +47,21 @@ init_colors
 # Неоновый градиент, Прогресс-бары, Матрица пинга и Неблокирующий спиннер)
 # ==============================================================================
 ui_banner() {
-    TITLE_SUB="${1:-UNIVERSAL SIDECAR GATEWAY & HOMELAB | ALPINE LINUX EDITION}"
+    if is_openwrt 2>/dev/null; then
+        TITLE_SUB="${1:-UNIVERSAL SIDECAR GATEWAY // ${OS_NAME:-OPENWRT} EDITION}"
+        BANNER_TAG1="${C_WHT}GATEWAY${C_G4}   "
+        BANNER_TAG2="${C_CYN}OPENWRT${C_G5}   "
+    else
+        TITLE_SUB="${1:-UNIVERSAL SIDECAR GATEWAY & HOMELAB | ALPINE LINUX EDITION}"
+        BANNER_TAG1="${C_WHT}HOMELAB${C_G4}   "
+        BANNER_TAG2="${C_CYN}ALPINE${C_G5}    "
+    fi
     echo "${C_G1}  ╭──────────────────────────────────────────────────────────────────────────╮${C_RES}"
     echo "${C_G1}  │  ██████╗  █████╗ ████████╗███████╗██╗    ██╗ █████╗ ██╗   ██╗            │${C_RES}"
     echo "${C_G2}  │ ██╔════╝ ██╔══██╗╚══██╔══╝██╔════╝██║    ██║██╔══██╗╚██╗ ██╔╝            │${C_RES}"
     echo "${C_G3}  │ ██║  ███╗███████║   ██║   █████╗  ██║ █╗ ██║███████║ ╚████╔╝   ${C_G6}v2026.11${C_G3}  │${C_RES}"
-    echo "${C_G4}  │ ██║   ██║██╔══██║   ██║   ██╔══╝  ██║███╗██║██╔══██║  ╚██╔╝    ${C_WHT}HOMELAB${C_G4}   │${C_RES}"
-    echo "${C_G5}  │ ╚██████╔╝██║  ██║   ██║   ███████╗╚███╔███╔╝██║  ██║   ██║     ${C_CYN}ALPINE${C_G5}    │${C_RES}"
+    echo "${C_G4}  │ ██║   ██║██╔══██║   ██║   ██╔══╝  ██║███╗██║██╔══██║  ╚██╔╝    ${BANNER_TAG1}│${C_RES}"
+    echo "${C_G5}  │ ╚██████╔╝██║  ██║   ██║   ███████╗╚███╔███╔╝██║  ██║   ██║     ${BANNER_TAG2}│${C_RES}"
     echo "${C_G5}  │  ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝   ╚═╝               │${C_RES}"
     echo "${C_G6}  ├──────────────────────────────────────────────────────────────────────────┴─${C_RES}"
     echo "${C_G6}  │${C_RES} ${C_BLD}◆ ${TITLE_SUB}${C_RES}"

@@ -10,6 +10,7 @@ if [ -z "${GATEWAY_DIR:-}" ]; then
     . "${GATEWAY_DIR}/lib/core.sh"
     . "${GATEWAY_DIR}/lib/env.sh"
     . "${GATEWAY_DIR}/lib/env_store.sh"
+    . "${GATEWAY_DIR}/modules/adguard/adguard.sh"
     . "${GATEWAY_DIR}/modules/caddy/ssl.sh"
     . "${GATEWAY_DIR}/modules/caddy/caddy.sh"
     . "${GATEWAY_DIR}/modules/homelab/registry.sh"
@@ -86,6 +87,7 @@ CS_INIT
         return 1
     fi
     register_caddy_site "code" "$DOM_CODE" "$PORT_CODE" "yes"
+    sync_agh_homelab_rewrites "$(get_current_lan_ip)"
     set_module_state "code" "yes"
 
     echo "${C_GRN}[✓] Server-Code (VS Code) запущен: https://${DOM_CODE} (Логин: ${SMB_USER:-admin} / Пароль: единый пароль шлюза)${C_RES}"

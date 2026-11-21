@@ -22,6 +22,7 @@ diagnose_failed_nodes() {
 
     if [ -z "$FAILED_LIST" ]; then
         echo "${C_GRN}[✓] Идеально! У всех 100% активных нод уже есть результат пинга!${C_RES}"
+        ui_box_bottom
         return 0
     fi
 
@@ -47,6 +48,7 @@ diagnose_failed_nodes() {
     done
     ui_box_sep
     echo "${C_DIM}[i] Все оживленные ноды уже обновили свой пинг в панели $(get_active_ui_name)!${C_RES}"
+    ui_box_bottom
     return 0
 }
 

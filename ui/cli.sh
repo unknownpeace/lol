@@ -22,11 +22,11 @@ gateway_cli_dispatch() {
         run_gateway_doctor
         ;;
     unlock|luks-open)
-        require_alpine_feature "Функция LUKS2 (unlock)" || return 0
+        require_alpine_feature "LUKS2 (unlock)" || return 0
         unlock_external_storage_cli
         ;;
     lock|eject|unmount|luks-close)
-        require_alpine_feature "Функция LUKS2 (lock)" || return 0
+        require_alpine_feature "LUKS2 (lock)" || return 0
         unmount_external_storage_safe
         ;;
     safe-reboot|reboot-safe)

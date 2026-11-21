@@ -37,9 +37,17 @@ sync_all_homelab_permissions() {
 print_quick_access_card() {
     load_gateway_env
     CUR_LIP=$(get_current_lan_ip)
+    UI_NAME=$(get_active_ui_name)
+    _ui_pad() {
+        _target_col="$1"
+        _len=$((10 + ${#UI_NAME}))
+        _n=$((_target_col - _len))
+        [ "$_n" -lt 1 ] && _n=1
+        printf "%${_n}s" ""
+    }
     if is_openwrt 2>/dev/null; then
         ui_box_top "🔗 КАРТОЧКА БЫСТРОГО ДОСТУПА К ШЛЮЗУ (${OS_NAME} | ${CUR_LIP})"
-        ui_box_row "▸ Панель $(get_active_ui_name):   ${C_GRN}http://${CUR_LIP}:9090/ui${C_RES}"
+        ui_box_row "▸ Панель ${UI_NAME}:$(_ui_pad 26)${C_GRN}http://${CUR_LIP}:9090/ui${C_RES}"
         ui_box_row "▸ Панель AdGuard Home:    ${C_GRN}http://${CUR_LIP}:3000${C_RES}"
         ui_box_row "▸ Веб-интерфейс LuCI:     ${C_CYN}http://${CUR_LIP}${C_RES}"
         ui_box_row "▸ Единый логин сервисов:  ${C_BLD}${AGH_USER:-admin}${C_RES} ${C_DIM}(пароль шлюза и AdGuard Home)${C_RES}"
@@ -50,7 +58,7 @@ print_quick_access_card() {
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
         ui_box_top "🔗 КАРТОЧКА БЫСТРОГО ДОСТУПА К СЕРВЕРУ (${CUR_LIP} | *.${SSL_DOMAIN})"
         ui_box_row "▸ Режим сертификата:      ${C_GRN}● Валидный Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
-        ui_box_row "▸ Панель Sing-Box:        ${C_GRN}https://zashboard.${SSL_DOMAIN}${C_RES}  ${C_DIM}(или http://${CUR_LIP}:9090/ui)${C_RES}"
+        ui_box_row "▸ Панель ${UI_NAME}:$(_ui_pad 26)${C_GRN}https://zashboard.${SSL_DOMAIN}${C_RES}  ${C_DIM}($(get_active_core_name) │ http://${CUR_LIP}:9090/ui)${C_RES}"
         ui_box_row "▸ Панель AdGuard Home:    ${C_GRN}https://adguard.${SSL_DOMAIN}${C_RES}    ${C_DIM}(или http://${CUR_LIP}:3000)${C_RES}"
         ui_box_row "▸ Единый логин сервисов:  ${C_BLD}${AGH_USER:-admin}${C_RES} ${C_DIM}(пароль синхронизирован во всех модулях)${C_RES}"
         ui_box_sep "АКТИВНЫЕ МОДУЛИ HOMELAB И СЕТЕВЫЕ ШАРЫ"
@@ -62,7 +70,7 @@ print_quick_access_card() {
         is_module_enabled "code"        && ui_box_row "▸ VS Code в браузере:          ${C_GRN}https://code.${SSL_DOMAIN}${C_RES}"
     else
         ui_box_top "🔗 КАРТОЧКА БЫСТРОГО ДОСТУПА К СЕРВЕРУ (${CUR_LIP} | *.lan)"
-        ui_box_row "▸ Панель Sing-Box (Zashboard): ${C_GRN}https://${DOM_ZASHBOARD}${C_RES}  ${C_DIM}(или http://${CUR_LIP}:9090/ui)${C_RES}"
+        ui_box_row "▸ Панель ${UI_NAME}:$(_ui_pad 31)${C_GRN}https://${DOM_ZASHBOARD}${C_RES}  ${C_DIM}($(get_active_core_name) │ http://${CUR_LIP}:9090/ui)${C_RES}"
         ui_box_row "▸ Панель AdGuard Home (DNS):   ${C_GRN}https://${DOM_ADGUARD}${C_RES}    ${C_DIM}(или http://${CUR_LIP}:3000)${C_RES}"
         ui_box_row "▸ Установка сертификата PKI:   ${C_CYN}http://${DOM_CA}${C_RES}          ${C_DIM}(Windows / Linux / Android в 1 клик)${C_RES}"
         ui_box_row "▸ Единый логин сервисов:       ${C_BLD}${AGH_USER:-admin}${C_RES} ${C_DIM}(пароль синхронизирован во всех модулях)${C_RES}"

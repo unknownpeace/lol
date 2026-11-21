@@ -52,6 +52,31 @@ build_pki_portal() {
         update-ca-certificates >/dev/null 2>&1 || true
     fi
 
+    load_gateway_env >/dev/null 2>&1 || true
+    if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        PORTAL_UI_URL="https://zashboard.${SSL_DOMAIN}/ui/"
+        PORTAL_UI_LBL="https://zashboard.${SSL_DOMAIN}"
+        PORTAL_PANEL_URL="https://panel.${SSL_DOMAIN}/ui/"
+        PORTAL_PANEL_LBL="https://panel.${SSL_DOMAIN}"
+        PORTAL_AGH_URL="https://adguard.${SSL_DOMAIN}"
+        PORTAL_VW_URL="https://vaultwarden.${SSL_DOMAIN}"
+        PORTAL_YT_URL="https://downloads.${SSL_DOMAIN}"
+        PORTAL_TR_URL="https://torrents.${SSL_DOMAIN}"
+        PORTAL_FG_URL="https://forgejo.${SSL_DOMAIN}"
+        PORTAL_CD_URL="https://code.${SSL_DOMAIN}"
+    else
+        PORTAL_UI_URL="https://${DOM_ZASHBOARD}/ui/"
+        PORTAL_UI_LBL="https://${DOM_ZASHBOARD}"
+        PORTAL_PANEL_URL="https://${DOM_PANEL}/ui/"
+        PORTAL_PANEL_LBL="https://${DOM_PANEL}"
+        PORTAL_AGH_URL="https://${DOM_ADGUARD}"
+        PORTAL_VW_URL="https://${DOM_VAULTWARDEN}"
+        PORTAL_YT_URL="https://${DOM_YTDLP}"
+        PORTAL_TR_URL="https://${DOM_TORRENT}"
+        PORTAL_FG_URL="https://${DOM_FORGEJO}"
+        PORTAL_CD_URL="https://${DOM_CODE}"
+    fi
+
     cat << HTML_EOF > "${PKI_PORTAL_DIR}/index.html"
 <!DOCTYPE html>
 <html lang="ru">
@@ -101,13 +126,13 @@ build_pki_portal() {
   <div class="card">
     <h2>🏠 Все сервисы вашего домашнего сервера</h2>
     <ul>
-      <li><a href="https://${DOM_ZASHBOARD}/ui/">https://${DOM_ZASHBOARD}</a> (или <a href="https://${DOM_PANEL}/ui/">https://${DOM_PANEL}</a>) — Панель шлюза (Zashboard / MetaCubeXD)</li>
-      <li><a href="https://${DOM_ADGUARD}">https://${DOM_ADGUARD}</a> — Панель AdGuard Home</li>
-      <li><a href="https://${DOM_VAULTWARDEN}">https://${DOM_VAULTWARDEN}</a> — Vaultwarden (Пароли)</li>
-      <li><a href="https://${DOM_YTDLP}">https://${DOM_YTDLP}</a> — MeTube (Загрузчик видео/аудио)</li>
-      <li><a href="https://${DOM_TORRENT}">https://${DOM_TORRENT}</a> — Transmission (Торренты)</li>
-      <li><a href="https://${DOM_FORGEJO}">https://${DOM_FORGEJO}</a> — Forgejo (Git-сервер)</li>
-      <li><a href="https://${DOM_CODE}">https://${DOM_CODE}</a> — Server-Code (VS Code в браузере)</li>
+      <li><a href="${PORTAL_UI_URL}">${PORTAL_UI_LBL}</a> (или <a href="${PORTAL_PANEL_URL}">${PORTAL_PANEL_LBL}</a>) — Панель шлюза (Zashboard / MetaCubeXD)</li>
+      <li><a href="${PORTAL_AGH_URL}">${PORTAL_AGH_URL}</a> — Панель AdGuard Home</li>
+      <li><a href="${PORTAL_VW_URL}">${PORTAL_VW_URL}</a> — Vaultwarden (Пароли)</li>
+      <li><a href="${PORTAL_YT_URL}">${PORTAL_YT_URL}</a> — MeTube (Загрузчик видео/аудио)</li>
+      <li><a href="${PORTAL_TR_URL}">${PORTAL_TR_URL}</a> — Transmission (Торренты)</li>
+      <li><a href="${PORTAL_FG_URL}">${PORTAL_FG_URL}</a> — Forgejo (Git-сервер)</li>
+      <li><a href="${PORTAL_CD_URL}">${PORTAL_CD_URL}</a> — Server-Code (VS Code в браузере)</li>
     </ul>
   </div>
 </body>
@@ -124,9 +149,19 @@ sync_caddy_main_config() {
     mkdir -p /etc/caddy "$CADDY_CONFD" "$PKI_PORTAL_DIR"
     chmod 755 /etc/caddy "$CADDY_CONFD" 2>/dev/null || true
     CUR_LIP_CDY=$(get_current_lan_ip)
+    HTTP_REDIRECT_DOMS="http://${DOM_CA}, http://${CUR_LIP_CDY}, http://*.lan"
     LE_MAIN_BLOCKS=""
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        LE_MAIN_BLOCKS="https://adguard.${SSL_DOMAIN} {
+        HTTP_REDIRECT_DOMS="${HTTP_REDIRECT_DOMS}, http://${SSL_DOMAIN}, http://*.${SSL_DOMAIN}"
+        LE_MAIN_BLOCKS="https://ca.${SSL_DOMAIN}, https://${SSL_DOMAIN} {
+    tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
+    root * ${PKI_PORTAL_DIR}
+    header /homelab-root-ca.cer Content-Type \"application/x-x509-ca-cert\"
+    header /homelab-root-ca.crt Content-Type \"application/x-x509-ca-cert\"
+    file_server
+}
+
+https://adguard.${SSL_DOMAIN} {
     tls ${SSL_FULLCHAIN_FILE} ${SSL_KEY_FILE}
     encode zstd gzip
     reverse_proxy 127.0.0.1:3000 {
@@ -163,7 +198,7 @@ https://zashboard.${SSL_DOMAIN}, https://singbox.${SSL_DOMAIN}, https://mihomo.$
     }
 }
 
-http://${DOM_CA}, http://${CUR_LIP_CDY}, http://*.lan {
+${HTTP_REDIRECT_DOMS} {
     @pki_portal host ${DOM_CA} ${CUR_LIP_CDY}
     handle @pki_portal {
         root * ${PKI_PORTAL_DIR}
@@ -491,9 +526,7 @@ show_https_ca_instructions() {
     build_pki_portal
     CUR_LIP=$(get_current_lan_ip)
     echo ""
-    ui_box_top "================================================================="
-    echo "${C_BLD} 🔒 Установка доверенного корневого сертификата HTTPS (Windows/Linux/Android)${C_RES}"
-    ui_box_top "================================================================="
+    ui_box_top "🔒 Установка доверенного корневого сертификата HTTPS (Windows/Linux/Android)"
     if find_caddy_root_cert; then
         echo " Статус Root CA: ${C_GRN}СГЕНЕРИРОВАН И РАЗДАЕТСЯ НА ПОРТАЛЕ${C_RES}"
     else
@@ -511,7 +544,7 @@ show_https_ca_instructions() {
     echo "    Откройте в браузере телефона ${C_GRN}http://ca.lan${C_RES}, скачайте файл ${C_BLD}.cer${C_RES},"
     echo "    затем: Настройки -> Безопасность -> Шифрование и учетные данные ->"
     echo "    Установка сертификата -> Сертификат CA -> выберите скачанный файл."
-    ui_box_top "================================================================="
+    ui_box_bottom
     return 0
 }
 

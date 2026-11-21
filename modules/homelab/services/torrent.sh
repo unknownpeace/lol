@@ -143,6 +143,7 @@ TR_CONFD
 
     sync_dns_firewall "yes" "keep"
     register_caddy_site "torrent" "$DOM_TORRENT" "${PORT_TRANSMISSION_WEB:-9091}" "yes"
+    sync_agh_homelab_rewrites "$(get_current_lan_ip)"
     set_module_state "torrent" "yes"
 
     echo "${C_GRN}[✓] Transmission успешно запущен: https://${DOM_TORRENT} (RPC порт: ${PORT_TRANSMISSION_WEB:-9091})${C_RES}"

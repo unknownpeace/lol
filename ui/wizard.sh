@@ -309,7 +309,7 @@ run_installer() {
         if [ -n "$SAVED_PASS" ]; then
             printf "Введите единый пароль (Шлюз + AdGuard + Homelab) [Enter = оставить текущий]: "
         else
-            printf "Введите единый пароль (для AdGuard Home, Sing-Box и сервисов Homelab): "
+            printf "Введите единый пароль (для AdGuard Home, ядра шлюза и сервисов Homelab): "
         fi
         read -r INPUT_PASS < /dev/tty || true
         INPUT_PASS=$(printf "%s" "$INPUT_PASS" | tr -d '\r\n')
@@ -717,25 +717,33 @@ nameserver 77.88.8.8"
     core_reload_api
     run_self_test
 
-    ui_box_top "=================================================="
-    echo "${C_GRN} Развертывание на ${OS_NAME} успешно завершено!${C_RES}"
-    echo " - Активное ядро:      $(get_active_core_name) ($(get_active_core_version))"
+    ui_box_top "🎉 РАЗВЕРТЫВАНИЕ НА ${OS_NAME} ЗАВЕРШЕНО"
+    ui_box_row "${C_GRN}Развертывание на ${OS_NAME} успешно завершено!${C_RES}"
+    ui_box_row " - Активное ядро:      $(get_active_core_name) ($(get_active_core_version))"
     if is_openwrt; then
-        echo " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}http://${CURRENT_IP}:9090/ui${C_RES}"
-        echo " - IP-адрес шлюза:     ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
-        echo " - Основной роутер:    ${GW_IP}"
-        echo " - Панель AdGuard:     ${C_CYN}http://${CURRENT_IP}:3000${C_RES}"
-        echo " - Веб-панель LuCI:    ${C_CYN}http://${CURRENT_IP}${C_RES}"
+        ui_box_row " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}http://${CURRENT_IP}:9090/ui${C_RES}"
+        ui_box_row " - IP-адрес шлюза:     ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
+        ui_box_row " - Основной роутер:    ${GW_IP}"
+        ui_box_row " - Панель AdGuard:     ${C_CYN}http://${CURRENT_IP}:3000${C_RES}"
+        ui_box_row " - Веб-панель LuCI:    ${C_CYN}http://${CURRENT_IP}${C_RES}"
     else
-        echo " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} / ${C_CYN}https://${DOM_PANEL}${C_RES} (http://${CURRENT_IP}:9090/ui)"
-        echo " - IP-адрес сервера:   ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
-        echo " - Основной роутер:    ${GW_IP}"
-        echo " - Панель AdGuard:     ${C_CYN}https://${DOM_ADGUARD}${C_RES} (http://${CURRENT_IP}:3000)"
-        echo " - Портал сертификата: ${C_CYN}http://${DOM_CA}${C_RES}"
+        if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+            ui_box_row " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}https://zashboard.${SSL_DOMAIN}${C_RES} / ${C_CYN}https://panel.${SSL_DOMAIN}${C_RES} (http://${CURRENT_IP}:9090/ui)"
+            ui_box_row " - IP-адрес сервера:   ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
+            ui_box_row " - Основной роутер:    ${GW_IP}"
+            ui_box_row " - Панель AdGuard:     ${C_CYN}https://adguard.${SSL_DOMAIN}${C_RES} (http://${CURRENT_IP}:3000)"
+            ui_box_row " - SSL / Сертификат:   ${C_GRN}Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
+        else
+            ui_box_row " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} / ${C_CYN}https://${DOM_PANEL}${C_RES} (http://${CURRENT_IP}:9090/ui)"
+            ui_box_row " - IP-адрес сервера:   ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
+            ui_box_row " - Основной роутер:    ${GW_IP}"
+            ui_box_row " - Панель AdGuard:     ${C_CYN}https://${DOM_ADGUARD}${C_RES} (http://${CURRENT_IP}:3000)"
+            ui_box_row " - Портал сертификата: ${C_CYN}http://${DOM_CA}${C_RES}"
+        fi
     fi
-    echo " - Переключение ядра:  ${C_GRN}gw core [singbox|mihomo]${C_RES} │ Панели: ${C_GRN}gw ui [zashboard|metacubexd]${C_RES}"
-    echo " - Быстрый вызов:      ${C_GRN}gw${C_RES} (или ${C_GRN}gateway${C_RES})"
-    ui_box_top "=================================================="
+    ui_box_row " - Переключение ядра:  ${C_GRN}gw core [singbox|mihomo]${C_RES} │ Панели: ${C_GRN}gw ui [zashboard|metacubexd]${C_RES}"
+    ui_box_row " - Быстрый вызов:      ${C_GRN}gw${C_RES} (или ${C_GRN}gateway${C_RES})"
+    ui_box_bottom
     print_quick_access_card
 
     if [ "$TARGET_LAN_IP" != "$SAVED_LAN_IP" ]; then

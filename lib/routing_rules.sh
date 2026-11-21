@@ -11,7 +11,7 @@ AI_EXPLICIT_DOMAINS="proactivebackend-pa.googleapis.com geller-pa.googleapis.com
 GAME_CDN_DIRECT_DOMAINS="steamcontent.com dl.steam.clngaa.com epicgames-download1.akamaized.net blzddist1-a.akamaihd.net origin-a.akamaihd.net"
 
 # GitHub & Alpine bootstrap domains routed directly via Quad9 bootstrap resolver (DIRECT)
-BOOTSTRAP_DIRECT_DOMAINS="github.com api.github.com raw.githubusercontent.com objects.githubusercontent.com release-assets.githubusercontent.com"
+BOOTSTRAP_DIRECT_DOMAINS="cp.cloudflare.com github.com api.github.com raw.githubusercontent.com objects.githubusercontent.com release-assets.githubusercontent.com"
 
 # Canary DoH / DDR domains blocked with NXDOMAIN to prevent browsers from bypassing DNS :53
 DDR_BLOCK_DOMAINS="use-application-dns.net _dns.resolver.arpa mask.icloud.com mask-h2.icloud.com"
