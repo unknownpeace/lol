@@ -155,8 +155,7 @@ self_update_gateway() {
         else
             ui_warn_box "Не удалось подключиться к Git-репозиторию." "Продолжаем обновление локальных бинарников и ядер."
         fi
-        chmod +x "${GATEWAY_DIR}"/*.sh "${GATEWAY_DIR}"/lib/*.sh "${GATEWAY_DIR}"/ui/*.sh 2>/dev/null || true
-        find "${GATEWAY_DIR}/modules" -type f -name '*.sh' -exec chmod +x {} + 2>/dev/null || true
+        chmod +x "${GATEWAY_DIR}/gateway.sh" "${GATEWAY_DIR}/setup.sh" 2>/dev/null || true
         if [ -f "${GATEWAY_DIR}/gateway.sh" ]; then
             ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gateway 2>/dev/null || true
             ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gw 2>/dev/null || true
