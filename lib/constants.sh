@@ -132,8 +132,10 @@ PORT_TORRENT_WEB="9091"
 PORT_TRANSMISSION_WEB="9091"
 PORT_TORRENT_PEER="51413"
 PORT_TRANSMISSION_PEER="51413"
+PORT_WEBUI="8095"
 
 # Домены Homelab и панелей шлюза (Caddy HTTPS + AdGuard Home DNS Rewrites)
+DOM_GATEWAY="gateway.lan"
 DOM_VAULTWARDEN="vaultwarden.lan"
 DOM_FORGEJO="forgejo.lan"
 DOM_CODE="code.lan"

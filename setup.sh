@@ -50,6 +50,14 @@ if [ -f /etc/openwrt_release ] && [ -d /usr/share/luci/menu.d ] && [ -f "${GATEW
         detect_os >/dev/null 2>&1 || true
         install_openwrt_luci_app
     ) >/dev/null 2>&1 || true
+elif [ ! -f /etc/openwrt_release ] && [ -f /etc/sing-box/gateway.env ] && [ -f "${GATEWAY_DIR}/modules/webui/install.sh" ]; then
+    (
+        GATEWAY_NO_RUN=1
+        export GATEWAY_NO_RUN GATEWAY_DIR
+        . "${GATEWAY_DIR}/gateway.sh"
+        detect_os >/dev/null 2>&1 || true
+        install_alpine_webui
+    ) >/dev/null 2>&1 || true
 fi
 
 # 3.5. Установка динамического MOTD и автодополнения в /etc/profile.d

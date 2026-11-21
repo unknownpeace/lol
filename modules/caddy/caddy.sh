@@ -54,6 +54,7 @@ build_pki_portal() {
 
     load_gateway_env >/dev/null 2>&1 || true
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+        PORTAL_GW_URL="https://gateway.${SSL_DOMAIN}"
         PORTAL_UI_URL="https://zashboard.${SSL_DOMAIN}/ui/"
         PORTAL_UI_LBL="https://zashboard.${SSL_DOMAIN}"
         PORTAL_PANEL_URL="https://panel.${SSL_DOMAIN}/ui/"
@@ -65,6 +66,7 @@ build_pki_portal() {
         PORTAL_FG_URL="https://forgejo.${SSL_DOMAIN}"
         PORTAL_CD_URL="https://code.${SSL_DOMAIN}"
     else
+        PORTAL_GW_URL="https://${DOM_GATEWAY:-gateway.lan}"
         PORTAL_UI_URL="https://${DOM_ZASHBOARD}/ui/"
         PORTAL_UI_LBL="https://${DOM_ZASHBOARD}"
         PORTAL_PANEL_URL="https://${DOM_PANEL}/ui/"
@@ -126,6 +128,7 @@ build_pki_portal() {
   <div class="card">
     <h2>🏠 Все сервисы вашего домашнего сервера</h2>
     <ul>
+      <li><a href="${PORTAL_GW_URL}">${PORTAL_GW_URL}</a> — Веб-панель управления Gateway &amp; Homelab</li>
       <li><a href="${PORTAL_UI_URL}">${PORTAL_UI_LBL}</a> (или <a href="${PORTAL_PANEL_URL}">${PORTAL_PANEL_LBL}</a>) — Панель шлюза (Zashboard / MetaCubeXD)</li>
       <li><a href="${PORTAL_AGH_URL}">${PORTAL_AGH_URL}</a> — Панель AdGuard Home</li>
       <li><a href="${PORTAL_VW_URL}">${PORTAL_VW_URL}</a> — Vaultwarden (Пароли)</li>
@@ -426,6 +429,7 @@ sync_all_caddy_sites() {
     is_module_enabled "code"        && register_caddy_site "code" "${DOM_CODE:-code.lan}" "${PORT_CODE:-8443}" "yes" || true
     is_module_enabled "ytdlp"       && register_caddy_site "ytdlp" "${DOM_YTDLP:-downloads.lan}" "${PORT_METUBE:-8081}" "yes" || true
     is_module_enabled "torrent"     && register_caddy_site "torrent" "${DOM_TORRENT:-torrents.lan}" "${PORT_TRANSMISSION_WEB:-9091}" "yes" || true
+    [ -x /etc/init.d/gateway-webui ] && register_caddy_site "gateway" "${DOM_GATEWAY:-gateway.lan}" "${PORT_WEBUI:-8095}" "yes" || true
     reload_caddy_safe
     return 0
 }
@@ -504,6 +508,9 @@ CADDY_INIT
         W_CA=$((W_CA + 1))
     done
     build_pki_portal
+    if [ -x /etc/init.d/gateway-webui ] && command -v install_alpine_webui >/dev/null 2>&1; then
+        install_alpine_webui >/dev/null 2>&1 || true
+    fi
 
     echo "${C_GRN}[✓] Caddy и локальный Центр Сертификации успешно запущены!${C_RES}"
     echo "    • Портал установки сертификата: ${C_CYN}http://${DOM_CA}${C_RES} (или http://$(get_current_lan_ip))"
@@ -517,6 +524,9 @@ remove_module_caddy() {
     service_ctl caddy stop
     service_ctl caddy disable
     set_module_state "caddy" "no"
+    if [ -x /etc/init.d/gateway-webui ] && command -v install_alpine_webui >/dev/null 2>&1; then
+        install_alpine_webui >/dev/null 2>&1 || true
+    fi
     echo "${C_GRN}[✓] Модуль Caddy отключен (сертификаты PKI сохранены в /var/lib/caddy).${C_RES}"
     return 0
 }

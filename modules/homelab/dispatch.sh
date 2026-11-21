@@ -58,6 +58,7 @@ print_quick_access_card() {
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
         ui_box_top "🔗 КАРТОЧКА БЫСТРОГО ДОСТУПА К СЕРВЕРУ (${CUR_LIP} | *.${SSL_DOMAIN})"
         ui_box_row "▸ Режим сертификата:      ${C_GRN}● Валидный Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
+        ui_box_row "▸ Веб-панель сервера:     ${C_GRN}https://gateway.${SSL_DOMAIN}${C_RES}"
         ui_box_row "▸ Панель ${UI_NAME}:$(_ui_pad 26)${C_GRN}https://zashboard.${SSL_DOMAIN}${C_RES}  ${C_DIM}($(get_active_core_name) │ http://${CUR_LIP}:9090/ui)${C_RES}"
         ui_box_row "▸ Панель AdGuard Home:    ${C_GRN}https://adguard.${SSL_DOMAIN}${C_RES}    ${C_DIM}(или http://${CUR_LIP}:3000)${C_RES}"
         ui_box_row "▸ Единый логин сервисов:  ${C_BLD}${AGH_USER:-admin}${C_RES} ${C_DIM}(пароль синхронизирован во всех модулях)${C_RES}"
@@ -70,9 +71,16 @@ print_quick_access_card() {
         is_module_enabled "code"        && ui_box_row "▸ VS Code в браузере:          ${C_GRN}https://code.${SSL_DOMAIN}${C_RES}"
     else
         ui_box_top "🔗 КАРТОЧКА БЫСТРОГО ДОСТУПА К СЕРВЕРУ (${CUR_LIP} | *.lan)"
-        ui_box_row "▸ Панель ${UI_NAME}:$(_ui_pad 31)${C_GRN}https://${DOM_ZASHBOARD}${C_RES}  ${C_DIM}($(get_active_core_name) │ http://${CUR_LIP}:9090/ui)${C_RES}"
-        ui_box_row "▸ Панель AdGuard Home (DNS):   ${C_GRN}https://${DOM_ADGUARD}${C_RES}    ${C_DIM}(или http://${CUR_LIP}:3000)${C_RES}"
-        ui_box_row "▸ Установка сертификата PKI:   ${C_CYN}http://${DOM_CA}${C_RES}          ${C_DIM}(Windows / Linux / Android в 1 клик)${C_RES}"
+        if is_module_enabled "caddy"; then
+            ui_box_row "▸ Веб-панель сервера:          ${C_GRN}https://${DOM_GATEWAY:-gateway.lan}${C_RES}"
+            ui_box_row "▸ Панель ${UI_NAME}:$(_ui_pad 31)${C_GRN}https://${DOM_ZASHBOARD}${C_RES}  ${C_DIM}($(get_active_core_name) │ http://${CUR_LIP}:9090/ui)${C_RES}"
+            ui_box_row "▸ Панель AdGuard Home (DNS):   ${C_GRN}https://${DOM_ADGUARD}${C_RES}    ${C_DIM}(или http://${CUR_LIP}:3000)${C_RES}"
+            ui_box_row "▸ Установка сертификата PKI:   ${C_CYN}http://${DOM_CA}${C_RES}          ${C_DIM}(Windows / Linux / Android в 1 клик)${C_RES}"
+        else
+            ui_box_row "▸ Веб-панель сервера:          ${C_GRN}http://${CUR_LIP}:${PORT_WEBUI:-8095}${C_RES}"
+            ui_box_row "▸ Панель ${UI_NAME}:$(_ui_pad 31)${C_GRN}http://${CUR_LIP}:9090/ui${C_RES}"
+            ui_box_row "▸ Панель AdGuard Home (DNS):   ${C_GRN}http://${CUR_LIP}:3000${C_RES}"
+        fi
         ui_box_row "▸ Единый логин сервисов:       ${C_BLD}${AGH_USER:-admin}${C_RES} ${C_DIM}(пароль синхронизирован во всех модулях)${C_RES}"
         ui_box_sep "АКТИВНЫЕ МОДУЛИ HOMELAB И СЕТЕВЫЕ ШАРЫ"
         is_module_enabled "samba"       && ui_box_row "▸ Сетевой диск Samba (SMB3):   ${C_CYN}\\\\${HN_VAL}\\storage${C_RES} │ ${C_CYN}\\\\${CUR_LIP}\\storage${C_RES} (логин: ${C_BLD}${SMB_USER:-admin}${C_RES})"

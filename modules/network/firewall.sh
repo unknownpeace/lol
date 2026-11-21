@@ -19,7 +19,7 @@ get_nft_bypass_saddr_clause() {
 
 # Динамическое формирование списков разрешенных LAN-портов (Шлюз + активные сервисы Homelab) для nftables
 get_homelab_nft_tcp_ports() {
-    TCP_LIST="22, 53, 80, 443, 445, 3000, 5357, 7890, 9090, ${PORT_TORRENT_PEER}"
+    TCP_LIST="22, 53, 80, 443, 445, 3000, 5357, 7890, ${PORT_WEBUI:-8095}, 9090, ${PORT_TORRENT_PEER}"
     printf "%s" "$TCP_LIST"
     return 0
 }
@@ -142,7 +142,7 @@ table inet gateway_fw {
         ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } tcp dport { ${LAN_TCP_PORTS} } accept
         ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } udp dport { ${LAN_UDP_PORTS} } accept
         ip daddr { 224.0.0.251, 239.255.255.250 } udp dport { 3702, 5353 } accept
-        tcp dport { 80, 443, 445, 3000, 3001, 5357, 7890, 8081, 8222, 8443, 9090, 9091 } drop
+        tcp dport { 80, 443, 445, 3000, 3001, 5357, 7890, 8081, 8095, 8222, 8443, 9090, 9091 } drop
         udp dport { 443, 3702, 5353, 7890 } drop
     }
 

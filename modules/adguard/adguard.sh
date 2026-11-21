@@ -37,9 +37,9 @@ sync_agh_homelab_rewrites() {
     if is_openwrt 2>/dev/null; then
         DOMS_STR="adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan"
     else
-        DOMS_STR="*.lan ca.lan adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan vaultwarden.lan forgejo.lan downloads.lan torrents.lan code.lan"
+        DOMS_STR="*.lan ca.lan gateway.lan adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan vaultwarden.lan forgejo.lan downloads.lan torrents.lan code.lan"
         if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-            DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN} vaultwarden.${SSL_DOMAIN} forgejo.${SSL_DOMAIN} downloads.${SSL_DOMAIN} torrents.${SSL_DOMAIN} code.${SSL_DOMAIN} adguard.${SSL_DOMAIN} zashboard.${SSL_DOMAIN} singbox.${SSL_DOMAIN} mihomo.${SSL_DOMAIN} panel.${SSL_DOMAIN}"
+            DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN} gateway.${SSL_DOMAIN} vaultwarden.${SSL_DOMAIN} forgejo.${SSL_DOMAIN} downloads.${SSL_DOMAIN} torrents.${SSL_DOMAIN} code.${SSL_DOMAIN} adguard.${SSL_DOMAIN} zashboard.${SSL_DOMAIN} singbox.${SSL_DOMAIN} mihomo.${SSL_DOMAIN} panel.${SSL_DOMAIN}"
         fi
     fi
 

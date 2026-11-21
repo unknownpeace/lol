@@ -1,6 +1,6 @@
 #!/bin/sh
 rotate_gateway_logs() {
-    for LOG_F in "$SB_LOG_FILE" "$MIHOMO_LOG_FILE" "$AUTOUPDATE_LOG" /var/log/caddy.log /var/log/vaultwarden.log /var/log/metube.log /var/log/code-server.log /var/log/transmission/transmission.log; do
+    for LOG_F in "$SB_LOG_FILE" "$MIHOMO_LOG_FILE" "$AUTOUPDATE_LOG" /var/log/gateway-webui.log /var/log/caddy.log /var/log/vaultwarden.log /var/log/metube.log /var/log/code-server.log /var/log/transmission/transmission.log; do
         if [ -f "$LOG_F" ]; then
             F_SIZE=$(wc -c < "$LOG_F" 2>/dev/null | tr -d ' \t\r\n' || echo "0")
             if [ "${F_SIZE:-0}" -gt 1048576 ]; then
@@ -197,6 +197,9 @@ self_update_gateway() {
         pgrep AdGuardHome >/dev/null 2>&1 || service_ctl adguardhome start || true
     fi
     is_openwrt && install_openwrt_luci_app >/dev/null 2>&1 || true
+    if ! is_openwrt 2>/dev/null; then
+        install_alpine_webui >/dev/null 2>&1 || true
+    fi
 
     # 5. Итоговый отчет о готовности
     ui_step_progress 5 5 "Верификация состояния обновленной системы..."

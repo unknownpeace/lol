@@ -104,10 +104,11 @@ change_unified_password() {
         fi
 
         # Синхронизация BasicAuth в Caddy для защищенных модулей
-        if [ -x /usr/sbin/caddy ] && [ -d "$CADDY_CONFD" ]; then
+        if [ -x /usr/sbin/caddy ] && [ -d "$CADDY_CONFD" ] && is_module_enabled "caddy"; then
             is_module_enabled "ytdlp" && register_caddy_site "ytdlp" "$DOM_YTDLP" "$PORT_YTDLP" "yes" >/dev/null 2>&1 || true
             is_module_enabled "torrent" && register_caddy_site "torrent" "$DOM_TORRENT" "$PORT_TORRENT_WEB" "yes" >/dev/null 2>&1 || true
             is_module_enabled "code" && register_caddy_site "code" "$DOM_CODE" "$PORT_CODE" "yes" >/dev/null 2>&1 || true
+            [ -x /etc/init.d/gateway-webui ] && register_caddy_site "gateway" "${DOM_GATEWAY:-gateway.lan}" "${PORT_WEBUI:-8095}" "yes" >/dev/null 2>&1 || true
         fi
     fi
 
@@ -142,7 +143,7 @@ change_unified_password() {
     if is_openwrt; then
         echo "${C_GRN}[✓] Единый пароль успешно синхронизирован (Шлюз + AdGuard Home)!${C_RES}"
     else
-        echo "${C_GRN}[✓] Единый пароль успешно синхронизирован (Шлюз, AdGuard Home, Samba, Vaultwarden, Transmission, Caddy)!${C_RES}"
+        echo "${C_GRN}[✓] Единый пароль успешно синхронизирован (Шлюз, AdGuard Home, Samba, Vaultwarden, Transmission, Caddy, Web Dashboard)!${C_RES}"
     fi
     return 0
 }

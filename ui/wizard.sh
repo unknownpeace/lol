@@ -687,6 +687,8 @@ nameserver 77.88.8.8"
                 sync_agh_homelab_rewrites "$CURRENT_IP"
             fi
         fi
+
+        install_alpine_webui >/dev/null 2>&1 || true
     fi
 
     # ЭТАП 6.7: Опциональное включение DHCP-сервера AdGuard Home в локальной сети
@@ -729,17 +731,25 @@ nameserver 77.88.8.8"
         ui_box_row " - Веб-панель LuCI:    ${C_CYN}http://${CURRENT_IP}${C_RES}"
     else
         if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
+            ui_box_row " - Веб-панель сервера: ${C_GRN}https://gateway.${SSL_DOMAIN}${C_RES}"
             ui_box_row " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}https://zashboard.${SSL_DOMAIN}${C_RES} / ${C_CYN}https://panel.${SSL_DOMAIN}${C_RES} (http://${CURRENT_IP}:9090/ui)"
             ui_box_row " - IP-адрес сервера:   ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
             ui_box_row " - Основной роутер:    ${GW_IP}"
             ui_box_row " - Панель AdGuard:     ${C_CYN}https://adguard.${SSL_DOMAIN}${C_RES} (http://${CURRENT_IP}:3000)"
             ui_box_row " - SSL / Сертификат:   ${C_GRN}Let's Encrypt Wildcard (*.${SSL_DOMAIN})${C_RES}"
-        else
+        elif is_module_enabled "caddy"; then
+            ui_box_row " - Веб-панель сервера: ${C_GRN}https://${DOM_GATEWAY:-gateway.lan}${C_RES}"
             ui_box_row " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}https://${DOM_ZASHBOARD}${C_RES} / ${C_CYN}https://${DOM_PANEL}${C_RES} (http://${CURRENT_IP}:9090/ui)"
             ui_box_row " - IP-адрес сервера:   ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
             ui_box_row " - Основной роутер:    ${GW_IP}"
             ui_box_row " - Панель AdGuard:     ${C_CYN}https://${DOM_ADGUARD}${C_RES} (http://${CURRENT_IP}:3000)"
             ui_box_row " - Портал сертификата: ${C_CYN}http://${DOM_CA}${C_RES}"
+        else
+            ui_box_row " - Веб-панель сервера: ${C_GRN}http://${CURRENT_IP}:${PORT_WEBUI:-8095}${C_RES}"
+            ui_box_row " - Панель управления:  $(get_active_ui_name) -> ${C_CYN}http://${CURRENT_IP}:9090/ui${C_RES}"
+            ui_box_row " - IP-адрес сервера:   ${C_BLD}${CURRENT_IP}${C_RES} (интерфейс $(get_lan_ifname), маска /24)"
+            ui_box_row " - Основной роутер:    ${GW_IP}"
+            ui_box_row " - Панель AdGuard:     ${C_CYN}http://${CURRENT_IP}:3000${C_RES}"
         fi
     fi
     ui_box_row " - Переключение ядра:  ${C_GRN}gw core [singbox|mihomo]${C_RES} │ Панели: ${C_GRN}gw ui [zashboard|metacubexd]${C_RES}"
