@@ -712,7 +712,7 @@ MH_UP
         [ "$HAS_USER_PROXY" = "yes" ] && emit_yaml_quic_reject_rules "  " "RULE-SET" "user_proxy_domains"
         emit_yaml_quic_reject_rules "  " "RULE-SET" "ai_domain google_gemini_domain openai_domain anthropic_domain perplexity_domain xai_domain cursor_domain copilot_domain youtube_domain spotify_domain twitch_domain meta_domain discord_domain roblox_domain tiktok_domain cloudflare_domain ru_bundle"
         for _iprs in refilter_ip facebook_ip cloudflare_ip; do
-            printf '  - "AND,((RULE-SET,%s),(NETWORK,UDP),(DST-PORT,443)),REJECT,no-resolve"\n' "$_iprs"
+            printf '  - "AND,((RULE-SET,%s,no-resolve),(NETWORK,UDP),(DST-PORT,443)),REJECT"\n' "$_iprs"
         done
         [ -n "$FORCE_QUIC_YAML" ] && printf "%s" "$FORCE_QUIC_YAML"
 
