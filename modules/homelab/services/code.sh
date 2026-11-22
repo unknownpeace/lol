@@ -14,11 +14,15 @@ if [ -z "${GATEWAY_DIR:-}" ]; then
     . "${GATEWAY_DIR}/modules/caddy/ssl.sh"
     . "${GATEWAY_DIR}/modules/caddy/caddy.sh"
     . "${GATEWAY_DIR}/modules/homelab/registry.sh"
+    detect_os >/dev/null 2>&1 || true
+    load_gateway_env >/dev/null 2>&1 || true
 fi
 
 install_module_code() {
     echo "${C_CYN}[*] Установка модуля Server-Code (VS Code Web Server — нативный Alpine musl)...${C_RES}"
     umask 022
+    detect_os >/dev/null 2>&1 || true
+    load_gateway_env >/dev/null 2>&1 || true
     if [ "${TOTAL_RAM_MB:-512}" -lt 1000 ]; then
         echo "${C_YEL}[!] Внимание: Для комфортной работы VS Code Web IDE рекомендуется от 1.5–2 ГБ RAM (сейчас ${TOTAL_RAM_MB} МБ).${C_RES}"
     fi
@@ -33,29 +37,47 @@ install_module_code() {
     fi
     addgroup coder "$MEDIA_GROUP" 2>/dev/null || true
 
-    mkdir -p /opt/code-server /var/lib/coder/.vscode-cli /var/lib/coder/.vscode-server /var/lib/coder/workspace
+    mkdir -p /opt/code-server /var/lib/coder/.vscode-cli /var/lib/coder/.vscode-server
+    if [ -L /var/lib/coder/workspace ]; then
+        if [ ! -d /var/lib/coder/workspace ]; then
+            echo "${C_YEL}[!] Внимание: /var/lib/coder/workspace указывает на непримонтированное хранилище.${C_RES}"
+        fi
+    else
+        mkdir -p /var/lib/coder/workspace
+    fi
     chmod 755 /opt /opt/code-server /var/lib/coder 2>/dev/null || true
 
+    _arch_chk="${ARCH_RAW:-$(uname -m 2>/dev/null || echo x86_64)}"
     VSC_OS="cli-alpine-x64"
-    if [ "$ARCH_RAW" = "aarch64" ] || [ "$ARCH_RAW" = "arm64" ]; then
+    if [ "$_arch_chk" = "aarch64" ] || [ "$_arch_chk" = "arm64" ]; then
         VSC_OS="cli-alpine-arm64"
     fi
 
     if [ ! -x /opt/code-server/code ]; then
         echo "Загрузка официального нативного musl-бинарника VS Code (${VSC_OS})..."
-        rm -f /tmp/vscode_cli_alpine.tar.gz
-        if curl -fsSL "https://code.visualstudio.com/sha/download?build=stable&os=${VSC_OS}" -o /tmp/vscode_cli_alpine.tar.gz; then
-            tar -xzf /tmp/vscode_cli_alpine.tar.gz -C /opt/code-server
-            chmod 755 /opt/code-server/code
-            rm -f /tmp/vscode_cli_alpine.tar.gz
+        ensure_gateway_runtime_dir || return 1
+        VSC_TMP_DIR=$(umask 077 && mktemp -d "${GATEWAY_RUNTIME_DIR:-/run/gateway}/vsc.XXXXXX") || return 1
+        _vsc_tgz="${VSC_TMP_DIR}/vscode_cli.tar.gz"
+        if curl -fsSL "https://code.visualstudio.com/sha/download?build=stable&os=${VSC_OS}" -o "$_vsc_tgz" && \
+           [ -s "$_vsc_tgz" ] && tar -tzf "$_vsc_tgz" >/dev/null 2>&1; then
+            mkdir -p "${VSC_TMP_DIR}/extract"
+            if tar -xzf "$_vsc_tgz" -C "${VSC_TMP_DIR}/extract" && [ -s "${VSC_TMP_DIR}/extract/code" ]; then
+                install -m 0755 "${VSC_TMP_DIR}/extract/code" /opt/code-server/code
+                rm -rf "$VSC_TMP_DIR"
+            else
+                rm -rf "$VSC_TMP_DIR"
+                echo "${C_RED}[X] Ошибка распаковки архива VS Code (${VSC_OS})!${C_RES}"
+                return 1
+            fi
         else
-            rm -f /tmp/vscode_cli_alpine.tar.gz
+            rm -rf "$VSC_TMP_DIR"
             echo "${C_RED}[X] Не удалось скачать нативный бинарник VS Code (${VSC_OS})!${C_RES}"
             return 1
         fi
     fi
 
     chown -R coder:"$MEDIA_GROUP" /var/lib/coder /opt/code-server 2>/dev/null || true
+    write_storage_mount_guard_script >/dev/null 2>&1 || true
 
     cat << CS_INIT > /etc/init.d/code-server
 #!/sbin/openrc-run
@@ -75,6 +97,7 @@ depend() {
 }
 
 start_pre() {
+    /usr/lib/gateway/storage-mount-guard.sh || return 1 # GW_MOUNT_GUARD
     checkpath -f -m 0644 -o coder:${MEDIA_GROUP} /var/log/code-server.log
     checkpath -d -m 0755 -o coder:${MEDIA_GROUP} /var/lib/coder/.vscode-cli /var/lib/coder/.vscode-server
 }
@@ -104,8 +127,8 @@ remove_module_code() {
 }
 
 # Standalone CLI execution
-if [ "$(basename "$0")" = "code.sh" ]; then
-    case "$1" in
+if [ "${0##*/}" = "code.sh" ]; then
+    case "${1:-status}" in
         install)
             install_module_code
             ;;
@@ -119,6 +142,8 @@ if [ "$(basename "$0")" = "code.sh" ]; then
             rc-service code-server status 2>/dev/null || rc-status
             ;;
         *)
+            echo "Использование: $0 [install|remove|restart|status]"
+            exit 1
             ;;
     esac
 fi

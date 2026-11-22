@@ -46,8 +46,8 @@ if [ -z "${GATEWAY_DIR:-}" ] || [ ! -f "${GATEWAY_DIR}/gateway.sh" ]; then
 fi
 export GATEWAY_DIR
 
-# Автоматическая привязка глобальных команд /usr/bin/gateway и /usr/bin/gw (при наличии прав)
-if [ -d "/usr/bin" ] && [ -w "/usr/bin" ] && [ -f "${GATEWAY_DIR}/gateway.sh" ]; then
+# Автоматическая привязка глобальных команд /usr/bin/gateway и /usr/bin/gw (при наличии прав и прямом запуске)
+if [ -z "${GATEWAY_NO_RUN:-}" ] && [ -d "/usr/bin" ] && [ -w "/usr/bin" ] && [ -f "${GATEWAY_DIR}/gateway.sh" ]; then
     if [ ! -L "/usr/bin/gateway" ] || [ "$(readlink -f /usr/bin/gateway 2>/dev/null)" != "${GATEWAY_DIR}/gateway.sh" ]; then
         ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gateway 2>/dev/null || true
     fi
@@ -124,3 +124,4 @@ fi
 . "${GATEWAY_DIR}/ui/cli_utils.sh"
 . "${GATEWAY_DIR}/ui/menu.sh"
 . "${GATEWAY_DIR}/ui/cli.sh"
+set +e

@@ -68,12 +68,12 @@ inspect_domain_route() {
 
     # 4. Замер живого соединения через туннель и напрямую
     echo " • Проверка доступности по HTTPS (TLS Handshake)..."
-    PRX_RES=$(curl -k -o /dev/null -sS --curves X25519:P-256 --connect-timeout 3 -m 5 -x http://127.0.0.1:7890 -w '%{http_code} %{time_appconnect}' "https://${CLEAN_HOST}" 2>/dev/null || echo "000 0")
+    PRX_RES=$(gw_curl -k -o /dev/null -sS --connect-timeout 3 -m 5 -x http://127.0.0.1:7890 -w '%{http_code} %{time_appconnect}' "https://${CLEAN_HOST}" 2>/dev/null || echo "000 0")
     PRX_CODE=$(printf "%s" "$PRX_RES" | awk '{print $1}')
     PRX_MS=$(printf "%s" "$PRX_RES" | awk '$2+0 > 0 {printf "%.0f ms", $2*1000; ok=1} END {if (!ok) print "недоступен"}')
 
     LAN_IF_T=$(get_lan_ifname)
-    DIR_RES=$(curl -k -o /dev/null -sS --curves X25519:P-256 --interface "$LAN_IF_T" --connect-timeout 2 -m 4 -w '%{http_code} %{time_appconnect}' "https://${CLEAN_HOST}" 2>/dev/null || echo "000 0")
+    DIR_RES=$(gw_curl -k -o /dev/null -sS --interface "$LAN_IF_T" --connect-timeout 2 -m 4 -w '%{http_code} %{time_appconnect}' "https://${CLEAN_HOST}" 2>/dev/null || echo "000 0")
     DIR_CODE=$(printf "%s" "$DIR_RES" | awk '{print $1}')
     DIR_MS=$(printf "%s" "$DIR_RES" | awk '$2+0 > 0 {printf "%.0f ms", $2*1000; ok=1} END {if (!ok) print "заблокирован/таймаут"}')
 
@@ -106,5 +106,3 @@ inspect_domain_route() {
     esac
     return 0
 }
-
-# Поштучная диагностика и оживление нод с «молнией» (⚡) без залповой перегрузки

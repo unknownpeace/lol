@@ -17,13 +17,23 @@ ensure_disk_tools() {
     return 0
 }
 
-# Надежное определение корневого/системного диска (защита NVMe nvme0n1pX, SD/eMMC mmcblk0pX, VirtIO vda, SATA sda)
+# Надежное определение корневого/системного диска (защита NVMe nvme0n1pX, SD/eMMC mmcblk0pX, VirtIO vda, SATA sda, dm-crypt/LVM)
 get_root_base_disk() {
-    ROOT_SRC=$(awk '$2 == "/" || $2 == "/boot" || $2 == "/media/mmcblk0p1" || $2 == "/media/sda1" {print $1; exit}' /proc/mounts 2>/dev/null || true)
+    ROOT_SRC=$(awk '$2 == "/" || $2 == "/boot" || $2 == "/boot/efi" || $2 == "/efi" || $2 == "/media/mmcblk0p1" || $2 == "/media/sda1" {print $1; exit}' /proc/mounts 2>/dev/null || true)
     [ -z "$ROOT_SRC" ] && ROOT_SRC=$(df / 2>/dev/null | awk 'NR==2 {print $1}' || true)
-    ROOT_PK=$(lsblk -no PKNAME "$ROOT_SRC" 2>/dev/null | head -n 1 | tr -d ' \t\r\n' || true)
-    if [ -n "$ROOT_PK" ]; then
-        printf "/dev/%s" "$ROOT_PK"
+    _cur="$ROOT_SRC"
+    _depth=0
+    while [ -n "$_cur" ] && [ "$_depth" -lt 8 ]; do
+        _pk=$(lsblk -no PKNAME "$_cur" 2>/dev/null | head -n 1 | tr -d ' \t\r\n' || true)
+        [ -z "$_pk" ] && break
+        case "$_pk" in
+            /dev/*) _cur="$_pk" ;;
+            *)      _cur="/dev/$_pk" ;;
+        esac
+        _depth=$((_depth + 1))
+    done
+    if [ -n "$_cur" ] && [ "$_cur" != "$ROOT_SRC" ]; then
+        printf "%s" "$_cur"
         return 0
     fi
     case "$ROOT_SRC" in
@@ -34,24 +44,48 @@ get_root_base_disk() {
             printf "%s" "$ROOT_SRC" | sed -E 's/[0-9]+$//'
             ;;
         *)
-            printf "/dev/sda"
+            printf ""
             ;;
     esac
     return 0
 }
 
-# Проверка: принадлежит ли блочное устройство системному диску ОС (/ , /boot, /var, swap)
+# Проверка: принадлежит ли блочное устройство системному диску ОС (/ , /boot, /efi, /var, /home, /opt, swap)
 is_system_protected_device() {
     CHK_DEV="${1:-}"
     [ -z "$CHK_DEV" ] && return 0
+    CHK_REAL=$(readlink -f "$CHK_DEV" 2>/dev/null || printf "%s" "$CHK_DEV")
     ROOT_D=$(get_root_base_disk)
-    case "$CHK_DEV" in
-        "$ROOT_D"|"$ROOT_D"[0-9]*|"$ROOT_D"p[0-9]*)
-            return 0
-            ;;
-    esac
+    if [ -n "$ROOT_D" ]; then
+        ROOT_REAL=$(readlink -f "$ROOT_D" 2>/dev/null || printf "%s" "$ROOT_D")
+        for _cand_d in "$CHK_DEV" "$CHK_REAL"; do
+            for _cand_r in "$ROOT_D" "$ROOT_REAL"; do
+                [ -z "$_cand_r" ] && continue
+                case "$_cand_d" in
+                    "$_cand_r"|"$_cand_r"[0-9]*|"$_cand_r"p[0-9]*)
+                        return 0
+                        ;;
+                esac
+            done
+        done
+        # Рекурсивная проверка родительского устройства (dm-crypt / LVM)
+        _p_cur="$CHK_REAL"
+        _p_depth=0
+        while [ -n "$_p_cur" ] && [ "$_p_depth" -lt 8 ]; do
+            _p_pk=$(lsblk -no PKNAME "$_p_cur" 2>/dev/null | head -n 1 | tr -d ' \t\r\n' || true)
+            [ -z "$_p_pk" ] && break
+            case "$_p_pk" in
+                /dev/*) _p_cur="$_p_pk" ;;
+                *)      _p_cur="/dev/$_p_pk" ;;
+            esac
+            if [ "$_p_cur" = "$ROOT_D" ] || [ "$_p_cur" = "$ROOT_REAL" ]; then
+                return 0
+            fi
+            _p_depth=$((_p_depth + 1))
+        done
+    fi
     # Дополнительная проверка по точкам монтирования разделов выбранного диска
-    if lsblk -rnpo MOUNTPOINT "$CHK_DEV" 2>/dev/null | grep -Eq '^(/|/boot|/etc|/var|/usr|/media/.*|\[SWAP\])$'; then
+    if lsblk -rnpo MOUNTPOINT "$CHK_DEV" 2>/dev/null | grep -Eq '^(/|/boot(/.*)?|/efi|/etc|/home|/opt|/srv|/usr|/var|/media/.*|\[SWAP\])$'; then
         return 0
     fi
     return 1
@@ -60,14 +94,16 @@ is_system_protected_device() {
 # Сканирование доступных внешних разделов и дисков (исключая системный диск ОС)
 list_available_external_disks() {
     ensure_disk_tools
+    ensure_gateway_runtime_dir || return 1
     ROOT_DISK=$(get_root_base_disk)
-    rm -f "$EXT_DISK_SCAN_CACHE"
-    touch "$EXT_DISK_SCAN_CACHE"
+    _disk_cache="${EXT_DISK_SCAN_CACHE:-${GATEWAY_RUNTIME_DIR:-/run/gateway}/disks.cache}"
+    rm -f "$_disk_cache"
+    : > "$_disk_cache"
 
-    ui_box_top "🔌 ОБНАРУЖЕННЫЕ ВНЕШНИЕ НАКОПИТЕЛИ (Системный диск ${ROOT_DISK} защищен)"
+    ui_box_top "🔌 ОБНАРУЖЕННЫЕ ВНЕШНИЕ НАКОПИТЕЛИ (Системный диск ${ROOT_DISK:-не определен} защищен)"
     lsblk -P -p -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null | awk \
         -v root_d="$ROOT_DISK" \
-        -v cache_f="$EXT_DISK_SCAN_CACHE" \
+        -v cache_f="$_disk_cache" \
         -v c_cyn="$C_CYN" -v c_grn="$C_GRN" -v c_yel="$C_YEL" -v c_dim="$C_DIM" -v c_res="$C_RES" '
         function get_val(line, key,    s, res_str) {
             s = key "=\""
@@ -77,6 +113,15 @@ list_available_external_disks() {
                 return res_str
             }
             return ""
+        }
+        function is_root_dev(d, r,    sfx) {
+            if (r == "") return 0
+            if (d == r) return 1
+            if (index(d, r) == 1) {
+                sfx = substr(d, length(r) + 1)
+                if (sfx ~ /^p?[0-9]+$/) return 1
+            }
+            return 0
         }
         {
             dev = get_val($0, "NAME")
@@ -88,8 +133,8 @@ list_available_external_disks() {
             sub(/[[:space:]]+$/, "", model)
 
             if (dtype != "part" && dtype != "disk" && dtype != "crypt") next
-            if (dev == root_d || index(dev, root_d "p") == 1 || index(dev, root_d "1") == 1 || index(dev, root_d "2") == 1 || index(dev, root_d "3") == 1 || index(dev, root_d "4") == 1) next
-            if (mp == "/" || mp == "/boot" || mp == "/var" || mp == "[SWAP]") next
+            if (is_root_dev(dev, root_d)) next
+            if (mp ~ /^(\/|\/boot(\/.*)?|\/efi|\/etc|\/home|\/opt|\/srv|\/usr|\/var|\/media\/.*|\[SWAP\])$/) next
 
             idx++
             tag = (fs == "crypto_LUKS") ? c_yel "[◆ LUKS2 Зашифрован]" c_res : (fs != "" ? c_grn "[● " fs "]" c_res : c_dim "[без ФС]" c_res)
@@ -113,11 +158,20 @@ get_first_available_external_disk() {
     ROOT_D=$(get_root_base_disk)
     lsblk -rnpo NAME,TYPE,MOUNTPOINT 2>/dev/null | awk \
         -v root_d="$ROOT_D" '
+        function is_root_dev(d, r,    sfx) {
+            if (r == "") return 0
+            if (d == r) return 1
+            if (index(d, r) == 1) {
+                sfx = substr(d, length(r) + 1)
+                if (sfx ~ /^p?[0-9]+$/) return 1
+            }
+            return 0
+        }
         $2 == "disk" || $2 == "part" {
             dev = $1
             mp = $3
-            if (dev == root_d || index(dev, root_d "p") == 1 || index(dev, root_d "1") == 1 || index(dev, root_d "2") == 1 || index(dev, root_d "3") == 1 || index(dev, root_d "4") == 1) next
-            if (mp == "/" || mp == "/boot" || mp == "/var" || mp == "[SWAP]") next
+            if (is_root_dev(dev, root_d)) next
+            if (mp ~ /^(\/|\/boot(\/.*)?|\/efi|\/etc|\/home|\/opt|\/srv|\/usr|\/var|\/media\/.*|\[SWAP\])$/) next
             print dev
             exit
         }'
@@ -127,6 +181,8 @@ get_first_available_external_disk() {
 resolve_disk_selection() {
     RAW_SEL=$(printf "%s" "${1:-}" | tr -d ' \t\r\n')
     [ -z "$RAW_SEL" ] && return 1
+    ensure_gateway_runtime_dir || return 1
+    _disk_cache="${EXT_DISK_SCAN_CACHE:-${GATEWAY_RUNTIME_DIR:-/run/gateway}/disks.cache}"
     case "$RAW_SEL" in
         auto|AUTO)
             PICKED_DEV=$(get_first_available_external_disk)
@@ -138,7 +194,7 @@ resolve_disk_selection() {
             return 1
             ;;
         *)
-            PICKED_DEV=$(awk -v t="$RAW_SEL" 'NR == t {print $1; exit}' "$EXT_DISK_SCAN_CACHE" 2>/dev/null || true)
+            PICKED_DEV=$(awk -v t="$RAW_SEL" 'NR == t {print $1; exit}' "$_disk_cache" 2>/dev/null || true)
             ;;
     esac
     [ -n "${PICKED_DEV:-}" ] && [ -b "$PICKED_DEV" ] || return 1
@@ -151,9 +207,19 @@ resolve_disk_selection() {
     return 0
 }
 
-# Остановка и запуск всех сервисов, использующих /srv/storage (перед монтированием или миграцией)
+# Остановка и запуск всех сервисов и LXC-контейнеров, использующих /srv/storage
 stop_storage_dependent_services() {
-    for svc_s in samba transmission-daemon metube forgejo code-server; do
+    _real_lxc=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
+    if command -v lxc-stop >/dev/null 2>&1 && [ -d "$_real_lxc" ]; then
+        for _ct_d in "${_real_lxc}/"*; do
+            [ -d "$_ct_d" ] && [ -f "${_ct_d}/config" ] || continue
+            _ct_n=$(basename "$_ct_d")
+            if lxc-info -n "$_ct_n" 2>/dev/null | grep -q "State:.*RUNNING"; then
+                lxc-stop -n "$_ct_n" -t 15 >/dev/null 2>&1 || lxc-stop -n "$_ct_n" -k >/dev/null 2>&1 || true
+            fi
+        done
+    fi
+    for svc_s in wsdd samba transmission-daemon metube forgejo code-server; do
         if [ -x "/etc/init.d/${svc_s}" ] && rc-service "$svc_s" status >/dev/null 2>&1; then
             rc-service "$svc_s" stop >/dev/null 2>&1 || true
         fi
@@ -180,12 +246,50 @@ start_storage_dependent_services() {
     return 0
 }
 
+# Определение типа накопителя (0 = SSD/NVMe/Flash, 1 = вращающийся HDD) для опций Btrfs
+is_block_device_rotational() {
+    _b_dev="${1:-}"
+    [ -z "$_b_dev" ] && return 1
+    _rota=$(lsblk -ndo ROTA "$_b_dev" 2>/dev/null | head -n 1 | tr -d ' \t\r\n' || true)
+    if [ "$_rota" = "0" ] || [ "$_rota" = "1" ]; then
+        printf "%s" "$_rota"
+        return 0
+    fi
+    _b_cur="$_b_dev"
+    _b_i=0
+    while [ -n "$_b_cur" ] && [ "$_b_i" -lt 6 ]; do
+        _b_pk=$(lsblk -no PKNAME "$_b_cur" 2>/dev/null | head -n 1 | tr -d ' \t\r\n' || true)
+        [ -z "$_b_pk" ] && break
+        case "$_b_pk" in
+            /dev/*) _b_cur="$_b_pk" ;;
+            *)      _b_cur="/dev/$_b_pk" ;;
+        esac
+        _b_i=$((_b_i + 1))
+    done
+    _b_base=$(basename "$_b_cur" 2>/dev/null || true)
+    if [ -n "$_b_base" ] && [ -r "/sys/block/${_b_base}/queue/rotational" ]; then
+        cat "/sys/block/${_b_base}/queue/rotational" 2>/dev/null | tr -d ' \t\r\n'
+        return 0
+    fi
+    return 1
+}
+
 # Безопасные для внезапного отключения питания опции монтирования (ext4 / btrfs / f2fs)
 # Убрана опасная опция commit=30 (риск потери 30 сек транзакций SQLite), включен стандартный 5-сек интервал + data=ordered
 get_optimal_mount_opts() {
     FS_T="$1"
+    OPT_DEV="${2:-}"
     case "$FS_T" in
-        btrfs) printf "defaults,noatime,compress=zstd:3,ssd,space_cache=v2,flushoncommit,nofail" ;;
+        btrfs)
+            _btrfs_ssd=""
+            _dev_rota=$(is_block_device_rotational "$OPT_DEV" 2>/dev/null || true)
+            if [ "$_dev_rota" = "0" ]; then
+                _btrfs_ssd=",ssd"
+            elif [ "$_dev_rota" = "1" ]; then
+                _btrfs_ssd=",nossd"
+            fi
+            printf "defaults,noatime,compress=zstd:3%s,space_cache=v2,flushoncommit,nofail" "$_btrfs_ssd"
+            ;;
         f2fs)  printf "defaults,noatime,gc_merge,background_gc=on,data_flush,nofail" ;;
         ext4)  printf "defaults,noatime,data=ordered,commit=5,errors=remount-ro,nofail" ;;
         *)     printf "defaults,noatime,nofail" ;;
@@ -243,10 +347,13 @@ mount_external_drive_to_storage() {
                     LUKS_PASS="$LUKS_PASS_OVERRIDE"
                 else
                     printf "Введите пароль (passphrase) для разблокировки LUKS2 диска %s: " "$TARGET_DEV"
+                    [ -t 0 ] && stty -echo 2>/dev/null || true
                     read -r LUKS_PASS < /dev/tty || true
+                    [ -t 0 ] && stty echo 2>/dev/null || true
+                    printf "\n"
                     LUKS_PASS=$(printf "%s" "$LUKS_PASS" | tr -d '\r\n')
                 fi
-                if ! printf "%s" "$LUKS_PASS" | cryptsetup open "$TARGET_DEV" "$LUKS_MAPPER_NAME" -; then
+                if ! printf "%s" "$LUKS_PASS" | cryptsetup open --key-file=- "$TARGET_DEV" "$LUKS_MAPPER_NAME"; then
                     ui_warn_box "Неверный пароль или ошибка открытия контейнера LUKS2 (${TARGET_DEV})." \
                                 "Повторите попытку через команду: gateway unlock"
                     return 1
@@ -263,6 +370,8 @@ mount_external_drive_to_storage() {
                 fi
                 case "$IN_KEYF" in
                     [Yy]|[Yy][Ee][Ss]|[Дд]|[Дд][Аа])
+                        _had_key="no"
+                        [ -s "$LUKS_KEYFILE" ] && _had_key="yes"
                         mkdir -p "$(dirname "$LUKS_KEYFILE")"
                         umask 077
                         if [ ! -s "$LUKS_KEYFILE" ]; then
@@ -270,8 +379,13 @@ mount_external_drive_to_storage() {
                         fi
                         chmod 400 "$LUKS_KEYFILE"
                         umask 022
-                        if printf "%s" "$LUKS_PASS" | cryptsetup luksAddKey "$TARGET_DEV" "$LUKS_KEYFILE" -; then
+                        if printf "%s" "$LUKS_PASS" | cryptsetup luksAddKey --key-file=- "$TARGET_DEV" "$LUKS_KEYFILE"; then
                             ui_ok_msg "Ключ авто-разблокировки добавлен в слот LUKS2 и защищен (${LUKS_KEYFILE}, mode 0400)!"
+                        else
+                            [ "$_had_key" = "no" ] && rm -f "$LUKS_KEYFILE" 2>/dev/null || true
+                            ui_warn_box "Не удалось добавить ключ авто-разблокировки в слот LUKS2!" \
+                                        "Проверьте доступные ключевые слоты накопителя (${TARGET_DEV})."
+                            return 1
                         fi
                         ;;
                 esac
@@ -292,24 +406,57 @@ mount_external_drive_to_storage() {
     stop_storage_dependent_services
     auto_fsck_device "$MOUNT_DEV" "$FS_TYPE"
 
-    # Если в локальной папке /srv/storage уже были файлы (на системном разделе), сохраняем их во временный буфер для переноса
-    MIGRATE_TMP="/tmp/homelab_storage_migrate_$$"
-    rm -rf "$MIGRATE_TMP"
-    if ! is_external_storage_mounted; then
-        if [ -d "$STORAGE_ROOT" ] && [ -n "$(ls -A "$STORAGE_ROOT" 2>/dev/null)" ]; then
-            ui_step_progress 2 3 "Сохранение существующих файлов из локальной папки ${STORAGE_ROOT} для переноса..."
-            mkdir -p "$MIGRATE_TMP"
-            cp -a "${STORAGE_ROOT}/." "$MIGRATE_TMP/" 2>/dev/null || true
+    MNT_OPTS=$(get_optimal_mount_opts "$FS_TYPE" "$MOUNT_DEV")
+
+    # Если в локальной папке /srv/storage уже были файлы (на системном разделе), переносим напрямую на целевой диск без RAM /tmp
+    _pre_mnt_bak=""
+    if is_external_storage_mounted; then
+        sync
+        if ! umount "$STORAGE_ROOT" 2>/dev/null; then
+            ui_warn_box "Не удалось размонтировать текущее хранилище ${STORAGE_ROOT} (устройство занято)." \
+                        "Операция подключения отменена для предотвращения потери данных."
+            start_storage_dependent_services
+            return 1
         fi
-    else
-        umount "$STORAGE_ROOT" 2>/dev/null || umount -l "$STORAGE_ROOT" 2>/dev/null || true
+    elif [ -d "$STORAGE_ROOT" ] && [ -n "$(ls -A "$STORAGE_ROOT" 2>/dev/null)" ]; then
+        ui_step_progress 2 3 "Перенос существующих файлов из ${STORAGE_ROOT} напрямую на внешний накопитель..."
+        ensure_gateway_runtime_dir || return 1
+        _stage_mnt="${GATEWAY_RUNTIME_DIR:-/run/gateway}/mnt_migrate.$$"
+        mkdir -p "$_stage_mnt"
+        if ! mount -t "$FS_TYPE" -o "$MNT_OPTS" "$MOUNT_DEV" "$_stage_mnt" 2>/dev/null && ! mount "$MOUNT_DEV" "$_stage_mnt" 2>/dev/null; then
+            rmdir "$_stage_mnt" 2>/dev/null || true
+            ui_warn_box "Не удалось временно смонтировать ${MOUNT_DEV} для переноса данных!" \
+                        "Существующие файлы в ${STORAGE_ROOT} не затронуты."
+            start_storage_dependent_services
+            return 1
+        fi
+        if ! cp -a "${STORAGE_ROOT}/." "${_stage_mnt}/"; then
+            umount "$_stage_mnt" 2>/dev/null || true
+            rmdir "$_stage_mnt" 2>/dev/null || true
+            ui_warn_box "Ошибка копирования данных из ${STORAGE_ROOT} на ${MOUNT_DEV} (возможно, не хватает места)!" \
+                        "Исходные файлы в ${STORAGE_ROOT} сохранены."
+            start_storage_dependent_services
+            return 1
+        fi
+        sync
+        umount "$_stage_mnt" 2>/dev/null || {
+            rmdir "$_stage_mnt" 2>/dev/null || true
+            start_storage_dependent_services
+            return 1
+        }
+        rmdir "$_stage_mnt" 2>/dev/null || true
+        _pre_mnt_bak="${STORAGE_ROOT}.pre_mnt.$$"
+        mv "$STORAGE_ROOT" "$_pre_mnt_bak"
     fi
 
     mkdir -p "$STORAGE_ROOT"
-    MNT_OPTS=$(get_optimal_mount_opts "$FS_TYPE")
     ui_step_progress 3 3 "Монтирование ${MOUNT_DEV} (${FS_TYPE}) в ${STORAGE_ROOT} с защитой от сбоя питания..."
     if ! mount -t "$FS_TYPE" -o "$MNT_OPTS" "$MOUNT_DEV" "$STORAGE_ROOT" 2>/dev/null; then
         if ! mount "$MOUNT_DEV" "$STORAGE_ROOT"; then
+            if [ -n "$_pre_mnt_bak" ] && [ -d "$_pre_mnt_bak" ]; then
+                rmdir "$STORAGE_ROOT" 2>/dev/null || true
+                mv "$_pre_mnt_bak" "$STORAGE_ROOT" 2>/dev/null || true
+            fi
             ui_warn_box "Не удалось смонтировать ${MOUNT_DEV} в ${STORAGE_ROOT}!" \
                         "Выполните проверку диска через: gateway doctor"
             start_storage_dependent_services
@@ -317,10 +464,8 @@ mount_external_drive_to_storage() {
         fi
     fi
 
-    # Перенос сохраненных файлов на новый смонтированный диск
-    if [ -d "$MIGRATE_TMP" ]; then
-        cp -a "$MIGRATE_TMP/." "$STORAGE_ROOT/" 2>/dev/null || true
-        rm -rf "$MIGRATE_TMP"
+    if [ -n "$_pre_mnt_bak" ] && [ -d "$_pre_mnt_bak" ]; then
+        rm -rf "$_pre_mnt_bak" 2>/dev/null || true
         ui_ok_msg "Существующие данные медиатеки перенесены на внешний накопитель!"
     fi
 
@@ -415,26 +560,64 @@ format_and_mount_external_drive() {
     fi
 
     stop_storage_dependent_services
-    umount "$STORAGE_ROOT" 2>/dev/null || true
-    umount "$TARGET_DEV" 2>/dev/null || true
+    sync
+    if is_external_storage_mounted && ! umount "$STORAGE_ROOT" 2>/dev/null; then
+        ui_warn_box "Не удалось размонтировать ${STORAGE_ROOT} перед форматированием!" \
+                    "Закройте открытые файлы и повторите попытку."
+        return 1
+    fi
+    if awk -v d="$TARGET_DEV" '$1 == d {found=1} END {exit !found}' /proc/mounts 2>/dev/null; then
+        umount "$TARGET_DEV" 2>/dev/null || {
+            ui_warn_box "Устройство ${TARGET_DEV} все еще смонтировано и занято!" "Размонтируйте вручную перед форматированием."
+            return 1
+        }
+    fi
     for sub_p in "${TARGET_DEV}"*[0-9]; do
-        [ -b "$sub_p" ] && umount "$sub_p" 2>/dev/null || true
+        if [ -b "$sub_p" ] && awk -v d="$sub_p" '$1 == d {found=1} END {exit !found}' /proc/mounts 2>/dev/null; then
+            umount "$sub_p" 2>/dev/null || {
+                ui_warn_box "Раздел ${sub_p} смонтирован и занят!" "Размонтируйте вручную перед форматированием."
+                return 1
+            }
+        fi
     done
-    [ -b "/dev/mapper/${LUKS_MAPPER_NAME}" ] && cryptsetup close "$LUKS_MAPPER_NAME" 2>/dev/null || true
+    if [ -b "/dev/mapper/${LUKS_MAPPER_NAME}" ]; then
+        if ! cryptsetup close "$LUKS_MAPPER_NAME" 2>/dev/null; then
+            ui_warn_box "Криптоконтейнер /dev/mapper/${LUKS_MAPPER_NAME} все еще открыт и занят!" \
+                        "Закройте его через gateway eject перед форматированием."
+            return 1
+        fi
+    fi
 
     # Если выбран целый диск (disk), создаем на нем чистую таблицу GPT и 1 раздел на 100% объема
     DEV_TYPE=$(lsblk -no TYPE "$TARGET_DEV" 2>/dev/null | head -n 1 | tr -d ' \t\r\n')
     if [ "$DEV_TYPE" = "disk" ]; then
         ui_step_progress 1 3 "Создание новой таблицы разделов GPT на диске ${TARGET_DEV}..."
         wipefs -a "$TARGET_DEV" >/dev/null 2>&1 || true
-        printf "label: gpt\n;\n" | sfdisk --force "$TARGET_DEV" >/dev/null 2>&1 || true
-        mdev -s 2>/dev/null || partprobe "$TARGET_DEV" 2>/dev/null || true
-        sleep 2
-        PART_DEV=$(lsblk -rnpo NAME,TYPE "$TARGET_DEV" 2>/dev/null | awk '$2=="part" {print $1; exit}')
-        if [ -n "$PART_DEV" ]; then
-            TARGET_DEV="$PART_DEV"
-            wipefs -a "$TARGET_DEV" >/dev/null 2>&1 || true
+        if ! printf "label: gpt\n;\n" | sfdisk --force "$TARGET_DEV" >/dev/null 2>&1; then
+            ui_warn_box "Ошибка создания таблицы разделов GPT на ${TARGET_DEV}!" "Проверьте исправность накопителя (dmesg)."
+            return 1
         fi
+        partprobe "$TARGET_DEV" 2>/dev/null || true
+        blockdev --rereadpt "$TARGET_DEV" 2>/dev/null || true
+        mdev -s 2>/dev/null || true
+        PART_DEV=""
+        _pw=0
+        while [ "$_pw" -lt 10 ]; do
+            PART_DEV=$(lsblk -rnpo NAME,TYPE "$TARGET_DEV" 2>/dev/null | awk '$2=="part" {print $1; exit}')
+            if [ -n "$PART_DEV" ] && [ -b "$PART_DEV" ]; then
+                break
+            fi
+            sleep 1
+            mdev -s 2>/dev/null || true
+            _pw=$((_pw + 1))
+        done
+        if [ -z "$PART_DEV" ] || [ ! -b "$PART_DEV" ]; then
+            ui_warn_box "Ядро не обнаружило созданный раздел на ${TARGET_DEV} после sfdisk!" \
+                        "Форматирование остановлено во избежание порчи таблицы разделов."
+            return 1
+        fi
+        TARGET_DEV="$PART_DEV"
+        wipefs -a "$TARGET_DEV" >/dev/null 2>&1 || true
     else
         wipefs -a "$TARGET_DEV" >/dev/null 2>&1 || true
     fi
@@ -445,14 +628,25 @@ format_and_mount_external_drive() {
             NEW_LUKS_PASS="$PASS_OVERRIDE"
         else
             printf "Задайте пароль (passphrase) для шифрования LUKS2 диска %s [Enter = использовать единый пароль шлюза]: " "$TARGET_DEV"
+            [ -t 0 ] && stty -echo 2>/dev/null || true
             read -r NEW_LUKS_PASS < /dev/tty || true
+            [ -t 0 ] && stty echo 2>/dev/null || true
+            printf "\n"
             NEW_LUKS_PASS=$(printf "%s" "$NEW_LUKS_PASS" | tr -d '\r\n')
             load_gateway_env
             [ -z "$NEW_LUKS_PASS" ] && NEW_LUKS_PASS="${ADMIN_PASS:-admin}"
         fi
 
-        ui_step_progress 2 3 "Форматирование контейнера LUKS2 (cipher: aes-xts-plain64, key: 512 bit, pbkdf: argon2id)..."
-        if ! printf "%s" "$NEW_LUKS_PASS" | cryptsetup luksFormat --type luks2 --cipher aes-xts-plain64 --key-size 512 --hash sha256 --pbkdf argon2id --batch-mode "$TARGET_DEV" -; then
+        MEM_KB_LUKS=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo "524288")
+        case "$MEM_KB_LUKS" in ''|*[!0-9]*) MEM_KB_LUKS=524288 ;; esac
+        if [ "$MEM_KB_LUKS" -le 1048576 ]; then
+            PBKDF_MEM=65536
+        else
+            PBKDF_MEM=131072
+        fi
+
+        ui_step_progress 2 3 "Форматирование контейнера LUKS2 (cipher: aes-xts-plain64, key: 512 bit, pbkdf: argon2id, mem: ${PBKDF_MEM}K)..."
+        if ! printf "%s" "$NEW_LUKS_PASS" | cryptsetup luksFormat --type luks2 --cipher aes-xts-plain64 --key-size 512 --hash sha256 --pbkdf argon2id --pbkdf-memory "$PBKDF_MEM" --batch-mode --key-file=- "$TARGET_DEV"; then
             ui_warn_box "Ошибка создания контейнера LUKS2 на ${TARGET_DEV}!" "Проверьте исправность накопителя (dmesg)."
             return 1
         fi
@@ -463,10 +657,15 @@ format_and_mount_external_drive() {
         dd if=/dev/urandom of="$LUKS_KEYFILE" bs=4096 count=1 >/dev/null 2>&1
         chmod 400 "$LUKS_KEYFILE"
         umask 022
-        printf "%s" "$NEW_LUKS_PASS" | cryptsetup luksAddKey "$TARGET_DEV" "$LUKS_KEYFILE" - >/dev/null 2>&1 || true
+        if ! printf "%s" "$NEW_LUKS_PASS" | cryptsetup luksAddKey --key-file=- "$TARGET_DEV" "$LUKS_KEYFILE" >/dev/null 2>&1; then
+            rm -f "$LUKS_KEYFILE" 2>/dev/null || true
+            ui_warn_box "Ошибка добавления ключа авто-разблокировки в слот LUKS2 на ${TARGET_DEV}!" \
+                        "Форматирование остановлено."
+            return 1
+        fi
 
         if ! cryptsetup open "$TARGET_DEV" "$LUKS_MAPPER_NAME" --key-file "$LUKS_KEYFILE"; then
-            printf "%s" "$NEW_LUKS_PASS" | cryptsetup open "$TARGET_DEV" "$LUKS_MAPPER_NAME" - || return 1
+            printf "%s" "$NEW_LUKS_PASS" | cryptsetup open --key-file=- "$TARGET_DEV" "$LUKS_MAPPER_NAME" || return 1
         fi
         FMT_TARGET="/dev/mapper/${LUKS_MAPPER_NAME}"
         ui_ok_msg "Контейнер LUKS2 создан и открыт (${FMT_TARGET})!"
@@ -505,9 +704,16 @@ relocate_heavy_services_to_external_storage() {
     # 1. Git-репозитории и LFS объекты Forgejo -> /srv/storage/Git-Repos
     mkdir -p "${STORAGE_REPOS}/repos" "${STORAGE_REPOS}/lfs"
     if [ -d /var/lib/forgejo/repos ] && [ ! -L /var/lib/forgejo/repos ]; then
-        cp -a /var/lib/forgejo/repos/. "${STORAGE_REPOS}/repos/" 2>/dev/null || true
-        rm -rf /var/lib/forgejo/repos
-        ln -s "${STORAGE_REPOS}/repos" /var/lib/forgejo/repos
+        if cp -a /var/lib/forgejo/repos/. "${STORAGE_REPOS}/repos/"; then
+            rm -rf /var/lib/forgejo/repos
+            ln -s "${STORAGE_REPOS}/repos" /var/lib/forgejo/repos
+        else
+            ui_box_bottom
+            ui_warn_box "Ошибка переноса /var/lib/forgejo/repos на ${STORAGE_REPOS}!" \
+                        "Исходные репозитории сохранены; проверьте свободное место."
+            start_storage_dependent_services
+            return 1
+        fi
     fi
     if id forgejo >/dev/null 2>&1; then
         FG_GRP=$(id -gn forgejo 2>/dev/null || echo "www-data")
@@ -519,9 +725,16 @@ relocate_heavy_services_to_external_storage() {
     # 2. Проекты и воркспейс VS Code (Server-Code) -> /srv/storage/Workspace
     mkdir -p "$STORAGE_CODE"
     if [ -d /var/lib/coder/workspace ] && [ ! -L /var/lib/coder/workspace ]; then
-        cp -a /var/lib/coder/workspace/. "$STORAGE_CODE/" 2>/dev/null || true
-        rm -rf /var/lib/coder/workspace
-        ln -s "$STORAGE_CODE" /var/lib/coder/workspace
+        if cp -a /var/lib/coder/workspace/. "$STORAGE_CODE/"; then
+            rm -rf /var/lib/coder/workspace
+            ln -s "$STORAGE_CODE" /var/lib/coder/workspace
+        else
+            ui_box_bottom
+            ui_warn_box "Ошибка переноса /var/lib/coder/workspace в ${STORAGE_CODE}!" \
+                        "Исходные проекты сохранены; проверьте свободное место."
+            start_storage_dependent_services
+            return 1
+        fi
     elif [ -d /var/lib/coder ] && [ ! -e /var/lib/coder/workspace ]; then
         ln -s "$STORAGE_CODE" /var/lib/coder/workspace
     fi
@@ -534,11 +747,16 @@ relocate_heavy_services_to_external_storage() {
     # 3. Синхронизация прав медиа-хранилища
     repair_storage_permissions
 
-    # 5. Автоматическое зеркалирование архивов бэкапа в /srv/storage/Backups
+    # 5. Автоматическое зеркалирование архивов бэкапа в /srv/storage/Backups (строго root:root 0700/0600)
     mkdir -p "$STORAGE_BACKUPS"
-    [ -f "$BACKUP_ARCHIVE" ] && cp -f "$BACKUP_ARCHIVE" "${STORAGE_BACKUPS}/gateway_backup_latest.tar.gz" 2>/dev/null || true
-    chmod 750 "$STORAGE_BACKUPS" 2>/dev/null || true
-    ui_box_row "${C_GRN}[✔]${C_RES} Хранилище резервных копий и личное облако Samba готовы: ${STORAGE_BACKUPS}"
+    chown root:root "$STORAGE_BACKUPS" 2>/dev/null || true
+    chmod 0700 "$STORAGE_BACKUPS" 2>/dev/null || true
+    if [ -f "$BACKUP_ARCHIVE" ]; then
+        cp -f "$BACKUP_ARCHIVE" "${STORAGE_BACKUPS}/gateway_backup_latest.tar.gz" 2>/dev/null || true
+        chown root:root "${STORAGE_BACKUPS}/gateway_backup_latest.tar.gz" 2>/dev/null || true
+        chmod 0600 "${STORAGE_BACKUPS}/gateway_backup_latest.tar.gz" 2>/dev/null || true
+    fi
+    ui_box_row "${C_GRN}[✔]${C_RES} Защищенное хранилище резервных копий готово: ${STORAGE_BACKUPS} (0700 root:root)"
 
     sync
     sync_all_homelab_permissions
@@ -556,29 +774,49 @@ unmount_external_storage_safe() {
         return 0
     fi
     ui_box_top "⏏️ БЕЗОПАСНОЕ ИЗВЛЕЧЕНИЕ И БЛОКИРОВКА ДИСКА (GATEWAY EJECT / LOCK)"
-    ui_step_progress 1 3 "Остановка зависимых медиа-сервисов и торрентов..."
+    ui_step_progress 1 3 "Остановка зависимых медиа-сервисов, LXC-контейнеров и торрентов..."
     stop_storage_dependent_services
 
     ui_step_progress 2 3 "Сброс кэшей записи на диск (sync) и размонтирование ${STORAGE_ROOT}..."
     sync
-    if ! is_external_storage_mounted || umount "$STORAGE_ROOT" 2>/dev/null || umount -l "$STORAGE_ROOT" 2>/dev/null; then
-        sed -i "\|[[:space:]]${STORAGE_ROOT}[[:space:]]|d" /etc/fstab 2>/dev/null || true
-        EXT_STORAGE_EXPECTED="no"
-        save_homelab_env
-        ui_step_progress 3 3 "Закрытие криптоконтейнера LUKS2..."
-        if [ -b "/dev/mapper/${LUKS_MAPPER_NAME}" ]; then
-            cryptsetup close "$LUKS_MAPPER_NAME" 2>/dev/null || true
-            ui_box_row "${C_GRN}[✔] Контейнер LUKS2 (${LUKS_MAPPER_NAME}) безопасно заблокирован и закрыт.${C_RES}"
+    if is_external_storage_mounted; then
+        if ! umount "$STORAGE_ROOT" 2>/dev/null; then
+            sleep 1
+            sync
+            if ! umount "$STORAGE_ROOT" 2>/dev/null; then
+                _busy_pids=$(fuser -m "$STORAGE_ROOT" 2>/dev/null || true)
+                _busy_info=""
+                [ -n "$_busy_pids" ] && _busy_info="Занято PID: ${_busy_pids}"
+                [ -z "$_busy_info" ] && _busy_info=$(lsof +f -- "$STORAGE_ROOT" 2>/dev/null | head -n 8 || true)
+                ui_box_bottom
+                start_storage_dependent_services
+                ui_warn_box "Не удалось размонтировать ${STORAGE_ROOT} (устройство занято процессом)." \
+                            "${_busy_info:-Закройте открытые файлы в Samba/консоли и повторите: gateway eject}"
+                return 1
+            fi
         fi
-        ui_box_row "${C_GRN}[✔] Внешний накопитель безопасно отключен! Теперь его можно физически извлечь.${C_RES}"
-        ui_box_bottom
-    else
-        ui_box_bottom
-        start_storage_dependent_services
-        ui_warn_box "Не удалось размонтировать ${STORAGE_ROOT} (устройство занято процессом)." \
-                    "Закройте открытые файлы в шаре Samba и повторите: gateway eject"
-        return 1
     fi
+
+    ui_step_progress 3 3 "Закрытие криптоконтейнера LUKS2..."
+    if [ -b "/dev/mapper/${LUKS_MAPPER_NAME}" ]; then
+        if ! cryptsetup close "$LUKS_MAPPER_NAME" 2>/dev/null; then
+            _luks_pids=$(fuser -m "/dev/mapper/${LUKS_MAPPER_NAME}" 2>/dev/null || true)
+            _luks_busy=""
+            [ -n "$_luks_pids" ] && _luks_busy="Занято PID: ${_luks_pids}"
+            [ -z "$_luks_busy" ] && _luks_busy=$(dmsetup info "$LUKS_MAPPER_NAME" 2>/dev/null || true)
+            ui_box_bottom
+            ui_warn_box "Файловая система отмонтирована, но не удалось закрыть контейнер LUKS2 (${LUKS_MAPPER_NAME})!" \
+                        "${_luks_busy:-Устройство все еще используется ядром/процессом — НЕ извлекайте накопитель!}"
+            return 1
+        fi
+        ui_box_row "${C_GRN}[✔] Контейнер LUKS2 (${LUKS_MAPPER_NAME}) безопасно заблокирован и закрыт.${C_RES}"
+    fi
+
+    sed -i "\|[[:space:]]${STORAGE_ROOT}[[:space:]]|d" /etc/fstab 2>/dev/null || true
+    EXT_STORAGE_EXPECTED="no"
+    save_homelab_env
+    ui_box_row "${C_GRN}[✔] Внешний накопитель безопасно отключен! Теперь его можно физически извлечь.${C_RES}"
+    ui_box_bottom
     return 0
 }
 
@@ -668,9 +906,3 @@ manage_external_disks_menu() {
     done
     return 0
 }
-
-# ==============================================================================
-# Центральная система HTTPS, локальный PKI и домены *.lan (Caddy + AdGuard Home)
-# ==============================================================================
-
-# Поиск актуального пути корневого сертификата Caddy Root CA

@@ -4,6 +4,16 @@
 # На OpenWrt не выполняется (там работает native LuCI luci-app-gateway).
 # ==============================================================================
 
+_ensure_webui_runtime_and_token() {
+    ensure_gateway_runtime_dir || return 1
+    _ctok_dir="${GATEWAY_RUNTIME_DIR:-/run/gateway}/console_tokens"
+    (umask 077 && mkdir -p "$_ctok_dir") 2>/dev/null || true
+    chown root:root "$_ctok_dir" 2>/dev/null || true
+    chmod 700 "$_ctok_dir" 2>/dev/null || true
+    ensure_webui_proxy_token >/dev/null || return 1
+    return 0
+}
+
 install_alpine_webui() {
     is_openwrt 2>/dev/null && return 0
     [ -f /etc/openwrt_release ] && return 0
@@ -20,6 +30,7 @@ install_alpine_webui() {
     fi
 
     load_gateway_env >/dev/null 2>&1 || true
+    _ensure_webui_runtime_and_token
 
     BIND_HOST="0.0.0.0"
     AUTH_MODE="basic"
@@ -35,7 +46,7 @@ name="gateway-console"
 description="Gateway LXC Web Console (ttyd)"
 supervisor="supervise-daemon"
 command="/usr/bin/ttyd"
-command_args="-i lo -p ${PORT_WEBUI_CONSOLE:-8096} -b /console -a -W -t fontSize=14 -t cursorBlink=true /bin/sh ${SRC_WEBUI}/lxc_console.sh"
+command_args="-i 127.0.0.1 -p ${PORT_WEBUI_CONSOLE:-8096} -b /console -a -W -O -t disableReconnect=true -t fontSize=14 -t cursorBlink=true /bin/sh ${SRC_WEBUI}/lxc_console.sh"
 output_log="/var/log/gateway-console.log"
 error_log="/var/log/gateway-console.log"
 
@@ -44,6 +55,8 @@ depend() {
 }
 
 start_pre() {
+    checkpath -d -m 0700 -o root:root /run/gateway
+    checkpath -d -m 0700 -o root:root /run/gateway/console_tokens
     checkpath -f -m 0640 /var/log/gateway-console.log
 }
 CON_INIT
@@ -71,6 +84,9 @@ export GATEWAY_WEBUI_HOST="${BIND_HOST}"
 export GATEWAY_WEBUI_PORT="${PORT_WEBUI:-8095}"
 export GATEWAY_WEBUI_CONSOLE_PORT="${PORT_WEBUI_CONSOLE:-8096}"
 export GATEWAY_WEBUI_AUTH="${AUTH_MODE}"
+export GATEWAY_ENV_FILE="${SB_ENV:-/etc/sing-box/gateway.env}"
+export GATEWAY_HOMELAB_ENV_FILE="${HOMELAB_ENV:-/etc/sing-box/homelab.env}"
+export GATEWAY_PROXY_TOKEN_FILE="/etc/sing-box/homelab/webui_proxy.token"
 
 depend() {
     need net
@@ -78,6 +94,8 @@ depend() {
 }
 
 start_pre() {
+    checkpath -d -m 0700 -o root:root /run/gateway
+    checkpath -d -m 0700 -o root:root /run/gateway/console_tokens
     checkpath -f -m 0640 /var/log/gateway-webui.log
 }
 INIT_EOF

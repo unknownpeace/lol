@@ -1,12 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+    <linearGradient id="gw-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#07090e"/>
+    </linearGradient>
+    <linearGradient id="gw-edge" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#38bdf8"/>
-      <stop offset="100%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#6366f1"/>
+    </linearGradient>
+    <linearGradient id="gw-fill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#6366f1" stop-opacity="0.08"/>
     </linearGradient>
   </defs>
-  <rect x="4" y="4" width="56" height="56" rx="14" fill="#0f172a" stroke="url(#g)" stroke-width="3"/>
-  <path d="M32 14L48 21V33C48 42.5 41 50.2 32 53C23 50.2 16 42.5 16 33V21L32 14Z" fill="url(#g)" fill-opacity="0.2" stroke="#38bdf8" stroke-width="2.5"/>
-  <circle cx="32" cy="31" r="4" fill="#38bdf8"/>
-  <path d="M24 39C26.2 36.2 29 35 32 35C35 35 37.8 36.2 40 39" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+  <rect x="4" y="4" width="56" height="56" rx="15" fill="url(#gw-bg)" stroke="url(#gw-edge)" stroke-width="2.5"/>
+  <path d="M32 13L48 20V32.5C48 42.4 41.2 50.4 32 53.2C22.8 50.4 16 42.4 16 32.5V20L32 13Z" fill="url(#gw-fill)" stroke="url(#gw-edge)" stroke-width="2.2" stroke-linejoin="round"/>
+  <path d="M24 36L32 25L40 36" fill="none" stroke="#38bdf8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M24 36H40" fill="none" stroke="#818cf8" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="32" cy="25" r="3.2" fill="#38bdf8"/>
+  <circle cx="24" cy="36" r="2.6" fill="#34d399"/>
+  <circle cx="40" cy="36" r="2.6" fill="#38bdf8"/>
 </svg>

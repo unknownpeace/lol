@@ -22,16 +22,28 @@ if [ "${#RAW_TOK}" -ne 32 ]; then
     exit 1
 fi
 
-TOK_FILE="/tmp/gw_console_tok_${RAW_TOK}"
-if [ ! -f "$TOK_FILE" ]; then
+TOK_DIR="/run/gateway/console_tokens"
+TOK_FILE="${TOK_DIR}/${RAW_TOK}"
+USED_FILE="${TOK_FILE}.used.$$"
+
+if ! mv "$TOK_FILE" "$USED_FILE" 2>/dev/null; then
     printf "\r\n[!] Токен консоли истёк или уже был использован.\r\n"
     printf "Нажмите «Переподключить» или откройте консоль заново из панели.\r\n"
     sleep 2
     exit 1
 fi
 
-META=$(cat "$TOK_FILE" 2>/dev/null || true)
-rm -f "$TOK_FILE" 2>/dev/null || true
+META=$(cat "$USED_FILE" 2>/dev/null || true)
+rm -f "$USED_FILE" 2>/dev/null || true
+
+case "$META" in
+    *'|'*) ;;
+    *)
+        printf "\r\n[!] Поврежденные метаданные токена.\r\n"
+        sleep 2
+        exit 1
+        ;;
+esac
 
 CT_NAME="${META%%|*}"
 EXP_TS="${META##*|}"

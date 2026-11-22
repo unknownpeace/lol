@@ -22,18 +22,20 @@ install_mihomo_binary() {
     fi
 
     echo "Загрузка Mihomo ${MH_TAG} (${MIHOMO_ARCH})..."
-    rm -f /tmp/mihomo.gz /tmp/mihomo.bin
+    ensure_gateway_runtime_dir || return 1
+    _mh_stage=$(mktemp -d "${GATEWAY_RUNTIME_DIR:-/run/gateway}/mh.XXXXXX" 2>/dev/null) || return 1
+    chmod 700 "$_mh_stage" 2>/dev/null || true
     MH_ASSET="mihomo-linux-${MIHOMO_ARCH}-${MH_TAG}.gz"
     MH_URL="https://github.com/MetaCubeX/mihomo/releases/download/${MH_TAG}/${MH_ASSET}"
 
-    if download_file "$MH_URL" "/tmp/mihomo.gz" && verify_github_asset_sha256 "MetaCubeX/mihomo" "$MH_ASSET" "/tmp/mihomo.gz"; then
-        if gzip -dc /tmp/mihomo.gz > /tmp/mihomo.bin 2>/dev/null && [ -s /tmp/mihomo.bin ]; then
-            chmod +x /tmp/mihomo.bin
-            if /tmp/mihomo.bin -v >/dev/null 2>&1; then
+    if download_file "$MH_URL" "${_mh_stage}/mihomo.gz" && verify_github_asset_sha256 "MetaCubeX/mihomo" "$MH_ASSET" "${_mh_stage}/mihomo.gz" "$MH_TAG"; then
+        if gzip -dc "${_mh_stage}/mihomo.gz" > "${_mh_stage}/mihomo.bin" 2>/dev/null && [ -s "${_mh_stage}/mihomo.bin" ]; then
+            chmod +x "${_mh_stage}/mihomo.bin"
+            if "${_mh_stage}/mihomo.bin" -v >/dev/null 2>&1; then
                 service_ctl mihomo stop >/dev/null 2>&1 || true
-                mv -f /tmp/mihomo.bin /usr/bin/mihomo
+                mv -f "${_mh_stage}/mihomo.bin" /usr/bin/mihomo
                 chmod +x /usr/bin/mihomo
-                rm -f /tmp/mihomo.gz
+                rm -rf "$_mh_stage"
                 echo "${C_GRN}[✓] Mihomo безопасно обновлен до ${MH_TAG} (${MIHOMO_ARCH}).${C_RES}"
                 return 0
             else
@@ -41,9 +43,9 @@ install_mihomo_binary() {
             fi
         fi
     else
-        echo "${C_RED}[X] Не удалось скачать Mihomo ${MH_TAG} (${MH_ASSET}).${C_RES}"
+        echo "${C_RED}[X] Не удалось скачать или верифицировать Mihomo ${MH_TAG} (${MH_ASSET}).${C_RES}"
     fi
-    rm -f /tmp/mihomo.gz /tmp/mihomo.bin
+    rm -rf "$_mh_stage"
     [ -x /usr/bin/mihomo ] && return 0 || return 1
 }
 
@@ -56,7 +58,7 @@ setup_mihomo_init_script() {
         if [ -z "${SB_GOMEMLIMIT:-}" ] || [ "$SB_GOMEMLIMIT" = "off" ]; then
             MH_ENV_LINE="procd_set_param env GOGC=100 SAFE_PATHS=${SB_DIR}:${MIHOMO_DIR}"
         else
-            MH_ENV_LINE="procd_set_param env GOGC=50 GOMEMLIMIT=${SB_GOMEMLIMIT} SAFE_PATHS=${SB_DIR}:${MIHOMO_DIR}"
+            MH_ENV_LINE="procd_set_param env GOGC=${SB_GOGC:-50} GOMEMLIMIT=${SB_GOMEMLIMIT} SAFE_PATHS=${SB_DIR}:${MIHOMO_DIR}"
         fi
         cat << INIT_MH_OWRT > /etc/init.d/mihomo
 #!/bin/sh /etc/rc.common
@@ -68,7 +70,7 @@ start_service() {
     mkdir -p /dev/net "${MIHOMO_DIR}"
     [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
     procd_open_instance
-    procd_set_param command /bin/sh -c ": > '${MIHOMO_LOG_FILE}'; exec /usr/bin/mihomo -d '${MIHOMO_DIR}' -f '${MIHOMO_CONF}' >>'${MIHOMO_LOG_FILE}' 2>&1"
+    procd_set_param command /bin/sh -c "exec /usr/bin/mihomo -d '${MIHOMO_DIR}' -f '${MIHOMO_CONF}' >>'${MIHOMO_LOG_FILE}' 2>&1"
     ${MH_ENV_LINE}
     procd_set_param limits nofile="65535 65535"
     procd_set_param respawn 3600 3 10
@@ -93,7 +95,7 @@ rc_oom_score_adj="-500"
 respawn_delay=3
 respawn_max=10
 retry="TERM/10/KILL/5"
-export GOGC=50
+export GOGC=${SB_GOGC:-50}
 export GOMEMLIMIT=${SB_GOMEMLIMIT}
 export SAFE_PATHS="${SB_DIR}:${MIHOMO_DIR}"
 

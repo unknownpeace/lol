@@ -18,6 +18,8 @@ return view.extend({
 			return gw.api.status().then(function(fresh) {
 				if (fresh && fresh.ok)
 					self.renderBody(host, fresh);
+			}).catch(function(err) {
+				gw.notify('danger', err && err.message ? err.message : String(err));
 			});
 		}
 
@@ -35,6 +37,35 @@ return view.extend({
 
 		var pass1In = E('input', { 'type': 'password', 'class': 'cbi-input-text', 'placeholder': 'Новый пароль (от 4 символов)' });
 		var pass2In = E('input', { 'type': 'password', 'class': 'cbi-input-text', 'placeholder': 'Повторите пароль' });
+
+		function makeCronCard(opts) {
+			return E('div', { 'class': 'gw-card', 'style': opts.marginBottom ? 'margin-bottom: 10px;' : '' }, [
+				E('div', { 'class': 'gw-card-main' }, [
+					opts.title + ' ',
+					gw.badge(opts.enabled ? 'ok' : 'off', opts.enabled ? 'ВКЛ' : 'ВЫКЛ')
+				]),
+				E('div', { 'class': 'gw-card-sub' }, opts.sub),
+				E('div', { 'class': 'gw-toolbar', 'style': 'margin-top: 8px; margin-bottom: 0;' }, [
+					E('button', {
+						'class': 'btn cbi-button ' + (opts.enabled ? 'cbi-button-neutral' : 'cbi-button-positive'),
+						'click': function(ev) {
+							var btn = ev.currentTarget;
+							btn.disabled = true;
+							gw.api.setCron(opts.key, opts.enabled ? 'no' : 'yes').then(function(r) {
+								if (r && r.ok) {
+									gw.notify('info', r.enabled ? opts.onMsg : opts.offMsg);
+									reload();
+								} else {
+									gw.notify('danger', (r && r.error) || opts.errMsg);
+								}
+							}).catch(function(err) {
+								gw.notify('danger', err && err.message ? err.message : String(err));
+							}).finally(function() { btn.disabled = false; });
+						}
+					}, opts.enabled ? opts.btnOff : opts.btnOn)
+				])
+			]);
+		}
 
 		dom.content(host, [
 			E('div', { 'class': 'cbi-section' }, [
@@ -66,6 +97,8 @@ return view.extend({
 								} else {
 									gw.notify('danger', (r && r.error) || 'Ошибка сохранения Telegram');
 								}
+							}).catch(function(err) {
+								gw.notify('danger', err && err.message ? err.message : String(err));
 							}).finally(function() { btn.disabled = false; });
 						}
 					}, 'Сохранить и проверить'),
@@ -77,18 +110,28 @@ return view.extend({
 							gw.api.setTelegram('test', '', '').then(function(r) {
 								if (r && r.ok) gw.notify('info', r.message || 'Тест доставлен');
 								else gw.notify('danger', (r && r.error) || 'Ошибка доставки');
+							}).catch(function(err) {
+								gw.notify('danger', err && err.message ? err.message : String(err));
 							}).finally(function() { btn.disabled = false; });
 						}
 					}, 'Отправить тест') : '',
 					tg.configured ? E('button', {
 						'class': 'btn cbi-button cbi-button-negative',
-						'click': function() {
+						'click': function(ev) {
+							if (!window.confirm('Отключить Telegram-бота и удалить токен из настроек?'))
+								return;
+							var btn = ev.currentTarget;
+							btn.disabled = true;
 							gw.api.setTelegram('disable', '', '').then(function(r) {
 								if (r && r.ok) {
 									gw.notify('info', r.message || 'Отключено');
 									reload();
+								} else {
+									gw.notify('danger', (r && r.error) || 'Ошибка отключения Telegram');
 								}
-							});
+							}).catch(function(err) {
+								gw.notify('danger', err && err.message ? err.message : String(err));
+							}).finally(function() { btn.disabled = false; });
 						}
 					}, 'Отключить бота') : ''
 				].filter(Boolean))
@@ -129,40 +172,29 @@ return view.extend({
 
 				E('div', { 'class': 'cbi-section' }, [
 					E('h3', 'Автономность (Cron)'),
-					E('div', { 'class': 'gw-card', 'style': 'margin-bottom: 10px;' }, [
-						E('div', { 'class': 'gw-card-main' }, [
-							'Watchdog (каждые 5 мин) ',
-							gw.badge(cron.watchdog ? 'ok' : 'off', cron.watchdog ? 'ВКЛ' : 'ВЫКЛ')
-						]),
-						E('div', { 'class': 'gw-card-sub' }, 'Контролирует здоровье служб, Conntrack и маршрут по умолчанию.'),
-						E('div', { 'class': 'gw-toolbar', 'style': 'margin-top: 8px; margin-bottom: 0;' }, [
-							E('button', {
-								'class': 'btn cbi-button ' + (cron.watchdog ? 'cbi-button-neutral' : 'cbi-button-positive'),
-								'click': function() {
-									gw.api.setCron('watchdog', cron.watchdog ? 'no' : 'yes').then(function(r) {
-										if (r && r.ok) reload();
-									});
-								}
-							}, cron.watchdog ? 'Выключить Watchdog' : 'Включить Watchdog')
-						])
-					]),
-					E('div', { 'class': 'gw-card' }, [
-						E('div', { 'class': 'gw-card-main' }, [
-							'Автообновление ядер в 04:00 ',
-							gw.badge(cron.autoupdate ? 'ok' : 'off', cron.autoupdate ? 'ВКЛ' : 'ВЫКЛ')
-						]),
-						E('div', { 'class': 'gw-card-sub' }, 'Ежедневно проверяет свежие релизы ядра, AdGuard Home и панели UI.'),
-						E('div', { 'class': 'gw-toolbar', 'style': 'margin-top: 8px; margin-bottom: 0;' }, [
-							E('button', {
-								'class': 'btn cbi-button ' + (cron.autoupdate ? 'cbi-button-neutral' : 'cbi-button-positive'),
-								'click': function() {
-									gw.api.setCron('autoupdate', cron.autoupdate ? 'no' : 'yes').then(function(r) {
-										if (r && r.ok) reload();
-									});
-								}
-							}, cron.autoupdate ? 'Выключить автообновление' : 'Включить автообновление')
-						])
-					])
+					makeCronCard({
+						key: 'watchdog',
+						title: 'Watchdog (каждые 5 мин)',
+						sub: 'Контролирует здоровье служб, Conntrack и маршрут по умолчанию.',
+						enabled: !!cron.watchdog,
+						marginBottom: true,
+						onMsg: 'Watchdog включён',
+						offMsg: 'Watchdog выключен',
+						errMsg: 'Ошибка изменения Watchdog',
+						btnOn: 'Включить Watchdog',
+						btnOff: 'Выключить Watchdog'
+					}),
+					makeCronCard({
+						key: 'autoupdate',
+						title: 'Автообновление ядер в 04:00',
+						sub: 'Ежедневно проверяет свежие релизы ядра, AdGuard Home и панели UI.',
+						enabled: !!cron.autoupdate,
+						onMsg: 'Автообновление включено',
+						offMsg: 'Автообновление выключено',
+						errMsg: 'Ошибка изменения автообновления',
+						btnOn: 'Включить автообновление',
+						btnOff: 'Выключить автообновление'
+					})
 				])
 			]),
 
@@ -190,6 +222,8 @@ return view.extend({
 								gw.notify('warning', 'Пароли не совпадают');
 								return;
 							}
+							if (!window.confirm('Обновить единый пароль AdGuard Home и Clash API?'))
+								return;
 							var btn = ev.currentTarget;
 							btn.disabled = true;
 							gw.api.setPassword(p1).then(function(r) {
@@ -200,6 +234,8 @@ return view.extend({
 								} else {
 									gw.notify('danger', (r && r.error) || 'Ошибка смены пароля');
 								}
+							}).catch(function(err) {
+								gw.notify('danger', err && err.message ? err.message : String(err));
 							}).finally(function() { btn.disabled = false; });
 						}
 					}, 'Сменить пароль')

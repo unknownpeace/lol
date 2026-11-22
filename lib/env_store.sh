@@ -9,21 +9,77 @@ escape_single_quotes() {
     return 0
 }
 
-# Безопасный парсер .env и answers файлов (защита от Command Injection и порчи паролей с $)
+# Маскировка секретных токенов в URL подписки для вывода в статус/терминал
+mask_sub_url() {
+    _mu_raw="${1:-}"
+    printf "%s" "$_mu_raw" | awk '{
+        if ($0 ~ /^https?:\/\/[^\/]+\/.+/) {
+            match($0, /^https?:\/\/[^\/]+/)
+            base = substr($0, RSTART, RLENGTH)
+            rest = substr($0, RLENGTH + 1)
+            if (length(rest) > 8) {
+                print base "/••••" substr(rest, length(rest) - 3)
+            } else {
+                print base "/••••"
+            }
+        } else {
+            print $0
+        }
+    }'
+    return 0
+}
+
+# Безопасный парсер .env и answers файлов (защита от Command Injection, без записи на диск)
 parse_env_file_safely() {
     _env_target="$1"
     [ -f "$_env_target" ] || return 0
+    _env_cr=$(printf '\r')
+    _env_sq_esc="'\\''"
     while IFS= read -r _env_line || [ -n "$_env_line" ]; do
-        _env_line=$(printf "%s" "$_env_line" | tr -d '\r')
+        case "$_env_line" in
+            *"$_env_cr"*) _env_line="${_env_line%"$_env_cr"}" ;;
+        esac
+        while :; do
+            case "$_env_line" in
+                " "*|"	"*) _env_line="${_env_line#?}" ;;
+                *) break ;;
+            esac
+        done
         case "$_env_line" in
             "#"*|"") continue ;;
             [A-Za-z_][A-Za-z0-9_]*=*)
                 _env_k="${_env_line%%=*}"
                 _env_v="${_env_line#*=}"
                 case "$_env_v" in
-                    "'"*"'"|"\""*"\"")
+                    "'"*"'")
                         _env_v="${_env_v#?}"
                         _env_v="${_env_v%?}"
+                        case "$_env_v" in
+                            *"$_env_sq_esc"*)
+                                _env_res=""
+                                while :; do
+                                    case "$_env_v" in
+                                        *"$_env_sq_esc"*)
+                                            _env_res="${_env_res}${_env_v%%"$_env_sq_esc"*}'"
+                                            _env_v="${_env_v#*"$_env_sq_esc"}"
+                                            ;;
+                                        *)
+                                            _env_v="${_env_res}${_env_v}"
+                                            break
+                                            ;;
+                                    esac
+                                done
+                                ;;
+                        esac
+                        ;;
+                    "\""*"\"")
+                        _env_v="${_env_v#?}"
+                        _env_v="${_env_v%?}"
+                        case "$_env_v" in
+                            *\\*)
+                                _env_v=$(printf "%s" "$_env_v" | sed 's/\\"/"/g; s/\\\\/\\/g')
+                                ;;
+                        esac
                         ;;
                 esac
                 export "${_env_k}=${_env_v}"
@@ -33,20 +89,15 @@ parse_env_file_safely() {
     return 0
 }
 
-# Чтение и сохранение параметров сетевого шлюза (gateway.env) и Homelab (homelab.env — единый источник истины)
+# Чтение и сохранение параметров сетевого шлюза (gateway.env) и Homelab (homelab.env — строго read-only)
 load_gateway_env() {
     if [ -f "$SB_ENV" ]; then
-        sed -i 's/\r$//' "$SB_ENV" 2>/dev/null || true
         parse_env_file_safely "$SB_ENV"
     fi
-    # Миграция устаревшего дубля /etc/sing-box/homelab/homelab.env в единый канонический /etc/sing-box/homelab.env
-    if [ ! -f "$HOMELAB_ENV" ] && [ -f "${HOMELAB_DIR}/homelab.env" ] && [ ! -L "${HOMELAB_DIR}/homelab.env" ]; then
-        mv -f "${HOMELAB_DIR}/homelab.env" "$HOMELAB_ENV" 2>/dev/null || cp -f "${HOMELAB_DIR}/homelab.env" "$HOMELAB_ENV" 2>/dev/null || true
-        ln -sf "$HOMELAB_ENV" "${HOMELAB_DIR}/homelab.env" 2>/dev/null || true
-    fi
     if [ -f "$HOMELAB_ENV" ]; then
-        sed -i 's/\r$//' "$HOMELAB_ENV" 2>/dev/null || true
         parse_env_file_safely "$HOMELAB_ENV"
+    elif [ -f "${HOMELAB_DIR}/homelab.env" ]; then
+        parse_env_file_safely "${HOMELAB_DIR}/homelab.env"
     fi
 
     if [ -z "${GW_IP:-}" ] && [ -f "$SB_CONF" ] && command -v jq >/dev/null 2>&1; then
@@ -95,19 +146,14 @@ load_gateway_env() {
     [ -z "${DUCKDNS_TOKEN:-}" ] && DUCKDNS_TOKEN=""
     STORAGE_MUSIC="${STORAGE_ROOT}/Music"
     STORAGE_VIDEOS="${STORAGE_ROOT}/Videos"
-    STORAGE_VIDEOS_MOVIES="${STORAGE_VIDEOS}/Movies"
-    STORAGE_VIDEOS_SERIES="${STORAGE_VIDEOS}/Series"
     STORAGE_DOWNLOADS="${STORAGE_ROOT}/Downloads"
-    STORAGE_DL_MUSIC="${STORAGE_DOWNLOADS}/Music"
-    STORAGE_DL_VIDEOS="${STORAGE_DOWNLOADS}/Videos"
-    STORAGE_DL_OTHER="${STORAGE_DOWNLOADS}/Other"
     STORAGE_INCOMPLETE="${STORAGE_DOWNLOADS}/Incomplete"
     STORAGE_INC_TORRENTS="${STORAGE_INCOMPLETE}/torrents"
     STORAGE_INC_YTDLP="${STORAGE_INCOMPLETE}/ytdlp"
     STORAGE_BACKUPS="${STORAGE_ROOT}/Backups"
+    STORAGE_SHARED="${STORAGE_ROOT}/Shared"
     STORAGE_REPOS="${STORAGE_ROOT}/Git-Repos"
     STORAGE_CODE="${STORAGE_ROOT}/Workspace"
-    STORAGE_PERSONAL="${STORAGE_ROOT}/Personal"
     return 0
 }
 
@@ -180,5 +226,3 @@ HL_ENV_EOF
     umask 022
     return 0
 }
-
-# Умная очистка и нормализация домена (URL, @telegram, *.site.com, IDN кириллица -> punycode, защита от IP)

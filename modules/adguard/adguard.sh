@@ -1,7 +1,16 @@
 #!/bin/sh
 get_agh_admin_user() {
-    if [ -f "${AGH_CONF:-/etc/AdGuardHome/AdGuardHome.yaml}" ]; then
-        sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "${AGH_CONF:-/etc/AdGuardHome/AdGuardHome.yaml}" 2>/dev/null | head -n 1 | tr -d ' \t\r\n"' || true
+    _agh_f="${AGH_CONF:-/etc/AdGuardHome/AdGuardHome.yaml}"
+    if [ -f "$_agh_f" ]; then
+        awk '
+            /^users:/ { in_u=1; next }
+            in_u && /^[A-Za-z0-9_]+:/ { in_u=0 }
+            in_u && /^[[:space:]]*-[[:space:]]*name:/ {
+                sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "");
+                gsub(/^["'\'' ]+|["'\'' \r\n]+$/, "");
+                print; exit
+            }
+        ' "$_agh_f" 2>/dev/null || true
     fi
     return 0
 }
@@ -35,11 +44,11 @@ sync_agh_homelab_rewrites() {
     fi
 
     if is_openwrt 2>/dev/null; then
-        DOMS_STR="adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan"
+        DOMS_STR="gateway.lan adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan"
     else
-        DOMS_STR="*.lan ca.lan gateway.lan adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan vaultwarden.lan forgejo.lan downloads.lan torrents.lan code.lan"
+        DOMS_STR="${HOMELAB_LAN_DOMAINS}"
         if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-            DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} ${SSL_DOMAIN} gateway.${SSL_DOMAIN} vaultwarden.${SSL_DOMAIN} forgejo.${SSL_DOMAIN} downloads.${SSL_DOMAIN} torrents.${SSL_DOMAIN} code.${SSL_DOMAIN} adguard.${SSL_DOMAIN} zashboard.${SSL_DOMAIN} singbox.${SSL_DOMAIN} mihomo.${SSL_DOMAIN} panel.${SSL_DOMAIN}"
+            DOMS_STR="${DOMS_STR} *.${SSL_DOMAIN} $(emit_homelab_le_domains "$SSL_DOMAIN")"
         fi
     fi
 
@@ -61,11 +70,26 @@ sync_agh_homelab_rewrites() {
             line = $0
             sub(/^filtering:[[:space:]]*\{[[:space:]]*/, "", line)
             sub(/\}[[:space:]]*$/, "", line)
-            n = split(line, kv, ",")
             has_prot = 0; has_filt = 0
-            for (i = 1; i <= n; i++) {
+            depth = 0; start = 1; n_kv = 0
+            len = length(line)
+            for (i = 1; i <= len; i++) {
+                ch = substr(line, i, 1)
+                if (ch == "[" || ch == "{") depth++
+                else if (ch == "]" || ch == "}") depth--
+                else if (ch == "," && depth == 0) {
+                    n_kv++
+                    kv[n_kv] = substr(line, start, i - start)
+                    start = i + 1
+                }
+            }
+            if (start <= len) {
+                n_kv++
+                kv[n_kv] = substr(line, start)
+            }
+            for (i = 1; i <= n_kv; i++) {
                 gsub(/^[[:space:]]+|[[:space:]]+$/, "", kv[i])
-                if (kv[i] != "") {
+                if (kv[i] != "" && kv[i] !~ /^rewrites:/) {
                     print "  " kv[i]
                     if (kv[i] ~ /^protection_enabled:/) has_prot = 1
                     if (kv[i] ~ /^filtering_enabled:/) has_filt = 1
@@ -151,5 +175,3 @@ update_agh_gateway_ip() {
     fi
     return 0
 }
-
-# Безопасная очистка и экранирование ввода пользователя (от CRLF, кавычек и мусора буфера обмена)

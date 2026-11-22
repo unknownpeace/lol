@@ -1,17 +1,17 @@
 name: "🐛 Bug Report"
-description: "Report an issue on Alpine Linux / OpenRC"
+description: "Report an issue on Alpine Linux (3.23–3.24+) or OpenWrt (>= 25.12.6)"
 title: "[Bug]: "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Please sanitize any passwords, DuckDNS tokens, or private subscription URLs before submitting.
+        Please sanitize any passwords, DuckDNS tokens, Telegram tokens, or private subscription URLs before submitting.
   - type: input
-    id: alpine_version
+    id: platform_version
     attributes:
-      label: "Alpine Linux version & hardware"
-      placeholder: "e.g., Alpine Linux 3.24.4 x86_64 on Z83II / N100 / VM"
+      label: "Platform, OS version & hardware"
+      placeholder: "e.g., Alpine Linux 3.24.4 x86_64 (Z83II / N100) or OpenWrt 25.12.6 aarch64"
     validations:
       required: true
   - type: dropdown
@@ -23,6 +23,21 @@ body:
         - "Sing-Box Extended + MetaCubeXD"
         - "Mihomo + Zashboard"
         - "Mihomo + MetaCubeXD"
+    validations:
+      required: true
+  - type: dropdown
+    id: interface_area
+    attributes:
+      label: "Affected area"
+      options:
+        - "Routing Core / DNS / AdGuard Home"
+        - "Firewall / Kill-Switch / Networking"
+        - "Alpine Web Dashboard (:8095) / ttyd Console (:8096)"
+        - "OpenWrt LuCI App (luci-app-gateway / rpcd)"
+        - "Homelab Services / Caddy / SSL"
+        - "LXC 7.0 Container Studio"
+        - "LUKS2 Storage / Backups"
+        - "CLI / TUI / Installer"
     validations:
       required: true
   - type: textarea
@@ -37,4 +52,4 @@ body:
     attributes:
       label: "Diagnostics (`gw check` / `gw status` / `gw logs core 30`)"
       render: shell
-      placeholder: "Paste sanitized output from `gw check` or service logs here."
+      placeholder: "Paste sanitized output from `gw check`, `gw status`, or service logs here."

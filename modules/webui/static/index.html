@@ -2,77 +2,322 @@
 <html lang="ru" data-theme="dark">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Gateway &amp; Homelab — Панель управления Alpine</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="stylesheet" href="/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#07090e">
+  <title>Gateway &amp; Homelab — Панель управления</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2">
+  <link rel="stylesheet" href="/style.css?v=2">
 </head>
 <body>
+  <!-- Встроенный SVG-спрайт (100% офлайн) -->
+  <svg xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+    <defs>
+      <symbol id="i-overview" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="7" height="9" rx="1.5"/>
+        <rect x="14" y="3" width="7" height="5" rx="1.5"/>
+        <rect x="14" y="12" width="7" height="9" rx="1.5"/>
+        <rect x="3" y="16" width="7" height="5" rx="1.5"/>
+      </symbol>
+      <symbol id="i-network" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="14" width="20" height="7" rx="2"/>
+        <path d="M6 14V9a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v5"/>
+        <path d="M9 17.5h.01M13 17.5h.01M17 17.5h2"/>
+        <path d="M12 3v4"/>
+      </symbol>
+      <symbol id="i-proxies" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9"/>
+        <path d="M3.6 9h16.8M3.6 15h16.8"/>
+        <path d="M12 3a13.5 13.5 0 0 1 0 18 13.5 13.5 0 0 1 0-18Z"/>
+      </symbol>
+      <symbol id="i-lxc" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2.5 20.5 7v10L12 21.5 3.5 17V7L12 2.5Z"/>
+        <path d="M12 21.5V12m0 0L20.5 7M12 12 3.5 7"/>
+      </symbol>
+      <symbol id="i-storage" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="6" rx="1.5"/>
+        <rect x="3" y="14" width="18" height="6" rx="1.5"/>
+        <path d="M7 7h.01M7 17h.01M11 7h6M11 17h6"/>
+      </symbol>
+      <symbol id="i-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 17l6-6-6-6"/>
+        <path d="M12 19h8"/>
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="11" cy="11" r="7.5"/>
+        <path d="m20.5 20.5-4.3-4.3"/>
+      </symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+        <path d="M21 3v6h-6"/>
+      </symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="4"/>
+        <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32 1.41-1.41"/>
+      </symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>
+      </symbol>
+      <symbol id="i-ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 4h6v6"/>
+        <path d="M10 14 20 4"/>
+        <path d="M20 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5"/>
+      </symbol>
+      <symbol id="i-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+      </symbol>
+      <symbol id="i-stethoscope" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4.5 3v6a4.5 4.5 0 0 0 9 0V3"/>
+        <path d="M9 13.5V17a4 4 0 0 0 8 0v-3"/>
+        <circle cx="19" cy="11" r="2"/>
+        <path d="M3 3h3M12 3h3"/>
+      </symbol>
+      <symbol id="i-zap" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z"/>
+      </symbol>
+      <symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2v10"/>
+        <path d="M18.4 6.6a9 9 0 1 1-12.8 0"/>
+      </symbol>
+      <symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <polygon points="6 4 20 12 6 20 6 4"/>
+      </symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="5" y="5" width="14" height="14" rx="2"/>
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 5v14M5 12h14"/>
+      </symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m-9 0v14a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V6"/>
+      </symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="9" width="12" height="12" rx="2"/>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M20 6 9 17l-5-5"/>
+      </symbol>
+      <symbol id="i-x" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </symbol>
+      <symbol id="i-more" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="1.2"/>
+        <circle cx="19" cy="12" r="1.2"/>
+        <circle cx="5" cy="12" r="1.2"/>
+      </symbol>
+      <symbol id="i-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="11" width="16" height="10" rx="2"/>
+        <path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+      </symbol>
+      <symbol id="i-unlock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="11" width="16" height="10" rx="2"/>
+        <path d="M8 11V7a4 4 0 0 1 7.6-1.7"/>
+      </symbol>
+      <symbol id="i-eject" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 5 5 14h14L12 5Z"/>
+        <path d="M5 18h14"/>
+      </symbol>
+      <symbol id="i-key" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="7.5" cy="15.5" r="4.5"/>
+        <path d="m21 2-9.6 9.6M16 7l3 3"/>
+      </symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2 20 6v6c0 5.5-3.5 9.8-8 11-4.5-1.2-8-5.5-8-11V6l8-4Z"/>
+      </symbol>
+      <symbol id="i-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="16" rx="2"/>
+        <path d="m7 15 3-3-3-3M12 15h5"/>
+      </symbol>
+      <symbol id="i-camera" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 8h3l2-3h6l2 3h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z"/>
+        <circle cx="12" cy="14" r="3.5"/>
+      </symbol>
+      <symbol id="i-rollback" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12a9 9 0 1 0 3-6.7L3 8"/>
+        <path d="M3 3v5h5"/>
+      </symbol>
+      <symbol id="i-clone" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="8" y="8" width="13" height="13" rx="2"/>
+        <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+      </symbol>
+      <symbol id="i-send" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7Z"/>
+      </symbol>
+      <symbol id="i-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2 12s3.8-7 10-7 10 7 10 7-3.8 7-10 7-10-7-10-7Z"/>
+        <circle cx="12" cy="12" r="3"/>
+      </symbol>
+      <symbol id="i-fullscreen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+      </symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 6h16M4 12h16M4 18h16"/>
+      </symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 21v-7m0-4V3m8 18v-9m0-4V3m8 18v-5m0-4V3M2 14h4m4-6h4m4 8h4"/>
+      </symbol>
+      <symbol id="i-save" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/>
+        <path d="M17 21v-8H7v8M7 3v5h8"/>
+      </symbol>
+      <symbol id="i-archive" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="4" width="18" height="4" rx="1"/>
+        <path d="M5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8m-9 4h4"/>
+      </symbol>
+      <symbol id="i-wrench" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-8 8l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 8-8l-3.8 3.8Z"/>
+      </symbol>
+      <symbol id="i-sparkles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"/>
+        <path d="M19 16v4m2-2h-4"/>
+      </symbol>
+      <symbol id="i-arrow-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 12h14m-6-6 6 6-6 6"/>
+      </symbol>
+      <symbol id="i-lan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="5" width="16" height="11" rx="2"/>
+        <path d="M2 19h20"/>
+      </symbol>
+    </defs>
+  </svg>
+
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand-wrap">
-        <img class="brand-logo" src="/favicon.svg" alt="GW">
-        <div>
-          <div class="brand-title">Gateway &amp; Homelab</div>
+        <img class="brand-logo" src="/favicon.svg?v=2" alt="GW">
+        <div class="brand-copy">
+          <div class="brand-title-row">
+            <span class="brand-title">Gateway &amp; Homelab</span>
+            <span class="mob-live-pill" id="mob-live-pill" aria-hidden="true"></span>
+          </div>
           <div class="brand-sub" id="hdr-sub">Загрузка статуса системы...</div>
         </div>
+        <div class="hdr-badges" id="hdr-badges"></div>
       </div>
 
-      <div class="hdr-badges" id="hdr-badges"></div>
+      <button class="cmd-trigger" id="btn-cmd-palette" type="button" aria-label="Быстрый поиск и команды (Ctrl+K)">
+        <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg>
+        <span class="cmd-trigger-text">Команды, LXC, домены...</span>
+        <kbd class="kbd-hint">Ctrl+K</kbd>
+      </button>
 
       <div class="hdr-actions">
-        <a class="hdr-link" id="lnk-core-ui" href="#" target="_blank" rel="noopener" style="display:none">Панель ядра ↗</a>
-        <a class="hdr-link" id="lnk-agh" href="#" target="_blank" rel="noopener" style="display:none">AdGuard Home ↗</a>
-        <a class="hdr-link" id="lnk-ca" href="#" target="_blank" rel="noopener" style="display:none">PKI CA ↗</a>
-        <button class="btn btn-icon" id="btn-theme" type="button" title="Сменить тему">🌓</button>
-        <button class="btn btn-secondary btn-sm" id="btn-refresh" type="button">↻ Обновить</button>
+        <div class="hdr-ext-group">
+          <a class="hdr-link" id="lnk-core-ui" href="#" target="_blank" rel="noopener" style="display:none">
+            <span>Панель ядра</span>
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-ext"/></svg>
+          </a>
+          <a class="hdr-link" id="lnk-agh" href="#" target="_blank" rel="noopener" style="display:none">
+            <span>AdGuard</span>
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-ext"/></svg>
+          </a>
+          <a class="hdr-link" id="lnk-ca" href="#" target="_blank" rel="noopener" style="display:none">
+            <span>PKI CA</span>
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-ext"/></svg>
+          </a>
+        </div>
+        <button class="btn btn-icon" id="btn-theme" type="button" title="Сменить тему" aria-label="Сменить тему">
+          <svg class="ic" id="theme-icon" aria-hidden="true"><use href="#i-sun"/></svg>
+        </button>
+        <button class="btn btn-secondary btn-sm" id="btn-refresh" type="button" aria-label="Обновить статус">
+          <svg class="ic" id="refresh-icon" aria-hidden="true"><use href="#i-refresh"/></svg>
+          <span class="hide-xs">Обновить</span>
+        </button>
       </div>
     </div>
 
     <nav class="tabs" role="tablist" aria-label="Разделы панели">
-      <button class="tab-btn active" data-tab="overview" role="tab" type="button">Обзор и Homelab</button>
-      <button class="tab-btn" data-tab="network" role="tab" type="button">Ядро и сеть</button>
-      <button class="tab-btn" data-tab="proxies" role="tab" type="button">Прокси и маршруты</button>
-      <button class="tab-btn" data-tab="lxc" role="tab" type="button">Контейнеры LXC <span class="tab-pill" id="tab-lxc-count" style="display:none"></span></button>
-      <button class="tab-btn" data-tab="storage" role="tab" type="button">Диск и SSL</button>
-      <button class="tab-btn" data-tab="system" role="tab" type="button">Система и логи</button>
+      <button class="tab-btn active" id="tab-btn-overview" data-tab="overview" role="tab" aria-selected="true" aria-controls="tab-overview" tabindex="0" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#i-overview"/></svg>
+        <span>Обзор и Homelab</span>
+      </button>
+      <button class="tab-btn" id="tab-btn-network" data-tab="network" role="tab" aria-selected="false" aria-controls="tab-network" tabindex="-1" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#i-network"/></svg>
+        <span>Ядро и сеть</span>
+      </button>
+      <button class="tab-btn" id="tab-btn-proxies" data-tab="proxies" role="tab" aria-selected="false" aria-controls="tab-proxies" tabindex="-1" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#i-proxies"/></svg>
+        <span>Прокси и маршруты</span>
+      </button>
+      <button class="tab-btn" id="tab-btn-lxc" data-tab="lxc" role="tab" aria-selected="false" aria-controls="tab-lxc" tabindex="-1" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#i-lxc"/></svg>
+        <span>Контейнеры LXC</span>
+        <span class="tab-pill" id="tab-lxc-count" style="display:none"></span>
+      </button>
+      <button class="tab-btn" id="tab-btn-storage" data-tab="storage" role="tab" aria-selected="false" aria-controls="tab-storage" tabindex="-1" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#i-storage"/></svg>
+        <span>Диск и SSL</span>
+      </button>
+      <button class="tab-btn" id="tab-btn-system" data-tab="system" role="tab" aria-selected="false" aria-controls="tab-system" tabindex="-1" type="button">
+        <svg class="ic" aria-hidden="true"><use href="#i-system"/></svg>
+        <span>Система и логи</span>
+      </button>
     </nav>
   </header>
 
   <main class="container">
     <!-- TAB 1: Обзор и Homelab -->
-    <section class="tab-panel active" id="tab-overview">
+    <section class="tab-panel active" id="tab-overview" role="tabpanel" aria-labelledby="tab-btn-overview">
+      <!-- Чеклист первого запуска (скрывается после завершения или по кнопке) -->
+      <div class="card onboarding-card" id="ov-onboarding" style="display:none"></div>
+
+      <!-- Живая топология трафика (4 узла) -->
+      <div class="card pipeline-card" id="ov-pipeline"></div>
+
+      <!-- 4 равные KPI-карточки со спарклайнами и радиальными шкалами -->
       <div class="kpi-grid" id="ov-kpis"></div>
 
       <div class="card">
         <div class="card-head">
-          <h2>Быстрые действия</h2>
-          <span class="muted" id="ov-uptime"></span>
+          <div class="card-title-group">
+            <h2>Быстрые действия и диагностика</h2>
+          </div>
+          <span class="muted small tabular-nums" id="ov-uptime"></span>
         </div>
         <div class="btn-row">
-          <button class="btn btn-primary" id="btn-trace" type="button">📡 Trace &amp; Ping</button>
-          <button class="btn btn-secondary" id="btn-restart-gw" type="button">🔄 Перезапуск шлюза</button>
-          <button class="btn btn-secondary" id="btn-doctor" type="button">🩺 Doctor (автолечение)</button>
-          <button class="btn btn-secondary" id="btn-ov-apply" type="button">⚡ Применить конфиг ядра</button>
-          <button class="btn btn-secondary" id="btn-ov-go-lxc" type="button">📦 Контейнеры LXC</button>
+          <button class="btn btn-primary" id="btn-trace" type="button">
+            <svg class="ic" aria-hidden="true"><use href="#i-activity"/></svg>
+            <span>Trace &amp; Ping</span>
+          </button>
+          <button class="btn btn-secondary" id="btn-doctor" type="button">
+            <svg class="ic" aria-hidden="true"><use href="#i-stethoscope"/></svg>
+            <span>Doctor (автолечение)</span>
+          </button>
+          <button class="btn btn-secondary" id="btn-restart-gw" type="button">
+            <svg class="ic" aria-hidden="true"><use href="#i-power"/></svg>
+            <span>Перезапуск шлюза</span>
+          </button>
+          <button class="btn btn-secondary" id="btn-ov-apply" type="button">
+            <svg class="ic" aria-hidden="true"><use href="#i-zap"/></svg>
+            <span>Применить конфиг ядра</span>
+          </button>
+          <button class="btn btn-secondary" id="btn-ov-go-lxc" type="button">
+            <svg class="ic" aria-hidden="true"><use href="#i-lxc"/></svg>
+            <span>Контейнеры LXC</span>
+          </button>
         </div>
         <div id="trace-box" class="trace-box" style="display:none"></div>
       </div>
 
       <div class="card">
         <div class="card-head">
-          <h2>Модули Homelab</h2>
-          <span class="muted">Управление сервисами OpenRC и обратным прокси Caddy</span>
+          <div>
+            <h2>Модули Homelab</h2>
+            <div class="muted small">Управление локальными сервисами OpenRC и обратным прокси Caddy</div>
+          </div>
         </div>
-        <div class="homelab-grid" id="ov-homelab-grid"></div>
+        <div class="homelab-dock" id="ov-homelab-grid"></div>
       </div>
 
       <div class="card">
         <div class="card-head">
           <h2>Активные маршруты балансировщика ядра</h2>
           <div class="btn-row-compact">
-            <input class="input input-sm" id="inp-groups-filter" type="text" placeholder="Поиск группы или узла...">
-            <span class="muted" id="ov-groups-meta"></span>
+            <input class="input input-sm" id="inp-groups-filter" type="text" placeholder="Поиск группы или узла..." aria-label="Поиск группы маршрутизации или узла">
+            <span class="muted small tabular-nums" id="ov-groups-meta"></span>
           </div>
         </div>
         <div class="table-wrap">
@@ -92,25 +337,46 @@
     </section>
 
     <!-- TAB 2: Ядро и сеть -->
-    <section class="tab-panel" id="tab-network">
+    <section class="tab-panel" id="tab-network" role="tabpanel" aria-labelledby="tab-btn-network" hidden>
       <div class="two-col">
         <div class="card">
           <div class="card-head">
-            <h2>Ядро маршрутизации и панель ядра</h2>
+            <div class="card-title-group">
+              <h2>Ядро маршрутизации и панель ядра</h2>
+              <button class="hint-dot" type="button" data-hint="Ядро перехватывает трафик через виртуальный интерфейс TUN и направляет домены в прокси или напрямую без задержек." aria-label="Справка о ядре маршрутизации">?</button>
+            </div>
           </div>
           <div class="info-list" id="net-core-info"></div>
+
           <div class="field-label">Активное ядро</div>
-          <div class="seg-row">
-            <button class="btn seg-btn" id="btn-core-mihomo" type="button">Mihomo (Meta)</button>
-            <button class="btn seg-btn" id="btn-core-singbox" type="button">Sing-Box Extended</button>
+          <div class="seg-cards">
+            <button class="seg-card" id="btn-core-mihomo" type="button">
+              <div class="seg-card-title">Mihomo (Meta)</div>
+              <div class="seg-card-sub">YAML &bull; .mrs правила</div>
+            </button>
+            <button class="seg-card" id="btn-core-singbox" type="button">
+              <div class="seg-card-title">Sing-Box Extended</div>
+              <div class="seg-card-sub">JSON &bull; WARP MASQUE</div>
+            </button>
           </div>
+
           <div class="field-label" style="margin-top:1rem">Веб-интерфейс ядра (:9090/ui)</div>
-          <div class="seg-row">
-            <button class="btn seg-btn" id="btn-ui-metacubexd" type="button">MetaCubeXD</button>
-            <button class="btn seg-btn" id="btn-ui-zashboard" type="button">Zashboard</button>
+          <div class="seg-cards">
+            <button class="seg-card" id="btn-ui-metacubexd" type="button">
+              <div class="seg-card-title">MetaCubeXD</div>
+              <div class="seg-card-sub">Классический Clash UI</div>
+            </button>
+            <button class="seg-card" id="btn-ui-zashboard" type="button">
+              <div class="seg-card-title">Zashboard</div>
+              <div class="seg-card-sub">Быстрый современный UI</div>
+            </button>
           </div>
+
           <div class="btn-row" style="margin-top:1rem">
-            <button class="btn btn-primary" id="btn-net-apply" type="button">⚡ Пересобрать конфиг и применить ядро</button>
+            <button class="btn btn-primary" id="btn-net-apply" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-zap"/></svg>
+              <span>Пересобрать конфиг и применить ядро</span>
+            </button>
           </div>
         </div>
 
@@ -119,26 +385,35 @@
             <h2>Сеть LAN и аппаратный Kill-Switch</h2>
           </div>
           <div class="switch-row">
-            <div>
-              <div class="switch-title">Аппаратный Kill-Switch (nftables)</div>
-              <div class="muted">Блокировка прямого исходящего трафика мимо TUN-туннеля</div>
+            <div class="switch-copy">
+              <div class="switch-title-row">
+                <span class="switch-title">Аппаратный Kill-Switch (nftables)</span>
+                <button class="hint-dot" type="button" data-hint="Правило nftables блокирует любой прямой исходящий трафик мимо TUN-туннеля, защищая от утечек при перезапуске прокси-ядра." aria-label="Справка о Kill-Switch">?</button>
+              </div>
+              <div class="muted small" id="ks-desc">Блокировка прямого исходящего трафика мимо TUN-туннеля</div>
             </div>
-            <button class="btn btn-secondary" id="btn-ks-toggle" type="button">—</button>
+            <button class="switch-pill" id="btn-ks-toggle" type="button" role="switch" aria-checked="false" aria-label="Аппаратный Kill-Switch">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-state" id="ks-state-label">Выкл</span>
+            </button>
           </div>
 
           <hr class="sep">
 
-          <form id="frm-network" class="form-grid">
+          <form id="frm-network" class="form-grid" novalidate>
             <div>
               <label class="field-label" for="inp-lan-ip">IP-адрес сервера (LAN IP)</label>
-              <input class="input" id="inp-lan-ip" type="text" placeholder="192.168.1.82">
+              <input class="input mono" id="inp-lan-ip" type="text" placeholder="192.168.1.82" inputmode="decimal">
             </div>
             <div>
               <label class="field-label" for="inp-gw-ip">IP основного роутера (Gateway IP)</label>
-              <input class="input" id="inp-gw-ip" type="text" placeholder="192.168.1.1">
+              <input class="input mono" id="inp-gw-ip" type="text" placeholder="192.168.1.1" inputmode="decimal">
             </div>
             <div class="form-actions">
-              <button class="btn btn-primary" type="submit">💾 Сохранить IP-адреса</button>
+              <button class="btn btn-primary" type="submit">
+                <svg class="ic" aria-hidden="true"><use href="#i-save"/></svg>
+                <span>Сохранить IP-адреса</span>
+              </button>
             </div>
           </form>
         </div>
@@ -146,9 +421,16 @@
 
       <div class="card">
         <div class="card-head">
-          <h2>AdGuard Home DNS и встроенный DHCP-сервер</h2>
-          <div class="btn-row-compact">
-            <button class="btn btn-secondary" id="btn-dhcp-toggle" type="button">—</button>
+          <div class="card-title-group">
+            <h2>AdGuard Home DNS и встроенный DHCP-сервер</h2>
+            <button class="hint-dot" type="button" data-hint="DHCP Sidecar: адреса раздаёт основной роутер, указывая этот сервер как DNS и шлюз. Встроенный DHCP нужен только при полном переносе раздачи IP на шлюз." aria-label="Справка о DHCP Sidecar">?</button>
+          </div>
+          <div class="switch-inline">
+            <span class="muted small">Встроенный DHCP</span>
+            <button class="switch-pill" id="btn-dhcp-toggle" type="button" role="switch" aria-checked="false" aria-label="Встроенный DHCP AdGuard Home">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-state" id="dhcp-state-label">Выкл</span>
+            </button>
           </div>
         </div>
         <div class="info-inline" id="net-dhcp-info"></div>
@@ -169,15 +451,24 @@
     </section>
 
     <!-- TAB 3: Прокси и маршруты -->
-    <section class="tab-panel" id="tab-proxies">
-      <div class="banner-warn">
-        <span>После изменения подписок, URI-ключей, доменов или правил устройств примените конфигурацию ядра:</span>
-        <button class="btn btn-primary btn-sm" id="btn-px-apply" type="button">⚡ Применить конфиг ядра</button>
+    <section class="tab-panel" id="tab-proxies" role="tabpanel" aria-labelledby="tab-btn-proxies" hidden>
+      <div class="apply-bar" id="px-apply-bar">
+        <div class="apply-bar-msg">
+          <span class="dot-status" id="px-apply-dot"></span>
+          <span id="px-apply-text">Конфигурация ядра актуальна — изменения сразу можно применять здесь.</span>
+        </div>
+        <button class="btn btn-secondary btn-sm" id="btn-px-apply" type="button">
+          <svg class="ic" aria-hidden="true"><use href="#i-zap"/></svg>
+          <span>Применить конфиг ядра</span>
+        </button>
       </div>
 
       <div class="card">
         <div class="card-head">
-          <h2>Domain X-Ray — проверка маршрутизации домена</h2>
+          <div class="card-title-group">
+            <h2>Domain X-Ray — проверка маршрутизации домена</h2>
+            <button class="hint-dot" type="button" data-hint="Показывает, как AdGuard DNS и ядро обрабатывают конкретный домен: через Fake-IP (198.18.0.x) в прокси, напрямую (Direct) или в блокировку." aria-label="Справка о Domain X-Ray">?</button>
+          </div>
           <div class="btn-row-compact">
             <button class="btn btn-xs" data-inspect-preset="chatgpt.com" type="button">chatgpt.com</button>
             <button class="btn btn-xs" data-inspect-preset="youtube.com" type="button">youtube.com</button>
@@ -186,53 +477,57 @@
           </div>
         </div>
         <form id="frm-inspect" class="inline-form">
-          <input class="input" id="inp-inspect-domain" type="text" placeholder="Например: chatgpt.com или ya.ru">
-          <button class="btn btn-primary" type="submit">🔍 Проверить домен</button>
+          <input class="input" id="inp-inspect-domain" type="text" placeholder="Например: chatgpt.com или ya.ru" aria-label="Домен для проверки маршрута">
+          <button class="btn btn-primary" type="submit">
+            <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg>
+            <span>Проверить домен</span>
+          </button>
         </form>
         <div id="inspect-result" class="trace-box" style="display:none"></div>
       </div>
 
-      <div class="two-col">
-        <div class="card">
-          <div class="card-head">
+      <!-- Последовательные Слоты 1 -> 2 -> 3 -->
+      <div class="card">
+        <div class="card-head">
+          <div class="card-title-group">
             <h2>Слот 1: HTTP/HTTPS-подписки</h2>
             <span class="badge" id="px-sub-badge">0 ссылок</span>
           </div>
-          <form id="frm-sub">
+          <button class="btn btn-xs" id="btn-sub-reveal" type="button" aria-expanded="false">
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-eye"/></svg>
+            <span>Показать / редактировать</span>
+          </button>
+        </div>
+        <form id="frm-sub">
+          <div id="px-sub-masked" class="sub-masked-box"></div>
+          <div id="px-sub-editor" style="display:none">
             <label class="field-label" for="inp-sub-urls">Ссылки на подписки (по одной на строку или через пробел)</label>
             <textarea class="input textarea" id="inp-sub-urls" rows="3" placeholder="https://example.com/sub/..."></textarea>
-            <label class="check-row">
-              <input id="chk-allow-ru" type="checkbox">
-              <span>Разрешить российские узлы / белые списки (ALLOW_RU_NODES)</span>
-            </label>
-            <div class="btn-row" style="margin-top:0.75rem">
-              <button class="btn btn-primary" type="submit">💾 Сохранить подписки</button>
-            </div>
-          </form>
-        </div>
-
-        <div class="card">
-          <div class="card-head">
-            <h2>Слот 3: Amnezia WARP 2.0</h2>
-            <span class="badge" id="px-warp-badge">—</span>
           </div>
-          <p class="muted">Аварийный резервный WARP WireGuard+AmneziaWG туннель для разблокировки AI и обхода сбоев.</p>
-          <label class="field-label" for="inp-warp-lic">Лицензионный ключ WARP+ (необязательно)</label>
-          <input class="input" id="inp-warp-lic" type="text" placeholder="Оставьте пустым для бесплатного WARP">
-          <div class="btn-row" style="margin-top:0.85rem">
-            <button class="btn btn-primary" id="btn-warp-gen" type="button">🚀 Сгенерировать / включить WARP</button>
-            <button class="btn btn-danger" id="btn-warp-off" type="button">Отключить WARP</button>
+          <label class="check-row">
+            <input id="chk-allow-ru" type="checkbox">
+            <span>Разрешить российские узлы / белые списки (ALLOW_RU_NODES)</span>
+          </label>
+          <div class="btn-row" style="margin-top:0.75rem">
+            <button class="btn btn-primary" type="submit">
+              <svg class="ic" aria-hidden="true"><use href="#i-save"/></svg>
+              <span>Сохранить подписки</span>
+            </button>
           </div>
-        </div>
+        </form>
       </div>
 
       <div class="card">
         <div class="card-head">
           <h2>Слот 2: Ручные URI-ключи (vless, hy2, trojan, ss...)</h2>
+          <span class="badge" id="px-nodes-badge">0 ключей</span>
         </div>
         <form id="frm-node-add" class="inline-form">
-          <input class="input" id="inp-node-uri" type="text" placeholder="vless://... или hy2://... или ss://...">
-          <button class="btn btn-primary" type="submit">+ Добавить ключ</button>
+          <input class="input mono" id="inp-node-uri" type="text" placeholder="vless://... или hy2://... или ss://..." aria-label="URI-ключ прокси">
+          <button class="btn btn-primary" type="submit">
+            <svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>
+            <span>Добавить ключ</span>
+          </button>
         </form>
         <div class="table-wrap" style="margin-top:0.85rem">
           <table class="data-table">
@@ -250,13 +545,34 @@
         </div>
       </div>
 
+      <div class="card">
+        <div class="card-head">
+          <h2>Слот 3: Amnezia WARP 2.0</h2>
+          <span class="badge" id="px-warp-badge">—</span>
+        </div>
+        <p class="muted small" style="margin-top:0">Аварийный резервный WARP WireGuard+AmneziaWG туннель для разблокировки AI и обхода сбоев.</p>
+        <div class="warp-row">
+          <div class="warp-field">
+            <label class="field-label" for="inp-warp-lic">Лицензионный ключ WARP+ (необязательно)</label>
+            <input class="input" id="inp-warp-lic" type="text" placeholder="Оставьте пустым для бесплатного WARP">
+          </div>
+          <div class="btn-row" style="align-self:flex-end">
+            <button class="btn btn-primary" id="btn-warp-gen" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-sparkles"/></svg>
+              <span>Сгенерировать / включить WARP</span>
+            </button>
+            <button class="btn btn-danger" id="btn-warp-off" type="button">Отключить WARP</button>
+          </div>
+        </div>
+      </div>
+
       <div class="two-col">
         <div class="card">
           <div class="card-head">
             <h2>Домены через прокси</h2>
           </div>
           <form id="frm-dom-proxy" class="inline-form">
-            <input class="input" id="inp-dom-proxy" type="text" placeholder="openai.com">
+            <input class="input" id="inp-dom-proxy" type="text" placeholder="openai.com" aria-label="Добавить домен через прокси">
             <button class="btn btn-primary" type="submit">+ В прокси</button>
           </form>
           <div class="chips-wrap" id="chips-proxy"></div>
@@ -267,7 +583,7 @@
             <h2>Домены напрямую (Direct)</h2>
           </div>
           <form id="frm-dom-direct" class="inline-form">
-            <input class="input" id="inp-dom-direct" type="text" placeholder="kinopoisk.ru">
+            <input class="input" id="inp-dom-direct" type="text" placeholder="example.ru" aria-label="Добавить домен напрямую">
             <button class="btn btn-primary" type="submit">+ Напрямую</button>
           </form>
           <div class="chips-wrap" id="chips-direct"></div>
@@ -277,11 +593,12 @@
       <div class="card">
         <div class="card-head">
           <h2>Правила устройств локальной сети (LAN IP)</h2>
-          <input class="input input-sm" id="inp-dev-filter" type="text" placeholder="Поиск по IP, MAC или имени...">
+          <input class="input input-sm" id="inp-dev-filter" type="text" placeholder="Поиск по IP, MAC или имени..." aria-label="Поиск устройства в LAN">
         </div>
         <form id="frm-dev-add" class="inline-form" style="margin-bottom:0.85rem">
-          <input class="input" id="inp-dev-ip" type="text" placeholder="192.168.1.50">
-          <select class="input select-sm" id="inp-dev-mode">
+          <input class="input mono" id="inp-dev-ip" type="text" placeholder="192.168.1.50" aria-label="IP-адрес устройства LAN" inputmode="decimal">
+          <select class="input select-sm" id="inp-dev-mode" aria-label="Режим маршрутизации устройства">
+            <option value="default">По правилам (Сбросить)</option>
             <option value="bypass">Напрямую (Bypass)</option>
             <option value="force_proxy">Принудительно через прокси</option>
           </select>
@@ -304,27 +621,36 @@
     </section>
 
     <!-- TAB 4: Контейнеры LXC (Studio) -->
-    <section class="tab-panel" id="tab-lxc">
+    <section class="tab-panel" id="tab-lxc" role="tabpanel" aria-labelledby="tab-btn-lxc" hidden>
       <div class="card">
         <div class="card-head">
           <div>
             <h2>Студия контейнеров LXC</h2>
-            <div class="muted small">Изолированные Linux-системы с полной ОС из официального каталога <span class="mono">images.linuxcontainers.org</span></div>
+            <div class="muted small">Изолированные Linux-системы из официального каталога <span class="mono">images.linuxcontainers.org</span></div>
           </div>
           <div class="btn-row-compact" id="lxc-status-badges"></div>
         </div>
 
-        <div class="btn-row" style="align-items:center; justify-content:space-between">
+        <div class="lxc-toolbar">
           <div class="btn-row">
-            <button class="btn btn-primary" id="btn-lxc-open-create" type="button">➕ Создать контейнер</button>
-            <button class="btn btn-secondary" id="btn-lxc-doctor" type="button">🩺 Проверить и починить LXC</button>
-            <button class="btn btn-secondary" id="btn-lxc-refresh-cat" type="button">↻ Обновить каталог ОС</button>
+            <button class="btn btn-primary" id="btn-lxc-open-create" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-plus"/></svg>
+              <span>Создать контейнер</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-lxc-doctor" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-stethoscope"/></svg>
+              <span>Проверить и починить LXC</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-lxc-refresh-cat" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg>
+              <span>Обновить каталог ОС</span>
+            </button>
           </div>
-          <input class="input input-sm" id="inp-lxc-filter" type="text" placeholder="Поиск контейнера...">
+          <input class="input input-sm" id="inp-lxc-filter" type="text" placeholder="Поиск контейнера..." aria-label="Поиск контейнера LXC">
         </div>
 
         <details class="guide-box" style="margin-top:0.9rem">
-          <summary>💡 Шпаргалка: как устроены контейнеры LXC простыми словами</summary>
+          <summary>Шпаргалка: как устроены контейнеры LXC простыми словами</summary>
           <div class="guide-grid">
             <div>
               <strong>Что такое LXC?</strong>
@@ -340,7 +666,7 @@
             </div>
             <div>
               <strong>Консоль и общее хранилище</strong>
-              <p>Кнопка <b>💻 Консоль</b> открывает живой bash/sh прямо в браузере. При включённом общем хранилище папка сервера <span class="mono">/srv/storage</span> доступна внутри как <span class="mono">/mnt/storage</span>.</p>
+              <p>Кнопка <b>Консоль</b> открывает живой bash/sh прямо в браузере. При включённом общем хранилище папка сервера доступна внутри как <span class="mono">/mnt/storage</span>.</p>
             </div>
           </div>
         </details>
@@ -350,17 +676,28 @@
     </section>
 
     <!-- TAB 5: Диск и SSL -->
-    <section class="tab-panel" id="tab-storage">
+    <section class="tab-panel" id="tab-storage" role="tabpanel" aria-labelledby="tab-btn-storage" hidden>
       <div class="two-col">
         <div class="card">
           <div class="card-head">
             <h2>Единое хранилище и шифрование LUKS2</h2>
           </div>
           <div id="infra-storage-info"></div>
-          <div class="btn-row" style="margin-top:0.9rem">
-            <button class="btn btn-secondary" id="btn-st-clean" type="button">🧹 Очистить буферы загрузок</button>
-            <button class="btn btn-primary" id="btn-st-unlock" type="button">🔓 Разблокировать LUKS2</button>
-            <button class="btn btn-danger" id="btn-st-lock" type="button">⏏️ Безопасно извлечь диск</button>
+          <div id="st-seg-bar" class="st-seg-wrap"></div>
+          <div class="muted small" id="st-luks-hint" style="margin-top:0.6rem"></div>
+          <div class="btn-row" style="margin-top:0.75rem">
+            <button class="btn btn-secondary" id="btn-st-clean" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-trash"/></svg>
+              <span>Очистить буферы загрузок</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-st-unlock" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-unlock"/></svg>
+              <span>Разблокировать LUKS2</span>
+            </button>
+            <button class="btn btn-danger" id="btn-st-lock" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-eject"/></svg>
+              <span>Безопасно извлечь диск</span>
+            </button>
           </div>
           <hr class="sep">
           <div class="field-label">Занятое место по папкам <span class="mono">/srv/storage</span></div>
@@ -380,26 +717,42 @@
 
         <div class="card">
           <div class="card-head">
-            <h2>HTTPS-сертификаты SSL/TLS и DuckDNS</h2>
-            <a class="btn btn-xs" id="btn-ssl-ca-portal" href="#" target="_blank" rel="noopener" style="display:none">📥 Портал PKI CA ↗</a>
+            <div class="card-title-group">
+              <h2>HTTPS-сертификаты SSL/TLS и DuckDNS</h2>
+              <button class="hint-dot" type="button" data-hint="Local PKI выдаёт доверенные сертификаты для доменов *.lan внутри сети. Let's Encrypt через DuckDNS даёт публичный Wildcard HTTPS без установки корневого CA." aria-label="Справка о Local PKI и Let's Encrypt">?</button>
+            </div>
+            <a class="btn btn-xs" id="btn-ssl-ca-portal" href="#" target="_blank" rel="noopener" style="display:none">
+              <svg class="ic ic-xs" aria-hidden="true"><use href="#i-download"/></svg>
+              <span>Портал PKI CA</span>
+            </a>
           </div>
           <div id="infra-ssl-info"></div>
           <div class="btn-row" style="margin-top:0.85rem">
-            <button class="btn btn-secondary" id="btn-ssl-local" type="button">🏠 Локальный PKI (*.lan)</button>
-            <button class="btn btn-primary" id="btn-ssl-renew" type="button">↻ Продлить Let's Encrypt</button>
+            <button class="btn btn-secondary" id="btn-ssl-local" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg>
+              <span>Локальный PKI (*.lan)</span>
+            </button>
+            <button class="btn btn-primary" id="btn-ssl-renew" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-refresh"/></svg>
+              <span>Продлить Let's Encrypt</span>
+            </button>
           </div>
+          <div id="ssl-pki-snippets" class="pki-snippets" style="display:none"></div>
           <hr class="sep">
-          <form id="frm-ssl-duckdns" class="form-grid">
+          <form id="frm-ssl-duckdns" class="form-grid" novalidate>
             <div>
               <label class="field-label" for="inp-duck-sub">Субдомен DuckDNS</label>
-              <input class="input" id="inp-duck-sub" type="text" placeholder="myhomelab (для myhomelab.duckdns.org)">
+              <input class="input" id="inp-duck-sub" type="text" placeholder="mygateway (для mygateway.duckdns.org)">
             </div>
             <div>
-              <label class="field-label" for="inp-duck-tok">Токен DuckDNS (UUID, пусто = использовать сохраненный)</label>
+              <label class="field-label" for="inp-duck-tok">Токен DuckDNS (UUID, пусто = использовать сохранённый)</label>
               <input class="input" id="inp-duck-tok" type="password" placeholder="Новый токен DuckDNS">
             </div>
             <div class="form-actions">
-              <button class="btn btn-primary" type="submit">🌐 Выпустить / переключить Wildcard LE</button>
+              <button class="btn btn-primary" type="submit">
+                <svg class="ic" aria-hidden="true"><use href="#i-proxies"/></svg>
+                <span>Выпустить / переключить Wildcard LE</span>
+              </button>
             </div>
           </form>
         </div>
@@ -407,7 +760,7 @@
     </section>
 
     <!-- TAB 6: Система и логи -->
-    <section class="tab-panel" id="tab-system">
+    <section class="tab-panel" id="tab-system" role="tabpanel" aria-labelledby="tab-btn-system" hidden>
       <div class="two-col">
         <div class="card">
           <div class="card-head">
@@ -422,11 +775,17 @@
             </div>
             <div>
               <label class="field-label" for="inp-tg-chat">Chat ID (ваш Telegram ID)</label>
-              <input class="input" id="inp-tg-chat" type="text" placeholder="123456789">
+              <input class="input mono" id="inp-tg-chat" type="text" placeholder="123456789">
             </div>
             <div class="btn-row">
-              <button class="btn btn-primary" type="submit">💾 Сохранить и проверить</button>
-              <button class="btn btn-secondary" id="btn-tg-test" type="button">🔔 Тест</button>
+              <button class="btn btn-primary" type="submit">
+                <svg class="ic" aria-hidden="true"><use href="#i-save"/></svg>
+                <span>Сохранить и проверить</span>
+              </button>
+              <button class="btn btn-secondary" id="btn-tg-test" type="button">
+                <svg class="ic" aria-hidden="true"><use href="#i-send"/></svg>
+                <span>Тест</span>
+              </button>
               <button class="btn btn-danger" id="btn-tg-disable" type="button">Отключить</button>
             </div>
           </form>
@@ -438,22 +797,37 @@
           </div>
           <div id="sys-backup-info"></div>
           <div class="btn-row" style="margin-top:0.75rem">
-            <button class="btn btn-primary" id="btn-bak-create" type="button">📦 Создать бэкап</button>
-            <button class="btn btn-secondary" id="btn-bak-tg" type="button">✈️ Бэкап в Telegram</button>
-            <button class="btn btn-danger" id="btn-bak-restore" type="button">♻️ Восстановить</button>
+            <button class="btn btn-primary" id="btn-bak-create" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-archive"/></svg>
+              <span>Создать бэкап</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-bak-tg" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-send"/></svg>
+              <span>Бэкап в Telegram</span>
+            </button>
+            <button class="btn btn-danger" id="btn-bak-restore" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-rollback"/></svg>
+              <span>Восстановить</span>
+            </button>
           </div>
           <hr class="sep">
           <div class="switch-row">
             <div>
               <div class="switch-title">Watchdog (самолечение каждые 5 мин)</div>
             </div>
-            <button class="btn btn-secondary btn-sm" id="btn-cron-wd" type="button">—</button>
+            <button class="switch-pill" id="btn-cron-wd" type="button" role="switch" aria-checked="false" aria-label="Watchdog каждые 5 минут">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-state" id="cron-wd-label">Выкл</span>
+            </button>
           </div>
-          <div class="switch-row" style="margin-top:0.6rem">
+          <div class="switch-row" style="margin-top:0.65rem">
             <div>
               <div class="switch-title">Автообновление (04:00)</div>
             </div>
-            <button class="btn btn-secondary btn-sm" id="btn-cron-au" type="button">—</button>
+            <button class="switch-pill" id="btn-cron-au" type="button" role="switch" aria-checked="false" aria-label="Автообновление в 04:00">
+              <span class="switch-track"><span class="switch-thumb"></span></span>
+              <span class="switch-state" id="cron-au-label">Выкл</span>
+            </button>
           </div>
         </div>
       </div>
@@ -463,18 +837,22 @@
           <div class="card-head">
             <h2>Единый мастер-пароль сервисов</h2>
           </div>
-          <p class="muted">Синхронизирует пароль для AdGuard Home, Clash API, Samba, Vaultwarden, Transmission, Caddy и Web Dashboard.</p>
+          <p class="muted small" style="margin-top:0">Синхронизирует пароль для AdGuard Home, Clash API, Samba, Vaultwarden, Transmission, Caddy и Web Dashboard.</p>
           <form id="frm-passwd" class="form-grid">
             <div>
               <label class="field-label" for="inp-pw1">Новый пароль (мин. 4 символа)</label>
               <input class="input" id="inp-pw1" type="password" autocomplete="new-password">
+              <div class="pw-strength" id="pw-strength" aria-live="polite"></div>
             </div>
             <div>
               <label class="field-label" for="inp-pw2">Повторите пароль</label>
               <input class="input" id="inp-pw2" type="password" autocomplete="new-password">
             </div>
             <div class="form-actions">
-              <button class="btn btn-primary" type="submit">🔐 Обновить мастер-пароль</button>
+              <button class="btn btn-secondary" type="submit">
+                <svg class="ic" aria-hidden="true"><use href="#i-key"/></svg>
+                <span>Обновить мастер-пароль</span>
+              </button>
             </div>
           </form>
         </div>
@@ -485,9 +863,16 @@
           </div>
           <div id="sys-git-info"></div>
           <div id="sys-git-commits" class="commits-list" style="display:none"></div>
+          <div class="muted small" id="sys-git-hint" style="margin-top:0.5rem"></div>
           <div class="btn-row" style="margin-top:0.85rem">
-            <button class="btn btn-secondary" id="btn-upd-check" type="button">🔍 Проверить обновления</button>
-            <button class="btn btn-primary" id="btn-upd-run" type="button">⬇️ Запустить gw update</button>
+            <button class="btn btn-secondary" id="btn-upd-check" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg>
+              <span>Проверить обновления</span>
+            </button>
+            <button class="btn btn-secondary" id="btn-upd-run" type="button">
+              <svg class="ic" aria-hidden="true"><use href="#i-download"/></svg>
+              <span>Запустить gw update</span>
+            </button>
           </div>
         </div>
       </div>
@@ -496,13 +881,13 @@
         <div class="card-head">
           <h2>Просмотр системных логов (Шлюз + Homelab)</h2>
           <div class="btn-row-compact">
-            <input class="input input-sm" id="inp-log-filter" type="text" placeholder="Фильтр строк...">
-            <select class="input select-xs" id="sel-log-lines">
+            <input class="input input-sm" id="inp-log-filter" type="text" placeholder="Фильтр строк..." aria-label="Фильтр строк лога">
+            <select class="input select-xs" id="sel-log-lines" aria-label="Количество строк лога">
               <option value="50">50 строк</option>
               <option value="150" selected>150 строк</option>
               <option value="400">400 строк</option>
             </select>
-            <select class="input select-sm" id="sel-log-target">
+            <select class="input select-sm" id="sel-log-target" aria-label="Источник лога">
               <option value="core">Ядро шлюза (Sing-Box / Mihomo)</option>
               <option value="check">Экспресс-диагностика (gw check)</option>
               <option value="autoupdate">Автообновление (autoupdate.log)</option>
@@ -516,49 +901,177 @@
               <option value="transmission">Transmission (transmission.log)</option>
             </select>
             <button class="btn btn-primary btn-sm" id="btn-log-load" type="button">Показать лог</button>
-            <button class="btn btn-secondary btn-sm" id="btn-log-copy" type="button">📋 Копировать</button>
+            <button class="btn btn-secondary btn-sm" id="btn-log-download" type="button" title="Скачать файл .log" aria-label="Скачать лог">
+              <svg class="ic ic-xs" aria-hidden="true"><use href="#i-download"/></svg>
+              <span>.log</span>
+            </button>
+            <button class="btn btn-secondary btn-sm" id="btn-log-copy" type="button">
+              <svg class="ic ic-xs" aria-hidden="true"><use href="#i-copy"/></svg>
+              <span>Копировать</span>
+            </button>
           </div>
         </div>
-        <pre class="log-view" id="sys-log-view">Выберите источник лога и нажмите «Показать лог».</pre>
+        <div class="log-toolbar">
+          <div class="btn-row-compact" id="log-sev-chips" role="group" aria-label="Фильтр по уровню">
+            <button class="btn btn-xs seg-btn active" data-log-sev="all" type="button">Все</button>
+            <button class="btn btn-xs seg-btn" data-log-sev="err" type="button">Ошибки</button>
+            <button class="btn btn-xs seg-btn" data-log-sev="warn" type="button">Предупреждения</button>
+          </div>
+          <div class="btn-row-compact">
+            <span class="muted small tabular-nums" id="log-match-meta"></span>
+            <label class="check-row" style="margin:0; font-size:0.78rem">
+              <input id="chk-log-autoscroll" type="checkbox" checked>
+              <span>Автопрокрутка</span>
+            </label>
+          </div>
+        </div>
+        <div class="log-view" id="sys-log-view" role="log" aria-live="off">Выберите источник лога и нажмите «Показать лог».</div>
       </div>
     </section>
   </main>
 
-  <div class="toast-stack" id="toast-stack"></div>
+  <!-- Мобильная нижняя навигация (<= 640px) -->
+  <nav class="mobile-nav" aria-label="Мобильная навигация">
+    <button class="mob-nav-btn active" data-mob-tab="overview" type="button">
+      <svg class="ic" aria-hidden="true"><use href="#i-overview"/></svg>
+      <span>Обзор</span>
+    </button>
+    <button class="mob-nav-btn" data-mob-tab="network" type="button">
+      <svg class="ic" aria-hidden="true"><use href="#i-network"/></svg>
+      <span>Сеть</span>
+    </button>
+    <button class="mob-nav-btn" data-mob-tab="proxies" type="button">
+      <svg class="ic" aria-hidden="true"><use href="#i-proxies"/></svg>
+      <span>Прокси</span>
+    </button>
+    <button class="mob-nav-btn" data-mob-tab="lxc" type="button">
+      <svg class="ic" aria-hidden="true"><use href="#i-lxc"/></svg>
+      <span>LXC</span>
+      <span class="mob-pill" id="mob-lxc-count" style="display:none"></span>
+    </button>
+    <button class="mob-nav-btn" id="btn-mobile-more" type="button" aria-haspopup="dialog" aria-expanded="false">
+      <svg class="ic" aria-hidden="true"><use href="#i-menu"/></svg>
+      <span>Ещё</span>
+    </button>
+  </nav>
 
-  <!-- Мастер создания LXC-контейнера -->
-  <div class="modal-backdrop" id="lxc-create-modal" style="display:none">
+  <!-- Мобильное меню "Ещё" -->
+  <div class="modal-backdrop sheet-backdrop" id="mobile-more-sheet" style="display:none" role="dialog" aria-modal="true" aria-labelledby="mob-sheet-title">
+    <div class="bottom-sheet">
+      <div class="modal-head">
+        <h3 id="mob-sheet-title">Дополнительные разделы</h3>
+        <button class="btn btn-xs" id="btn-mob-sheet-x" type="button" aria-label="Закрыть меню">
+          <svg class="ic ic-xs" aria-hidden="true"><use href="#i-x"/></svg>
+        </button>
+      </div>
+      <div class="sheet-body">
+        <button class="sheet-item" data-sheet-tab="storage" type="button">
+          <svg class="ic" aria-hidden="true"><use href="#i-storage"/></svg>
+          <span>Диск и SSL</span>
+        </button>
+        <button class="sheet-item" data-sheet-tab="system" type="button">
+          <svg class="ic" aria-hidden="true"><use href="#i-system"/></svg>
+          <span>Система и логи</span>
+        </button>
+        <button class="sheet-item" id="mob-btn-cmd" type="button">
+          <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg>
+          <span>Командная палитра (Ctrl+K)</span>
+        </button>
+        <button class="sheet-item" id="mob-btn-theme" type="button">
+          <svg class="ic" aria-hidden="true"><use href="#i-sun"/></svg>
+          <span>Сменить тему оформления</span>
+        </button>
+        <a class="sheet-item" id="mob-lnk-core-ui" href="#" target="_blank" rel="noopener" style="display:none">
+          <svg class="ic" aria-hidden="true"><use href="#i-ext"/></svg>
+          <span>Панель ядра (:9090/ui)</span>
+        </a>
+        <a class="sheet-item" id="mob-lnk-agh" href="#" target="_blank" rel="noopener" style="display:none">
+          <svg class="ic" aria-hidden="true"><use href="#i-ext"/></svg>
+          <span>AdGuard Home</span>
+        </a>
+        <a class="sheet-item" id="mob-lnk-ca" href="#" target="_blank" rel="noopener" style="display:none">
+          <svg class="ic" aria-hidden="true"><use href="#i-ext"/></svg>
+          <span>Портал PKI CA</span>
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Стек уведомлений -->
+  <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- Командная палитра (Ctrl+K) -->
+  <div class="modal-backdrop" id="cmd-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="cmd-dialog-label">
+    <div class="modal modal-cmd">
+      <div class="cmd-search-wrap">
+        <svg class="ic" aria-hidden="true"><use href="#i-search"/></svg>
+        <label id="cmd-dialog-label" class="sr-only" for="cmd-input">Командная палитра</label>
+        <input class="cmd-input" id="cmd-input" type="text" placeholder="Поиск вкладок, команд, сервисов Homelab, LXC или проверка домена..." autocomplete="off">
+        <button class="btn btn-xs" id="btn-cmd-close" type="button" aria-label="Закрыть палитру">Esc</button>
+      </div>
+      <div class="cmd-list" id="cmd-list" role="listbox" aria-label="Результаты поиска"></div>
+      <div class="cmd-foot">
+        <span><kbd>↑↓</kbd> выбор</span>
+        <span><kbd>Enter</kbd> выполнить</span>
+        <span><kbd>Esc</kbd> закрыть</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Мастер создания LXC-контейнера (3-шаговый горизонтальный Stepper) -->
+  <div class="modal-backdrop" id="lxc-create-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="lxc-wizard-title">
     <div class="modal modal-xl">
       <div class="modal-head">
         <div>
-          <h3>🚀 Создание нового контейнера LXC</h3>
+          <h3 id="lxc-wizard-title">Создание нового контейнера LXC</h3>
           <div class="muted small" id="lxc-cat-status">Загрузка каталога официальных образов...</div>
         </div>
         <div class="btn-row-compact">
-          <button class="btn btn-xs" id="btn-lxc-cat-reload" type="button">↻ Обновить список</button>
-          <button class="btn btn-xs" id="btn-lxc-create-x" type="button">✕</button>
+          <button class="btn btn-xs" id="btn-lxc-cat-reload" type="button">
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-refresh"/></svg>
+            <span>Обновить список</span>
+          </button>
+          <button class="btn btn-xs" id="btn-lxc-create-x" type="button" aria-label="Закрыть мастер создания">
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-x"/></svg>
+          </button>
         </div>
       </div>
 
-      <form id="frm-lxc-create" class="modal-body modal-scroll">
-        <!-- Блок 1: Выбор официальной ОС -->
-        <div class="wizard-step">
-          <div class="wizard-step-head">
-            <span class="step-num">1</span>
-            <strong>Выбор операционной системы (официальный каталог images.linuxcontainers.org)</strong>
+      <div class="wizard-stepper" role="tablist" aria-label="Шаги создания контейнера">
+        <button class="stepper-btn active" data-wizard-step="1" type="button">
+          <span class="step-num">1</span>
+          <span>Выбор ОС</span>
+        </button>
+        <span class="stepper-line" aria-hidden="true"></span>
+        <button class="stepper-btn" data-wizard-step="2" type="button">
+          <span class="step-num">2</span>
+          <span>Имя и сеть</span>
+        </button>
+        <span class="stepper-line" aria-hidden="true"></span>
+        <button class="stepper-btn" data-wizard-step="3" type="button">
+          <span class="step-num">3</span>
+          <span>Ресурсы и запуск</span>
+        </button>
+      </div>
+
+      <form id="frm-lxc-create" class="modal-body wizard-body" novalidate>
+        <!-- Шаг 1: Выбор официальной ОС -->
+        <div class="wizard-pane active" data-wizard-pane="1">
+          <div class="wizard-pane-head">
+            <strong>Выберите операционную систему</strong>
             <span class="badge" id="lxc-cat-arch-badge">—</span>
           </div>
 
           <div class="cat-toolbar">
-            <input class="input" id="inp-cat-search" type="text" placeholder="Поиск ОС: debian, ubuntu, alpine, arch, kali, fedora...">
+            <input class="input" id="inp-cat-search" type="text" placeholder="Поиск ОС: debian, ubuntu, alpine, arch, kali, fedora..." aria-label="Поиск операционной системы">
             <div class="btn-row-compact" id="cat-group-btns">
               <button class="btn btn-xs seg-btn active" data-cat="all" type="button">Все ОС</button>
-              <button class="btn btn-xs seg-btn" data-cat="popular" type="button">⭐ Популярные</button>
-              <button class="btn btn-xs seg-btn" data-cat="light" type="button">🪶 Лёгкие</button>
-              <button class="btn btn-xs seg-btn" data-cat="server" type="button">💻 Серверные</button>
-              <button class="btn btn-xs seg-btn" data-cat="sec" type="button">🔒 Инструменты</button>
+              <button class="btn btn-xs seg-btn" data-cat="popular" type="button">Популярные</button>
+              <button class="btn btn-xs seg-btn" data-cat="light" type="button">Лёгкие</button>
+              <button class="btn btn-xs seg-btn" data-cat="server" type="button">Серверные</button>
+              <button class="btn btn-xs seg-btn" data-cat="sec" type="button">Инструменты</button>
             </div>
-            <select class="input select-xs" id="sel-cat-variant">
+            <select class="input select-xs" id="sel-cat-variant" aria-label="Фильтр варианта сборки">
               <option value="all" selected>Вариант: Все</option>
               <option value="default">Вариант: default</option>
               <option value="cloud">Вариант: cloud</option>
@@ -570,12 +1083,12 @@
           <div class="selected-os-bar">
             <div>
               <label class="field-label" for="sel-lxc-distro">Выбранная ОС</label>
-              <input class="input" id="sel-lxc-distro" type="text" placeholder="debian" required>
+              <input class="input" id="sel-lxc-distro" type="text" placeholder="alpine" required>
             </div>
             <div>
               <label class="field-label" for="sel-lxc-release">Версия / релиз</label>
               <select class="input" id="sel-lxc-release"></select>
-              <input class="input" id="inp-lxc-release-manual" type="text" placeholder="bookworm / noble / 3.24" style="display:none; margin-top:0.35rem">
+              <input class="input" id="inp-lxc-release-manual" type="text" placeholder="bookworm / noble / 3.24" style="display:none; margin-top:0.35rem" aria-label="Версия релиза вручную">
             </div>
             <div>
               <label class="field-label" for="sel-lxc-variant">Сборка (variant)</label>
@@ -590,17 +1103,12 @@
           </div>
         </div>
 
-        <!-- Блок 2: Имя и Сеть -->
-        <div class="wizard-step">
-          <div class="wizard-step-head">
-            <span class="step-num">2</span>
-            <strong>Имя и сетевое подключение</strong>
-          </div>
-
+        <!-- Шаг 2: Имя и Сеть -->
+        <div class="wizard-pane" data-wizard-pane="2" hidden>
           <div class="two-col">
             <div>
               <label class="field-label" for="inp-lxc-name">Имя контейнера (латиница, цифры, - и _)</label>
-              <input class="input" id="inp-lxc-name" type="text" placeholder="my-debian" required pattern="[A-Za-z0-9_-]+">
+              <input class="input" id="inp-lxc-name" type="text" placeholder="my-debian" required pattern="[A-Za-z0-9_\-]+">
               <div class="muted small" style="margin-top:0.25rem">Станет сетевым именем и названием папки в хранилище.</div>
             </div>
             <div>
@@ -609,52 +1117,48 @@
             </div>
           </div>
 
-          <div class="radio-cards" style="margin-top:0.8rem">
+          <div class="field-label" style="margin-top:0.9rem">Режим сетевого подключения</div>
+          <div class="radio-cards">
             <label class="radio-card selected" id="rcard-nat">
               <input type="radio" name="lxc_net_mode" value="nat" checked>
-              <div>
-                <strong>🛡️ NAT за шлюзом (lxcbr0, 10.0.3.X)</strong>
-                <div class="muted small">Рекомендуется: AdGuard DNS + маршрутизация трафика через Sing-Box / Mihomo.</div>
+              <div class="radio-card-copy">
+                <strong>NAT за шлюзом (lxcbr0, 10.0.3.X)</strong>
+                <div class="muted small">Рекомендуется: AdGuard DNS и маршрутизация трафика через Sing-Box / Mihomo.</div>
               </div>
             </label>
             <label class="radio-card" id="rcard-macvlan">
               <input type="radio" name="lxc_net_mode" value="macvlan">
-              <div>
-                <strong>🏠 Прямой мост LAN (Macvlan)</strong>
-                <div class="muted small">Отдельный IP прямо от вашего основного домашнего роутера.</div>
+              <div class="radio-card-copy">
+                <strong>Прямой мост LAN (Macvlan)</strong>
+                <div class="muted small">Отдельный IP напрямую от вашего домашнего роутера в общую сеть.</div>
               </div>
             </label>
           </div>
 
-          <div style="margin-top:0.75rem">
+          <div style="margin-top:0.85rem">
             <label class="check-row" style="margin:0">
               <input id="chk-lxc-static-ip" type="checkbox">
-              <span>Задать статический IPv4 вручную (по умолчанию используется автоматический DHCP)</span>
+              <span>Задать статический IPv4 вручную (по умолчанию автоматический DHCP)</span>
             </label>
-            <div class="three-col" id="lxc-static-ip-fields" style="display:none; margin-top:0.6rem">
+            <div class="three-col" id="lxc-static-ip-fields" style="display:none; margin-top:0.65rem">
               <div>
                 <label class="field-label" for="inp-lxc-ip">IPv4 с маской CIDR</label>
-                <input class="input" id="inp-lxc-ip" type="text" placeholder="10.0.3.50/24">
+                <input class="input mono" id="inp-lxc-ip" type="text" placeholder="10.0.3.50/24" inputmode="decimal">
               </div>
               <div>
                 <label class="field-label" for="inp-lxc-gw">Шлюз</label>
-                <input class="input" id="inp-lxc-gw" type="text" placeholder="10.0.3.1">
+                <input class="input mono" id="inp-lxc-gw" type="text" placeholder="10.0.3.1" inputmode="decimal">
               </div>
               <div>
                 <label class="field-label" for="inp-lxc-dns">DNS-сервер</label>
-                <input class="input" id="inp-lxc-dns" type="text" placeholder="10.0.3.1">
+                <input class="input mono" id="inp-lxc-dns" type="text" placeholder="10.0.3.1" inputmode="decimal">
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Блок 3: Ресурсы и опции -->
-        <div class="wizard-step">
-          <div class="wizard-step-head">
-            <span class="step-num">3</span>
-            <strong>Ресурсы (ОЗУ / CPU) и интеграция с сервером</strong>
-          </div>
-
+        <!-- Шаг 3: Ресурсы, опции и сводка -->
+        <div class="wizard-pane" data-wizard-pane="3" hidden>
           <div class="two-col">
             <div>
               <label class="field-label" for="inp-lxc-mem">Лимит оперативной памяти</label>
@@ -680,48 +1184,87 @@
             </div>
           </div>
 
-          <div class="two-col" style="margin-top:0.75rem">
+          <div class="two-col" style="margin-top:0.85rem">
             <label class="check-row" style="margin:0">
               <input id="chk-lxc-startnow" type="checkbox" checked>
-              <span>▶ Запустить контейнер сразу после создания</span>
+              <span>Запустить контейнер сразу после создания</span>
             </label>
             <label class="check-row" style="margin:0">
               <input id="chk-lxc-autostart" type="checkbox" checked>
-              <span>⚡ Автозапуск вместе с сервером</span>
+              <span>Автозапуск вместе с сервером</span>
             </label>
             <label class="check-row" style="margin:0">
               <input id="chk-lxc-storage" type="checkbox">
-              <span>💾 Подключить общее хранилище (/srv/storage → /mnt/storage)</span>
+              <span>Подключить общее хранилище (/mnt/storage)</span>
             </label>
-            <label class="check-row" style="margin:0">
-              <input id="chk-lxc-nesting" type="checkbox">
-              <span>🪆 Включить Nesting (для Docker / Podman внутри LXC)</span>
-            </label>
+            <div class="check-with-hint">
+              <label class="check-row" style="margin:0">
+                <input id="chk-lxc-nesting" type="checkbox">
+                <span>Включить Nesting (Docker / Podman внутри LXC)</span>
+              </label>
+              <button class="hint-dot" type="button" data-hint="Разрешает вложенные пространства имён и cgroups внутри LXC, необходимые для работы Docker и Podman." aria-label="Справка о Nesting">?</button>
+            </div>
           </div>
+
+          <div class="wizard-summary" id="lxc-wizard-summary"></div>
         </div>
       </form>
 
-      <div class="modal-foot">
+      <div class="modal-foot wizard-foot">
         <button class="btn btn-secondary" id="btn-lxc-create-cancel" type="button">Отмена</button>
-        <button class="btn btn-primary" id="btn-lxc-create-submit" form="frm-lxc-create" type="submit">🚀 Скачать образ и создать</button>
+        <div class="btn-row-compact">
+          <button class="btn btn-secondary" id="btn-lxc-prev" type="button" style="display:none">Назад</button>
+          <button class="btn btn-primary" id="btn-lxc-next" type="button">
+            <span>Далее</span>
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-arrow-right"/></svg>
+          </button>
+          <button class="btn btn-primary" id="btn-lxc-create-submit" form="frm-lxc-create" type="submit" style="display:none">
+            <svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>
+            <span>Скачать образ и создать</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
 
   <!-- Модальное окно встроенного веб-терминала -->
-  <div class="modal-backdrop" id="console-modal" style="display:none">
+  <div class="modal-backdrop" id="console-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="console-title">
     <div class="modal modal-console" id="console-modal-box">
       <div class="modal-head">
-        <div>
-          <h3 id="console-title">💻 Консоль контейнера</h3>
+        <div class="console-head-title">
+          <div class="console-title-row">
+            <span class="dot-live" id="console-live-dot"></span>
+            <h3 id="console-title">Консоль контейнера</h3>
+            <span class="badge badge-ok" id="console-status-badge">Сессия активна</span>
+          </div>
           <div class="muted small" id="console-sub">Интерактивный терминал LXC</div>
         </div>
         <div class="btn-row-compact">
-          <button class="btn btn-xs" id="btn-con-reconnect" type="button">↻ Переподключить</button>
-          <button class="btn btn-xs" id="btn-con-fullscreen" type="button">⛶ На весь экран</button>
-          <a class="btn btn-xs" id="btn-con-newtab" href="#" target="_blank" rel="noopener">↗ Новая вкладка</a>
-          <button class="btn btn-danger btn-xs" id="btn-con-close" type="button">✕ Закрыть</button>
+          <button class="btn btn-xs" id="btn-con-reconnect" type="button">
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-refresh"/></svg>
+            <span>Переподключить</span>
+          </button>
+          <button class="btn btn-xs" id="btn-con-fullscreen" type="button">
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-fullscreen"/></svg>
+            <span>На весь экран</span>
+          </button>
+          <button class="btn btn-xs" id="btn-con-newtab" type="button">
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-ext"/></svg>
+            <span>Новая вкладка</span>
+          </button>
+          <button class="btn btn-danger btn-xs" id="btn-con-close" type="button">
+            <svg class="ic ic-xs" aria-hidden="true"><use href="#i-x"/></svg>
+            <span>Закрыть</span>
+          </button>
         </div>
+      </div>
+      <div class="console-snippets">
+        <span class="muted small">Сниппеты (копировать):</span>
+        <button class="btn btn-xs snippet-btn" data-con-snippet="ip -4 -br a" type="button">ip -4 a</button>
+        <button class="btn btn-xs snippet-btn" data-con-snippet="df -h" type="button">df -h</button>
+        <button class="btn btn-xs snippet-btn" data-con-snippet="free -m" type="button">free -m</button>
+        <button class="btn btn-xs snippet-btn" data-con-snippet="ps -o pid,user,rss,args | head -n 25" type="button">ps</button>
+        <button class="btn btn-xs snippet-btn" data-con-snippet="apk update && apk upgrade" type="button">apk upgrade</button>
       </div>
       <div class="console-body">
         <iframe id="console-frame" title="LXC Web Console"></iframe>
@@ -733,7 +1276,7 @@
   </div>
 
   <!-- Модальное окно подтверждения -->
-  <div class="modal-backdrop" id="confirm-modal" style="display:none">
+  <div class="modal-backdrop" id="confirm-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
     <div class="modal modal-sm">
       <div class="modal-head">
         <h3 id="confirm-title">Подтверждение</h3>
@@ -747,7 +1290,7 @@
   </div>
 
   <!-- Модальное окно потокового задания -->
-  <div class="modal-backdrop" id="job-modal" style="display:none">
+  <div class="modal-backdrop" id="job-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="job-title">
     <div class="modal modal-lg">
       <div class="modal-head">
         <h3 id="job-title">Выполнение операции...</h3>
@@ -757,12 +1300,29 @@
         <pre class="log-view log-view-tall" id="job-log">Инициализация...</pre>
       </div>
       <div class="modal-foot">
-        <button class="btn btn-primary" id="job-open-console" type="button" style="display:none">💻 Открыть консоль</button>
+        <button class="btn btn-primary" id="job-open-console" type="button" style="display:none">
+          <svg class="ic" aria-hidden="true"><use href="#i-terminal"/></svg>
+          <span>Открыть консоль</span>
+        </button>
         <button class="btn btn-primary" id="job-close" type="button" disabled>Закрыть</button>
       </div>
     </div>
   </div>
 
-  <script src="/app.js"></script>
+  <!-- Модальное окно переподключения / смены IP / повторного входа -->
+  <div class="modal-backdrop" id="reconnect-modal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="recon-title">
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <h3 id="recon-title">Переподключение к панели</h3>
+      </div>
+      <div class="modal-body" id="recon-body"></div>
+      <div class="modal-foot">
+        <button class="btn btn-secondary" id="recon-dismiss" type="button">Закрыть</button>
+        <a class="btn btn-primary" id="recon-go" href="#">Открыть панель</a>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=2"></script>
 </body>
 </html>

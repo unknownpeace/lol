@@ -69,7 +69,7 @@ run_self_test() {
 
     if [ -f "$(get_active_core_conf)" ] && [ -n "$SB_PID" ]; then
         ui_box_sep "МАТРИЦА ЗАДЕРЖЕК И ГРУПП (PING MATRIX)"
-        PX_JSON=$(curl -fsS --connect-timeout 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
+        PX_JSON=$(clash_api_curl -fsS --connect-timeout 3 "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
         if [ -n "$PX_JSON" ] && command -v jq >/dev/null 2>&1; then
             for GRP_T in "⚡ Авто (Самый быстрый)" "🤖 Нейросети (ИИ)" "🧱 Roblox" "▶️ YouTube & Медиа" "🧲 Торренты" "🇩🇪 Германия" "🇺🇸 США" "🎮 Гейминг"; do
                 G_NOW=$(printf "%s" "$PX_JSON" | jq -r --arg g "$GRP_T" '
@@ -81,24 +81,30 @@ run_self_test() {
                 [ -n "$G_NOW" ] && ui_box_row "▸ ${GRP_T}: ${C_CYN}${C_BLD}${G_NOW}${C_RES}"
             done
         fi
-        DNS_AI_IP=$(nslookup chatgpt.com 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
-        DNS_RU_IP=$(nslookup ya.ru 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
-        DNS_DDR_IP=$(nslookup -type=A _dns.resolver.arpa 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
-        DNS_DOH_IP=$(nslookup -type=A use-application-dns.net 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
-        if [ -z "$DNS_DDR_IP" ] && [ -z "$DNS_DOH_IP" ] && ! nslookup -type=A -port=1053 _dns.resolver.arpa 127.0.0.1 >/dev/null 2>&1; then
+        _ns_extract() {
+            awk '/^Server:/ || /^Address.*127\.0\.0\.1/ { next } /^Name:|^Non-authoritative answer:/ { f=1; next } f && /Address/ { for (i=1; i<=NF; i++) if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $i !~ /^127\./) { print $i; exit } }'
+        }
+        DNS_AI_IP=$(nslookup chatgpt.com 127.0.0.1 2>/dev/null | _ns_extract)
+        DNS_RU_IP=$(nslookup ya.ru 127.0.0.1 2>/dev/null | _ns_extract)
+        DNS_DDR_IP=$(nslookup -type=A _dns.resolver.arpa 127.0.0.1 2>/dev/null | _ns_extract)
+        DNS_DOH_IP=$(nslookup -type=A use-application-dns.net 127.0.0.1 2>/dev/null | _ns_extract)
+        _ddr_raw=$(nslookup -type=A -port=1053 _dns.resolver.arpa 127.0.0.1 2>&1 || true)
+        _ddr_alive=$(nslookup -type=A -port=1053 ya.ru 127.0.0.1 2>/dev/null | _ns_extract)
+        if [ -z "$DNS_DDR_IP" ] && [ -z "$DNS_DOH_IP" ] && [ -n "$_ddr_alive" ] && \
+           printf "%s" "$_ddr_raw" | grep -qiE 'NXDOMAIN|Non-existent|can'\''t resolve|SERVFAIL'; then
             DNS_DDR_TXT="${C_GRN}OK${C_RES}"
         else
             DNS_DDR_TXT="${C_RED}FAIL${C_RES}"
         fi
         ui_box_row "▸ Anti-Leak DNS (:53): chatgpt=${C_CYN}${DNS_AI_IP:-n/a}${C_RES} │ ya.ru=${C_GRN}${DNS_RU_IP:-n/a}${C_RES} │ DDR Block=${DNS_DDR_TXT}"
 
-        CF_TRACE=$(curl -fsS --curves X25519:P-256 --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
+        CF_TRACE=$(gw_curl -fsS --connect-timeout 4 -x http://127.0.0.1:7890 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | grep -E '^(ip|loc|warp|colo)=' | tr '\n' ' ' || true)
         if [ -n "$CF_TRACE" ]; then
             ui_box_row "Внешний выход (Cloudflare Trace): ${C_GRN}${CF_TRACE}${C_RES}"
-            PING_RU=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 2 -w '%{time_connect}' "http://ya.ru" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
-            PING_CF=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://cp.cloudflare.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
-            PING_GG=$(curl -o /dev/null -fsS --curves X25519:P-256 --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "https://www.youtube.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
-            PING_AI=$(curl -o /dev/null -sS --curves X25519:P-256 --connect-timeout 3 -m 4 -x http://127.0.0.1:7890 -w '%{time_appconnect}' "https://api.openai.com" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            PING_RU=$(gw_curl -o /dev/null -fsS --connect-timeout 2 -w '%{time_connect}' "http://ya.ru" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            PING_CF=$(gw_curl -o /dev/null -fsS --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "http://cp.cloudflare.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            PING_GG=$(gw_curl -o /dev/null -fsS --connect-timeout 3 -x http://127.0.0.1:7890 -w '%{time_total}' "https://www.youtube.com/generate_204" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
+            PING_AI=$(gw_curl -o /dev/null -sS --connect-timeout 3 -m 4 -x http://127.0.0.1:7890 -w '%{time_appconnect}' "https://api.openai.com" 2>/dev/null | awk '$1+0 > 0 {printf "%.0f", $1*1000; ok=1} END {if (!ok) print "timeout"}')
             ui_box_row "▸ Напрямую РФ (ya.ru):       $(ui_ping_bar "$PING_RU")"
             ui_box_row "▸ Cloudflare Anycast (TUN):  $(ui_ping_bar "$PING_CF")"
             ui_box_row "▸ YouTube / Google Video:    $(ui_ping_bar "$PING_GG")"
@@ -170,7 +176,7 @@ run_gateway_quick_check() {
     fi
 
     # 4. Sing-Box Clash API (:9090)
-    if curl -fsS -m 2 -H "Authorization: Bearer ${ADMIN_PASS:-admin}" "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
+    if clash_api_curl -fsS -m 2 "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
         ui_box_row "${C_GRN}[✔]${C_RES} Clash API (:9090):    ${C_GRN}АКТИВЕН${C_RES} (REST API отвечает, токен валиден)"
     else
         ui_box_row "${C_YEL}[▲] Clash API (:9090):    НЕДОСТУПЕН ИЛИ НЕВЕРНЫЙ СЕКРЕТ${C_RES}"
@@ -179,6 +185,8 @@ run_gateway_quick_check() {
     # 5. Состояние памяти и Conntrack
     MEM_TOTAL_KB=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
     MEM_AVAIL_KB=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    case "$MEM_TOTAL_KB" in ''|*[!0-9]*) MEM_TOTAL_KB=0 ;; esac
+    case "$MEM_AVAIL_KB" in ''|*[!0-9]*) MEM_AVAIL_KB=0 ;; esac
     if [ "$MEM_TOTAL_KB" -gt 0 ]; then
         MEM_USE_PCT=$(( (MEM_TOTAL_KB - MEM_AVAIL_KB) * 100 / MEM_TOTAL_KB ))
         ui_box_row "${C_GRN}[✔]${C_RES} Оперативная память:   ${MEM_USE_PCT}% занято ($((MEM_AVAIL_KB/1024)) МБ свободно из $((MEM_TOTAL_KB/1024)) МБ)"
@@ -186,7 +194,9 @@ run_gateway_quick_check() {
 
     CT_NOW=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
     CT_MAX=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 1)
-    CT_PCT=$(( CT_NOW * 100 / (CT_MAX > 0 ? CT_MAX : 1) ))
+    case "$CT_NOW" in ''|*[!0-9]*) CT_NOW=0 ;; esac
+    case "$CT_MAX" in ''|*[!0-9]*|0) CT_MAX=1 ;; esac
+    CT_PCT=$(( CT_NOW * 100 / CT_MAX ))
     ui_box_row "${C_GRN}[✔]${C_RES} Таблица Conntrack:    ${CT_NOW} / ${CT_MAX} сессий (${CT_PCT}%)"
 
     ui_box_bottom
@@ -201,7 +211,6 @@ run_gateway_quick_check() {
 print_gateway_motd() {
     detect_os >/dev/null 2>&1 || true
     load_gateway_env
-    [ -f "$HOMELAB_ENV" ] && . "$HOMELAB_ENV" 2>/dev/null || true
 
     HN=$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "gateway")
     [ -z "$HN" ] && [ -f /proc/sys/kernel/hostname ] && HN=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "gateway")
@@ -234,9 +243,12 @@ print_gateway_motd() {
     # Хранилище
     if ! is_openwrt && is_external_storage_mounted 2>/dev/null; then
         ST_LINE=$(df -h "$STORAGE_ROOT" 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}')
-        ST_SRC=$(findmnt -n -o SOURCE "$STORAGE_ROOT" 2>/dev/null || true)
-        ST_FS=$(blkid -s TYPE -o value "$ST_SRC" 2>/dev/null || echo "ext4")
-        if [ -n "${EXT_STORAGE_LUKS_UUID:-}" ] || echo "$ST_SRC" | grep -q "mapper"; then
+        ST_SRC=$(awk -v mp="$STORAGE_ROOT" '$2 == mp {src=$1} END {print src}' /proc/mounts 2>/dev/null || true)
+        [ -z "$ST_SRC" ] && command -v findmnt >/dev/null 2>&1 && ST_SRC=$(findmnt -n -o SOURCE "$STORAGE_ROOT" 2>/dev/null || true)
+        ST_FS=$(awk -v mp="$STORAGE_ROOT" '$2 == mp {fs=$3} END {print fs}' /proc/mounts 2>/dev/null || true)
+        [ -z "$ST_FS" ] && [ -n "$ST_SRC" ] && ST_FS=$(blkid -s TYPE -o value "$ST_SRC" 2>/dev/null || echo "ext4")
+        [ -z "$ST_FS" ] && ST_FS="ext4"
+        if [ -n "${EXT_STORAGE_LUKS_UUID:-}" ] || printf "%s" "$ST_SRC" | grep -q "mapper"; then
             ST_TAG=" [${ST_FS} / LUKS2 🔒]"
         else
             ST_TAG=" [${ST_FS}]"
@@ -296,7 +308,7 @@ print_gateway_motd() {
         printf "${C_BLU}║${C_RES}  ${C_BLD}• Homelab:${C_RES}     %s\n" "$HL_SUMMARY"
         printf "${C_BLU}║${C_RES}  ${C_BLD}• SSL / Домен:${C_RES}  %s\n" "$SSL_INFO"
     fi
-    UPDATE_BADGE=$(get_gateway_update_badge 2>/dev/null || echo "")
+    UPDATE_BADGE=$(get_gateway_update_badge "cache-only" 2>/dev/null || echo "")
     if [ -n "$UPDATE_BADGE" ]; then
         printf "${C_BLU}║${C_RES}  ${C_BLD}• Обновление:${C_RES}   %b\n" "$UPDATE_BADGE"
     fi
@@ -305,5 +317,3 @@ print_gateway_motd() {
     echo "${C_BLU}╚════════════════════════════════════════════════════════════════════════════${C_RES}"
     echo ""
 }
-
-# Преобразование ввода пользователя (номер 1..9 или ID модуля) в канонический ID модуля

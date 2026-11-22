@@ -74,9 +74,14 @@ run_installer() {
     # 0. Обработка аргументов командной строки и поиск файла автоматических ответов
     ANSWERS_FILE=""
     IS_UNATTENDED="no"
+    FORCE_INTERACTIVE="no"
 
     while [ $# -gt 0 ]; do
         case "$1" in
+            --interactive|-i)
+                FORCE_INTERACTIVE="yes"
+                shift
+                ;;
             --answers=*)
                 ANSWERS_FILE="${1#*=}"
                 IS_UNATTENDED="yes"
@@ -97,7 +102,7 @@ run_installer() {
         esac
     done
 
-    if [ -z "$ANSWERS_FILE" ]; then
+    if [ "$FORCE_INTERACTIVE" != "yes" ] && [ -z "$ANSWERS_FILE" ]; then
         for cand in "${GATEWAY_DIR}/gateway.answers" "./gateway.answers" "/opt/gateway/gateway.answers" "/etc/gateway/gateway.answers" "/root/gateway.answers"; do
             if [ -f "$cand" ]; then
                 ANSWERS_FILE="$cand"
@@ -179,14 +184,6 @@ run_installer() {
 
         if is_openwrt; then
             PRE_HL_SEL="__SKIP__"
-            ANS_STORAGE_DISK="none"
-            ANS_STORAGE_ACTION="mount"
-            ANS_STORAGE_FS="ext4"
-            ANS_STORAGE_LUKS="no"
-            ANS_STORAGE_LUKS_PASS=""
-            ANS_SSL_TYPE="local"
-            ANS_DUCK_SUB=""
-            ANS_DUCK_TOK=""
         else
             PRE_HL_SEL="${HOMELAB_MODULES:-none}"
             [ -z "$PRE_HL_SEL" ] || [ "$PRE_HL_SEL" = "0" ] || [ "$PRE_HL_SEL" = "none" ] && PRE_HL_SEL="__SKIP__"
@@ -217,7 +214,7 @@ run_installer() {
         SAVED_AGH_USER=""
 
         if [ -f "$AGH_CONF" ]; then
-            SAVED_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
+            SAVED_AGH_USER=$(get_agh_admin_user)
         fi
 
         # 1. Запрос ссылки на подписку, прямого ключа или бесплатного гибридного WARP
@@ -311,7 +308,10 @@ run_installer() {
         else
             printf "Введите единый пароль (для AdGuard Home, ядра шлюза и сервисов Homelab): "
         fi
+        stty -echo 2>/dev/null || true
         read -r INPUT_PASS < /dev/tty || true
+        stty echo 2>/dev/null || true
+        printf "\n"
         INPUT_PASS=$(printf "%s" "$INPUT_PASS" | tr -d '\r\n')
 
         ADMIN_PASS="${INPUT_PASS:-$SAVED_PASS}"
@@ -411,18 +411,18 @@ run_installer() {
         echo "Синхронизация системных часов..."
         if is_openwrt; then
             /usr/sbin/ntpd -n -q -p 162.159.200.1 -p 216.239.35.0 -p pool.ntp.org 2>/dev/null || true
-            if [ "$(date +%Y)" -lt 2026 ]; then
-                TS=$(wget -qO- "http://1.1.1.1/cdn-cgi/trace" 2>/dev/null | awk -F= '/^ts=/ {split($2,a,"."); print a[1]}')
-                [ -n "$TS" ] && date -s "@$TS" >/dev/null 2>&1 || true
-            fi
+        else
+            /usr/sbin/ntpd -n -q -p 162.159.200.1 -p 216.239.35.0 -p ntp.ix.ru -p pool.ntp.org 2>/dev/null || true
+        fi
+        # Фоллбэк по HTTP-заголовку Cloudflare, если NTP заблокирован и часы сброшены (RTC без батарейки)
+        if [ "$(date +%Y)" -lt 2026 ]; then
+            TS=$(wget -qO- "http://1.1.1.1/cdn-cgi/trace" 2>/dev/null | awk -F= '/^ts=/ {split($2,a,"."); print a[1]}')
+            [ -n "$TS" ] && date -s "@$TS" >/dev/null 2>&1 || true
+        fi
+        if is_openwrt; then
             service_ctl sysntpd enable
             service_ctl sysntpd start
         else
-            /usr/sbin/ntpd -n -q -p 162.159.200.1 -p 216.239.35.0 -p ntp.ix.ru -p pool.ntp.org 2>/dev/null || true
-            if [ "$(date +%Y)" -lt 2026 ]; then
-                TS=$(wget -qO- "http://1.1.1.1/cdn-cgi/trace" 2>/dev/null | awk -F= '/^ts=/ {split($2,a,"."); print a[1]}')
-                [ -n "$TS" ] && date -s "@$TS" >/dev/null 2>&1 || true
-            fi
             hwclock -w -u 2>/dev/null || true
             rc-update add ntpd default >/dev/null 2>&1 || true
             rc-service ntpd start >/dev/null 2>&1 || true
@@ -445,7 +445,14 @@ nameserver 77.88.8.1"
         OWRT_PKGS="ca-bundle ca-certificates curl gzip tar jq ip-full conntrack wireguard-tools git git-http kmod-tun kmod-tcp-bbr kmod-nft-tproxy kmod-nft-nat apache-utils"
         apk update >/dev/null 2>&1 || true
         # shellcheck disable=SC2086
-        apk add $OWRT_PKGS || true
+        if ! apk add $OWRT_PKGS; then
+            for _req_b in jq curl; do
+                if ! command -v "$_req_b" >/dev/null 2>&1; then
+                    echo "${C_RED}[X] Критическая ошибка: не удалось установить пакет ${_req_b} на OpenWrt!${C_RES}"
+                    exit 1
+                fi
+            done
+        fi
         disable_apache_daemon
         ensure_alpine_modules
 
@@ -462,7 +469,14 @@ nameserver 77.88.8.1"
         ALP_PKGS="ca-certificates curl gzip tar jq iproute2 conntrack-tools wireguard-tools-wg apache2-utils nftables tzdata sqlite acl"
         apk update >/dev/null 2>&1 || true
         # shellcheck disable=SC2086
-        apk add $ALP_PKGS || true
+        if ! apk add $ALP_PKGS; then
+            for _req_b in jq curl nft; do
+                if ! command -v "$_req_b" >/dev/null 2>&1; then
+                    echo "${C_RED}[X] Критическая ошибка: не удалось установить пакет ${_req_b} на Alpine!${C_RES}"
+                    exit 1
+                fi
+            done
+        fi
         disable_apache_daemon
         ensure_alpine_modules
 
@@ -481,6 +495,16 @@ nameserver 77.88.8.1"
     fi
 
     CURRENT_IP="$TARGET_LAN_IP"
+
+    if is_openwrt; then
+        SYS_INOTIFY_WATCHES="8192"
+    elif [ "${TOTAL_RAM_MB:-512}" -le 1200 ]; then
+        SYS_INOTIFY_WATCHES="65536"
+    else
+        SYS_INOTIFY_WATCHES="524288"
+    fi
+    SYS_MIN_FREE_LINE=""
+    [ "${TOTAL_RAM_MB:-512}" -le 1200 ] && SYS_MIN_FREE_LINE="vm.min_free_kbytes = 16384"
 
     mkdir -p /etc/sysctl.d
     cat << SYS_EOF > /etc/sysctl.d/99-gateway-forward.conf
@@ -508,12 +532,13 @@ net.core.rmem_max = ${SYS_BUF_MAX}
 net.core.wmem_max = ${SYS_BUF_MAX}
 net.netfilter.nf_conntrack_max = ${SYS_CONNTRACK_MAX}
 net.netfilter.nf_conntrack_tcp_timeout_established = 7200
-net.netfilter.nf_conntrack_udp_timeout = 60
-net.netfilter.nf_conntrack_udp_timeout_stream = 180
+net.netfilter.nf_conntrack_udp_timeout = ${SYS_UDP_TIMEOUT:-60}
+net.netfilter.nf_conntrack_udp_timeout_stream = ${SYS_UDP_STREAM_TIMEOUT:-180}
 net.netfilter.nf_conntrack_tcp_be_liberal = 1
 net.ipv4.tcp_congestion_control = bbr
-fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_watches = ${SYS_INOTIFY_WATCHES}
 net.ipv4.ip_unprivileged_port_start = 0
+${SYS_MIN_FREE_LINE}
 SYS_EOF
 
     sysctl -e -p /etc/sysctl.d/99-gateway-forward.conf 2>/dev/null || true
@@ -533,7 +558,7 @@ SYS_EOF
     service_ctl mihomo stop
     CUR_UI_TYPE=$(get_active_ui)
     INST_UI_TYPE=""
-    [ -f "$UI_TYPE_FILE" ] && INST_UI_TYPE=$(cat "$UI_TYPE_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
+    [ -f "$UI_TYPE_FILE" ] && INST_UI_TYPE=$(tr -d ' \t\r\n' < "$UI_TYPE_FILE" 2>/dev/null || true)
     if [ ! -f "${UI_DIR}/index.html" ] || [ "$INST_UI_TYPE" != "$CUR_UI_TYPE" ]; then
         install_web_ui "$CUR_UI_TYPE" || true
     else
@@ -592,9 +617,17 @@ SYS_EOF
             { print }
         ' "$AGH_CONF" > "${AGH_CONF}.tmp" && mv "${AGH_CONF}.tmp" "$AGH_CONF"
         grep -q "aaaa_disabled:" "$AGH_CONF" 2>/dev/null || sed -i '/cache_size:/a \  aaaa_disabled: true' "$AGH_CONF" 2>/dev/null || true
+        grep -q "handle_ddr:" "$AGH_CONF" 2>/dev/null || sed -i '/^dns:/a \  handle_ddr: false' "$AGH_CONF" 2>/dev/null || true
         sync_agh_homelab_rewrites "$CURRENT_IP"
         chmod 600 "$AGH_CONF" 2>/dev/null || true
     else
+        if [ "${TOTAL_RAM_MB:-512}" -le 1200 ] || is_openwrt; then
+            AGH_QLOG_SIZE="256"
+            AGH_MAX_GOROUTINES_LINE="  max_goroutines: 100"
+        else
+            AGH_QLOG_SIZE="1000"
+            AGH_MAX_GOROUTINES_LINE=""
+        fi
         cat << AGH_EOF > "$AGH_CONF"
 http:
   address: 0.0.0.0:3000
@@ -615,25 +648,33 @@ dns:
   cache_enabled: false
   cache_size: 0
   aaaa_disabled: true
+  handle_ddr: false
   enable_dnssec: false
   use_private_ptr_resolvers: true
   local_ptr_upstreams: [${GW_IP}:53]
   serve_plain_dns: true
   ratelimit: 0
+${AGH_MAX_GOROUTINES_LINE}
   pending_requests: { enabled: true }
 tls: { enabled: false }
-querylog: { enabled: true, interval: 24h, file_enabled: false }
+querylog: { enabled: true, interval: 24h, size_memory: ${AGH_QLOG_SIZE}, file_enabled: false }
 statistics: { enabled: true, interval: 24h }
 filters:
   - { enabled: true, url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt, name: AdGuard DNS filter, id: 1 }
-  - { enabled: true, url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt, name: AdAway Default Blocklist, id: 2 }
-  - { enabled: true, url: https://filters.adtidy.org/extension/chromium/filters/1.txt, name: AdGuard Russian Filter, id: 3 }
+AGH_EOF
+        if [ "${TOTAL_RAM_MB:-512}" -gt 300 ]; then
+            echo "  - { enabled: true, url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_2.txt, name: AdAway Default Blocklist, id: 2 }" >> "$AGH_CONF"
+        fi
+        if [ "${TOTAL_RAM_MB:-512}" -gt 1200 ] && ! is_openwrt; then
+            echo "  - { enabled: true, url: https://filters.adtidy.org/extension/chromium/filters/1.txt, name: AdGuard Russian Filter, id: 3 }" >> "$AGH_CONF"
+        fi
+        cat << 'AGH_TAIL_EOF' >> "$AGH_CONF"
 filtering:
   protection_enabled: true
   filtering_enabled: true
   rewrites: []
 schema_version: 35
-AGH_EOF
+AGH_TAIL_EOF
         sync_agh_homelab_rewrites "$CURRENT_IP"
         chmod 600 "$AGH_CONF" 2>/dev/null || true
     fi
@@ -762,5 +803,3 @@ nameserver 77.88.8.8"
     fi
     return 0
 }
-
-# Матрица глубокой диагностики шлюза и стека Homelab (Self-Test 2.0 с визуальными шкалами Ping Matrix)

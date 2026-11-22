@@ -24,7 +24,19 @@ SPOTIFY_EXTRA_DOMAINS="spotify.com scdn.co spotifycdn.com"
 TWITCH_EXTRA_DOMAINS="twitch.tv ttvnw.net jtvnw.net ext-twitch.tv twitchcdn.net"
 
 # Homelab & Gateway local hostnames mapped directly to gateway LAN IP
-HOMELAB_LAN_DOMAINS="ca.lan adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan vaultwarden.lan forgejo.lan downloads.lan torrents.lan code.lan"
+HOMELAB_SUBDOMAINS="gateway ca adguard zashboard singbox mihomo panel vaultwarden forgejo downloads ytdlp torrents torrent code"
+HOMELAB_LAN_DOMAINS="gateway.lan ca.lan adguard.lan zashboard.lan singbox.lan mihomo.lan panel.lan vaultwarden.lan forgejo.lan downloads.lan ytdlp.lan torrents.lan torrent.lan code.lan"
+
+# Возвращает все субдомены Homelab для заданного базового домена (включая корневой домен)
+emit_homelab_le_domains() {
+    _le_base="$1"
+    [ -z "$_le_base" ] && return 0
+    _out="$_le_base"
+    for _sub in $HOMELAB_SUBDOMAINS; do
+        _out="${_out} ${_sub}.${_le_base}"
+    done
+    printf "%s" "$_out"
+}
 
 # Преобразует список доменов через пробел в JSON-массив строк (для Sing-Box)
 emit_json_string_array() {

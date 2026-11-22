@@ -18,18 +18,30 @@ sync_all_homelab_permissions() {
         touch /var/log/metube.log 2>/dev/null || true
         chown metube:"$MEDIA_GROUP" /var/log/metube.log 2>/dev/null || true
     fi
+    if [ -d "${METUBE_DIR:-/opt/metube}" ]; then
+        chown -R root:root "${METUBE_DIR:-/opt/metube}" 2>/dev/null || true
+        chmod -R 755 "${METUBE_DIR:-/opt/metube}" 2>/dev/null || true
+    fi
     if id transmission >/dev/null 2>&1 && [ -d /var/lib/transmission ]; then
         addgroup transmission "$MEDIA_GROUP" 2>/dev/null || true
         chown -R transmission:"$MEDIA_GROUP" /var/lib/transmission 2>/dev/null || true
         chmod 770 /var/lib/transmission 2>/dev/null || true
     fi
     if id caddy >/dev/null 2>&1; then
-        chown -R caddy:caddy /var/lib/caddy "$PKI_PORTAL_DIR" /etc/caddy 2>/dev/null || true
+        chown -R caddy:caddy /var/lib/caddy "$PKI_PORTAL_DIR" 2>/dev/null || true
+        if [ -d /etc/caddy ]; then
+            chown -R root:caddy /etc/caddy 2>/dev/null || true
+            chmod 750 /etc/caddy "${CADDY_CONFD:-/etc/caddy/conf.d}" 2>/dev/null || true
+            chmod 640 "${CADDY_CONF:-/etc/caddy/Caddyfile}" "${CADDY_CONFD:-/etc/caddy/conf.d}"/*.caddy 2>/dev/null || true
+        fi
     fi
     if id coder >/dev/null 2>&1 && [ -d /var/lib/coder ]; then
         addgroup coder "$MEDIA_GROUP" 2>/dev/null || true
         chown -R coder:"$MEDIA_GROUP" /var/lib/coder /opt/code-server 2>/dev/null || true
     fi
+    for _mg_svc in samba transmission-daemon metube forgejo code-server; do
+        [ -x "/etc/init.d/${_mg_svc}" ] && ensure_openrc_mount_guard "$_mg_svc" >/dev/null 2>&1 || true
+    done
     return 0
 }
 
@@ -98,9 +110,18 @@ print_quick_access_card() {
 # Универсальный диспетчер модулей Homelab (install / remove / start / stop / restart)
 # ==============================================================================
 homelab_module_dispatch() {
-    MOD_ID="$1"
+    MOD_ID=$(printf "%s" "${1:-}" | tr 'A-Z' 'a-z' | tr -d ' \t\r\n')
     MOD_ACT="$2"
     init_homelab_registry
+
+    case "$MOD_ID" in
+        metube|yt|downloads)     MOD_ID="ytdlp" ;;
+        transmission|tr)         MOD_ID="torrent" ;;
+        smb)                     MOD_ID="samba" ;;
+        vw|bw)                   MOD_ID="vaultwarden" ;;
+        git)                     MOD_ID="forgejo" ;;
+        vscode|code-server)      MOD_ID="code" ;;
+    esac
 
     MOD_SVC=$(get_module_field "$MOD_ID" 3)
     MOD_TITLE=$(get_module_field "$MOD_ID" 7)
@@ -117,8 +138,8 @@ homelab_module_dispatch() {
                 vaultwarden) install_module_vaultwarden ;;
                 forgejo)     install_module_forgejo ;;
                 code)        install_module_code ;;
-                ytdlp|metube) install_module_ytdlp ;;
-                torrent|transmission) install_module_torrent ;;
+                ytdlp)       install_module_ytdlp "install" ;;
+                torrent)     install_module_torrent ;;
                 *)           echo "${C_RED}[X] Неизвестный модуль: ${MOD_ID}${C_RES}"; return 1 ;;
             esac
             ;;
@@ -129,8 +150,8 @@ homelab_module_dispatch() {
                 vaultwarden) remove_module_vaultwarden ;;
                 forgejo)     remove_module_forgejo ;;
                 code)        remove_module_code ;;
-                ytdlp|metube) remove_module_ytdlp ;;
-                torrent|transmission) remove_module_torrent ;;
+                ytdlp)       remove_module_ytdlp ;;
+                torrent)     remove_module_torrent ;;
                 *)           echo "${C_RED}[X] Неизвестный модуль: ${MOD_ID}${C_RES}"; return 1 ;;
             esac
             ;;
@@ -149,17 +170,56 @@ homelab_module_dispatch() {
             echo "${C_CYN}[*] Обновление модуля ${MOD_TITLE}...${C_RES}"
             ensure_alpine_community_repo
             apk update >/dev/null 2>&1 || true
+            _upd_rc=0
             case "$MOD_ID" in
-                caddy)       apk upgrade caddy caddy-openrc ;;
-                samba)       apk upgrade samba-server samba-common-tools wsdd avahi ;;
-                vaultwarden) apk upgrade vaultwarden vaultwarden-openrc vaultwarden-web-vault && sync_vaultwarden_config ;;
-                forgejo)     apk upgrade forgejo forgejo-openrc ;;
-                code)        rm -f /opt/code-server/code; install_module_code ;;
-                ytdlp|metube) apk upgrade yt-dlp python3 py3-aiohttp ffmpeg && install_module_ytdlp ;;
-                torrent|transmission) apk upgrade transmission-daemon transmission-daemon-openrc ;;
+                caddy)
+                    apk upgrade caddy caddy-openrc || _upd_rc=1
+                    if [ "$_upd_rc" -eq 0 ] && [ -d /etc/caddy ]; then
+                        chown -R root:caddy /etc/caddy 2>/dev/null || true
+                        chmod 750 /etc/caddy "${CADDY_CONFD:-/etc/caddy/conf.d}" 2>/dev/null || true
+                    fi
+                    ;;
+                samba)
+                    apk upgrade samba-server samba-common-tools wsdd avahi || _upd_rc=1
+                    [ "$_upd_rc" -eq 0 ] && ensure_openrc_mount_guard "samba" >/dev/null 2>&1 || true
+                    ;;
+                vaultwarden)
+                    apk upgrade vaultwarden vaultwarden-openrc vaultwarden-web-vault && sync_vaultwarden_config || _upd_rc=1
+                    ;;
+                forgejo)
+                    apk upgrade forgejo forgejo-openrc || _upd_rc=1
+                    if [ "$_upd_rc" -eq 0 ]; then
+                        sync_forgejo_domain_config >/dev/null 2>&1 || true
+                        ensure_openrc_mount_guard "forgejo" >/dev/null 2>&1 || true
+                        if command -v check_forgejo_min_version >/dev/null 2>&1; then
+                            check_forgejo_min_version >/dev/null 2>&1 || true
+                        fi
+                    fi
+                    ;;
+                code)
+                    rm -f /opt/code-server/code
+                    install_module_code || _upd_rc=1
+                    ;;
+                ytdlp)
+                    apk upgrade yt-dlp python3 py3-aiohttp ffmpeg && install_module_ytdlp "update" || _upd_rc=1
+                    ;;
+                torrent)
+                    apk upgrade transmission-daemon transmission-daemon-openrc || _upd_rc=1
+                    if [ "$_upd_rc" -eq 0 ] && command -v ensure_transmission_openrc >/dev/null 2>&1; then
+                        ensure_transmission_openrc >/dev/null 2>&1 || true
+                    fi
+                    ;;
             esac
+            if [ "$_upd_rc" -ne 0 ]; then
+                echo "${C_RED}[X] Ошибка при обновлении пакетов модуля ${MOD_TITLE}!${C_RES}"
+                return 1
+            fi
             if [ -n "$MOD_SVC" ]; then
                 if service_ctl "$MOD_SVC" restart; then
+                    if [ "$MOD_ID" = "samba" ]; then
+                        service_ctl wsdd restart >/dev/null 2>&1 || true
+                        service_ctl avahi-daemon restart >/dev/null 2>&1 || true
+                    fi
                     echo "${C_GRN}[✓] Модуль ${MOD_TITLE} успешно обновлен и перезапущен.${C_RES}"
                 else
                     echo "${C_RED}[X] Модуль ${MOD_TITLE} обновлен, но не смог перезапуститься!${C_RES}"
@@ -170,7 +230,3 @@ homelab_module_dispatch() {
     esac
     return 0
 }
-
-# ==============================================================================
-# Единый модуль резервного копирования (Шлюз + БД SQLite + Caddy PKI + Конфиги)
-# ==============================================================================

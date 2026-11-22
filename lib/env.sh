@@ -21,7 +21,7 @@ count_sub_urls() {
         echo "0"
         return 0
     fi
-    printf "%s\n" "$SUB_URL" | tr ' |,' '\n\n\n' | grep -E '^https?://' | wc -l | tr -d ' \t\r\n'
+    printf "%s\n" "$SUB_URL" | tr ' |' '\n\n' | grep -Ec '^https?://' || true
     return 0
 }
 
@@ -65,5 +65,3 @@ is_dhcp_server_enabled() {
     fi
     return 1
 }
-
-# Формирование списка IP-исключений (bypass_devices.conf) для корректной работы DIRECT при включенном Kill-Switch

@@ -21,6 +21,11 @@ return view.extend({
 		var px = st.proxies || {};
 
 		var leasesCount = Array.isArray(agh.dhcp_leases) ? agh.dhcp_leases.length : 0;
+		var dhcpRangeTxt = '';
+		if (agh.dhcp_v4 && agh.dhcp_v4.range_start) {
+			var endOctet = agh.dhcp_v4.range_end ? ('–' + String(agh.dhcp_v4.range_end).split('.').pop()) : '';
+			dhcpRangeTxt = ' (' + agh.dhcp_v4.range_start + endOctet + ')';
+		}
 		var subLabel = (px.sub_count > 0) ? ('Слот 1: ' + px.sub_count + ' подп.') : 'Слот 1: выкл';
 		var nodeCount = Array.isArray(px.my_nodes) ? px.my_nodes.length : 0;
 
@@ -51,7 +56,7 @@ return view.extend({
 				E('div', { 'class': 'gw-card-sub' }, [
 					'Версия: ' + (agh.version || '—') + ' │ ОЗУ: ' + (agh.rss || '—') + ' │ Фильтр: ' + (agh.protection_enabled ? 'вкл' : 'выкл'),
 					E('br'),
-					'Аренд DHCP: ' + leasesCount + (agh.dhcp_v4 && agh.dhcp_v4.range_start ? (' (' + agh.dhcp_v4.range_start + '–' + agh.dhcp_v4.range_end.split('.').pop() + ')') : '')
+					'Аренд DHCP: ' + leasesCount + dhcpRangeTxt
 				])
 			]),
 
@@ -144,13 +149,18 @@ return view.extend({
 
 	refreshAll: function(cardsHost, groupsHost, onComplete) {
 		return gw.api.status().then(L.bind(function(st) {
+			if (!cardsHost.isConnected)
+				return;
 			if (st && st.ok) {
 				dom.content(cardsHost, this.renderCards(st));
 				dom.content(groupsHost, this.renderGroupsTable(st));
 			}
 			if (typeof onComplete === 'function')
 				onComplete(st);
-		}, this)).catch(function() {});
+		}, this)).catch(function(err) {
+			if (cardsHost.isConnected)
+				gw.notify('warning', 'Ошибка обновления статуса: ' + (err && err.message ? err.message : String(err)));
+		});
 	},
 
 	render: function(st) {
@@ -214,9 +224,12 @@ return view.extend({
 			}, 'Открыть AdGuard Home (:3000)')
 		]);
 
-		poll.add(function() {
+		var pollFn = function() {
+			if (document.hidden || !cardsHost.isConnected)
+				return;
 			return self.refreshAll(cardsHost, groupsHost);
-		}, 5);
+		};
+		poll.add(pollFn, 15);
 
 		return E('div', { 'class': 'cbi-map' }, [
 			E('h2', 'Universal Sidecar Gateway'),

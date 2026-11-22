@@ -1,13 +1,12 @@
 #!/bin/sh
 check_github_mirror() {
     TEST_URL="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/private.srs"
-    if curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null || \
-       curl -fsSL --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null; then
+    if gw_curl -fsSL --connect-timeout 3 -m 5 -o /dev/null "$TEST_URL" 2>/dev/null; then
         GH_PROXY=""
         return 0
     fi
     for MIRROR in "https://gh-proxy.com/" "https://ghproxy.net/"; do
-        if curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null "${MIRROR}${TEST_URL}" 2>/dev/null; then
+        if gw_curl -fsSL --connect-timeout 3 -m 5 -o /dev/null "${MIRROR}${TEST_URL}" 2>/dev/null; then
             echo "${C_YEL}[!] Прямой доступ к GitHub ограничен, включено зеркало: ${MIRROR}${C_RES}"
             GH_PROXY="$MIRROR"
             return 0
@@ -17,14 +16,28 @@ check_github_mirror() {
     return 0
 }
 
-# Универсальная загрузка файла с каскадным фоллбэком на зеркала GitHub
+# Универсальная загрузка файла с каскадным фоллбэком и фиксацией источника (прямой / зеркало)
 download_file() {
     DL_URL="$1"
     DL_OUT="$2"
-    for PREFIX in "$GH_PROXY" "" "https://gh-proxy.com/"; do
-        if curl --curves X25519:P-256 --retry 1 --connect-timeout 5 --speed-limit 5000 --speed-time 10 -m 45 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null || \
-           curl --retry 1 --connect-timeout 5 --speed-limit 5000 --speed-time 10 -m 45 -fL -o "$DL_OUT" "${PREFIX}${DL_URL}" 2>/dev/null; then
+    LAST_DOWNLOAD_VIA_MIRROR="no"
+    _dl_prefixes=""
+    if [ -n "${GH_PROXY:-}" ]; then
+        _dl_prefixes="${GH_PROXY} DIRECT https://gh-proxy.com/"
+    else
+        _dl_prefixes="DIRECT https://gh-proxy.com/ https://ghproxy.net/"
+    fi
+    for PREFIX_ITEM in $_dl_prefixes; do
+        if [ "$PREFIX_ITEM" = "DIRECT" ]; then
+            _eff_prefix=""
+            _is_mir="no"
+        else
+            _eff_prefix="$PREFIX_ITEM"
+            _is_mir="yes"
+        fi
+        if gw_curl --retry 1 --connect-timeout 5 --speed-limit 5000 --speed-time 10 -m 45 -fL -o "$DL_OUT" "${_eff_prefix}${DL_URL}" 2>/dev/null; then
             if [ -s "$DL_OUT" ]; then
+                LAST_DOWNLOAD_VIA_MIRROR="$_is_mir"
                 return 0
             fi
         fi
@@ -47,9 +60,21 @@ init_user_lists() {
     return 0
 }
 
-# Безопасное разделение нескольких URI-ключей (включая протоколы sing-box-extended 2026)
+# Безопасное разделение нескольких URI-ключей (совместимо с BusyBox awk)
 format_uri_keys() {
-    printf "%s\n" "$1" | tr -d '\r' | sed -E 's/[[:space:],]+((vless|vmess|ss|ssr|trojan|hy2|hysteria2|hysteria|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5|trusttunnel|sudoku|call|naive\+https|naive\+quic|naive|snell|openvpn|ssh):\/\/)/\n\1/g' | sed '/^[[:space:]]*$/d'
+    printf "%s\n" "$1" | tr -d '\r' | awk '
+        {
+            s = $0
+            while (match(s, /[ \t,]+(vless|vmess|ss|ssr|trojan|hy2|hysteria2|hysteria|tuic|wg|wireguard|anytls|mieru|xhttp|splithttp|socks5|trusttunnel|sudoku|call|naive\+https|naive\+quic|naive|snell|openvpn|ssh):\/\//)) {
+                pre = substr(s, 1, RSTART - 1)
+                if (pre != "") print pre
+                rest = substr(s, RSTART)
+                sub(/^[ \t,]+/, "", rest)
+                s = rest
+            }
+            if (s != "") print s
+        }
+    ' | sed '/^[[:space:]]*$/d'
     return 0
 }
 
@@ -64,7 +89,8 @@ scan_best_warp_endpoints() {
         PING_CMD="ping -c 1 -W 1"
     fi
 
-    RTT_TMP="/tmp/warp_rtt_scan.$$"
+    ensure_gateway_runtime_dir >/dev/null 2>&1 || true
+    RTT_TMP=$(mktemp "${GATEWAY_RUNTIME_DIR:-/run/gateway}/warp_rtt.XXXXXX" 2>/dev/null || printf "%s" "${GATEWAY_RUNTIME_DIR:-/run/gateway}/warp_rtt.$$")
     : > "$RTT_TMP"
 
     for EP in $CANDIDATES; do
@@ -134,6 +160,17 @@ generate_amnezia_warp() {
         REG_PAYLOAD="{\"key\":\"${PUB_KEY}\",\"install_id\":\"\",\"warp_enabled\":true,\"tos\":\"${TOS_DATE}\",\"type\":\"Android\",\"locale\":\"en_US\"}"
         echo "Бесплатная регистрация личного аккаунта Cloudflare WARP (API 2026)..."
 
+        _parse_warp_reg_response() {
+            if command -v jq >/dev/null 2>&1; then
+                WARP_IPV4=$(printf "%s" "$1" | jq -r '.config.interface.addresses.v4 // empty' 2>/dev/null | head -n 1)
+                REG_ID=$(printf "%s" "$1" | jq -r '.id // empty' 2>/dev/null | head -n 1)
+                REG_TOKEN=$(printf "%s" "$1" | jq -r '.token // empty' 2>/dev/null | head -n 1)
+            fi
+            [ -z "$WARP_IPV4" ] && WARP_IPV4=$(printf "%s" "$1" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
+            [ -z "$REG_ID" ] && REG_ID=$(printf "%s" "$1" | sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+            [ -z "$REG_TOKEN" ] && REG_TOKEN=$(printf "%s" "$1" | sed -n 's/.*"token":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+        }
+
         for CURL_OPT in \
             "" \
             "-x http://127.0.0.1:7890" \
@@ -144,15 +181,13 @@ generate_amnezia_warp() {
             "--connect-to api.devices.cloudflare.com:443:104.16.80.230:443"
         do
             # shellcheck disable=SC2086
-            RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 $CURL_OPT \
+            RESP=$(gw_curl -fsSL --http1.1 --connect-timeout 4 -m 6 $CURL_OPT \
                 -H "User-Agent: okhttp/3.12.1" \
                 -H "Content-Type: application/json" \
                 -X POST "https://api.devices.cloudflare.com/v0a4471/reg" \
                 -d "$REG_PAYLOAD" 2>/dev/null || true)
             if printf "%s" "$RESP" | grep -q '"v4"'; then
-                WARP_IPV4=$(printf "%s" "$RESP" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
-                REG_ID=$(printf "%s" "$RESP" | sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-                REG_TOKEN=$(printf "%s" "$RESP" | sed -n 's/.*"token":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+                _parse_warp_reg_response "$RESP"
                 USED_CURL_OPT="$CURL_OPT"
                 REG_OK="yes"
                 break
@@ -160,15 +195,13 @@ generate_amnezia_warp() {
         done
 
         if [ "$REG_OK" = "no" ]; then
-            RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 \
+            RESP=$(gw_curl -fsSL --http1.1 --connect-timeout 4 -m 6 \
                 -H "User-Agent: okhttp/3.12.1" \
                 -H "Content-Type: application/json" \
                 -X POST "https://zero-trust-client.cloudflareclient.com/v0a4471/reg" \
                 -d "$REG_PAYLOAD" 2>/dev/null || true)
             if printf "%s" "$RESP" | grep -q '"v4"'; then
-                WARP_IPV4=$(printf "%s" "$RESP" | sed -n 's/.*"v4":[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1)
-                REG_ID=$(printf "%s" "$RESP" | sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-                REG_TOKEN=$(printf "%s" "$RESP" | sed -n 's/.*"token":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+                _parse_warp_reg_response "$RESP"
                 USED_CURL_OPT=""
                 REG_OK="yes"
             fi
@@ -176,13 +209,14 @@ generate_amnezia_warp() {
 
         if [ "$REG_OK" = "yes" ] && [ -n "${WARP_LICENSE:-}" ] && [ -n "$REG_ID" ] && [ -n "$REG_TOKEN" ]; then
             echo "Активация лицензионного ключа Cloudflare WARP+..."
+            _lic_body=$(jq -cn --arg lic "$WARP_LICENSE" '{license: $lic}' 2>/dev/null || printf '{"license":"%s"}' "$WARP_LICENSE")
             # shellcheck disable=SC2086
-            LIC_RESP=$(curl -fsSL --curves X25519:P-256 --http1.1 --connect-timeout 4 -m 6 ${USED_CURL_OPT:-} \
+            LIC_RESP=$(gw_curl -fsSL --http1.1 --connect-timeout 4 -m 6 ${USED_CURL_OPT:-} \
                 -H "User-Agent: okhttp/3.12.1" \
                 -H "Authorization: Bearer ${REG_TOKEN}" \
                 -H "Content-Type: application/json" \
                 -X PUT "https://api.devices.cloudflare.com/v0a4471/reg/${REG_ID}/account" \
-                -d "{\"license\":\"${WARP_LICENSE}\"}" 2>/dev/null || true)
+                -d "$_lic_body" 2>/dev/null || true)
             if printf "%s" "$LIC_RESP" | grep -q '"warp_plus":[[:space:]]*true'; then
                 echo "${C_GRN}[✓] Статус WARP+ (Argo Priority) успешно активирован!${C_RES}"
                 save_gateway_env
@@ -195,40 +229,50 @@ generate_amnezia_warp() {
     fi
 
     if [ "$REG_OK" = "no" ] && is_warp_enabled; then
-        OLD_PRIV=$(sed -n 's/.*"private_key":[[:space:]]*"\([^"]*\)".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
-        OLD_IP=$(sed -n 's/.*"\([0-9.]*\)\/32".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+        if command -v jq >/dev/null 2>&1; then
+            OLD_PRIV=$(jq -r '.outbounds[0].private_key // empty' "$WARP_NODES_FILE" 2>/dev/null || true)
+            OLD_IP=$(jq -r '.outbounds[0].address[0] // empty' "$WARP_NODES_FILE" 2>/dev/null | cut -d/ -f1 || true)
+            OLD_ID=$(jq -r '.masque.profile.id // empty' "$WARP_NODES_FILE" 2>/dev/null || true)
+            OLD_TOKEN=$(jq -r '.masque.profile.auth_token // empty' "$WARP_NODES_FILE" 2>/dev/null || true)
+        else
+            OLD_PRIV=$(sed -n 's/.*"private_key":[[:space:]]*"\([^"]*\)".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+            OLD_IP=$(sed -n 's/.*"\([0-9.]*\)\/32".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+            OLD_ID=$(sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+            OLD_TOKEN=$(sed -n 's/.*"auth_token":[[:space:]]*"\([^"]*\)".*/\1/p' "$WARP_NODES_FILE" 2>/dev/null | head -n 1)
+        fi
         if [ -n "$OLD_PRIV" ]; then
             PRIV_KEY="$OLD_PRIV"
             WARP_IPV4="${OLD_IP:-172.16.0.2}"
+            [ -n "${OLD_ID:-}" ] && REG_ID="$OLD_ID" || true
+            [ -n "${OLD_TOKEN:-}" ] && REG_TOKEN="$OLD_TOKEN" || true
             REG_OK="yes"
-            echo "[i] Сохранен ранее зарегистрированный ключ Amnezia WARP."
+            echo "[i] Сохранены ранее зарегистрированные ключи и профиль Amnezia WARP."
         fi
     fi
 
     if [ "$REG_OK" = "no" ]; then
-        if [ "${IS_UNATTENDED:-no}" = "yes" ] || [ ! -t 0 ]; then
-            WARP_IPV4="172.16.0.2"
-            REG_OK="yes"
-            echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
-        else
+        if [ "${IS_UNATTENDED:-no}" != "yes" ] && [ -t 0 ]; then
             echo "${C_YEL}[!] Провайдер блокирует прямой доступ к API регистрации WG Cloudflare.${C_RES}"
-            printf "Вставьте готовый WARP PrivateKey [или нажмите Enter для авто-регистрации через MASQUE TCP/H2]: "
+            printf "Вставьте готовый WARP WireGuard PrivateKey (base64) [Enter = отмена]: "
             read -r USER_PRIV < /dev/tty || true
             USER_PRIV=$(printf "%s" "$USER_PRIV" | tr -d ' \t\r\n')
             if [ -n "$USER_PRIV" ]; then
-                PRIV_KEY="$USER_PRIV"
-                WARP_IPV4="172.16.0.2"
-                REG_OK="yes"
-            elif [ -n "$PRIV_KEY" ]; then
-                WARP_IPV4="172.16.0.2"
-                REG_OK="yes"
-                echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
-            else
-                WARP_IPV4="172.16.0.2"
-                REG_OK="yes"
-                echo "${C_GRN}[i] Задействован встроенный механизм авто-регистрации WARP MASQUE (TCP/H2) внутри ядра Sing-Box!${C_RES}"
+                if printf "%s" "$USER_PRIV" | grep -Eq '^[A-Za-z0-9+/]{42,44}=*$'; then
+                    PRIV_KEY="$USER_PRIV"
+                    WARP_IPV4="172.16.0.2"
+                    REG_OK="yes"
+                else
+                    echo "${C_RED}[X] Некорректный формат WireGuard PrivateKey (ожидается base64 длиной 44 символа).${C_RES}"
+                    return 1
+                fi
             fi
         fi
+    fi
+
+    if [ "$REG_OK" != "yes" ] || [ -z "${PRIV_KEY:-}" ]; then
+        echo "${C_RED}[X] Не удалось зарегистрировать аккаунт Cloudflare WARP (API недоступен, готовый PrivateKey не задан).${C_RES}"
+        echo "    Проверьте выход в интернет или вставьте готовый WireGuard PrivateKey вручную."
+        return 1
     fi
 
     [ -z "$WARP_IPV4" ] && WARP_IPV4="172.16.0.2" || true
@@ -273,12 +317,11 @@ generate_amnezia_warp() {
     AWG_I1_3="<b 0x818000010001000000000361706905647a656e0272750000010001c00c000100010000003c0004${HEX_R3}><r 18><t>"
     AWG_I1_4="<b 0xcb0000000108${HEX_R4}00><t><r 20>"
 
-    cat << WARP_EOF > "${WARP_NODES_FILE}.tmp.$$"
-{
-  "outbounds": [
+    _emit_warp_wg_outbound() {
+        cat << WG_NODE_EOF
     {
       "type": "wireguard",
-      "tag": "☁️ WARP Fast (${EP1_IP}:${EP1_PORT})",
+      "tag": "☁️ WARP ${1} (${2}:${3})",
       "mtu": 1280,
       "address": [
         "${WARP_IPV4}/32"
@@ -286,8 +329,8 @@ generate_amnezia_warp() {
       "private_key": "${PRIV_KEY}",
       "peers": [
         {
-          "address": "${EP1_IP}",
-          "port": ${EP1_PORT},
+          "address": "${2}",
+          "port": ${3},
           "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
           "allowed_ips": [
             "0.0.0.0/0"
@@ -295,111 +338,28 @@ generate_amnezia_warp() {
         }
       ],
       "amnezia": {
-        "jc": ${AWG_JC1},
-        "jmin": ${AWG_JMIN1},
-        "jmax": ${AWG_JMAX1},
+        "jc": ${4},
+        "jmin": ${5},
+        "jmax": ${6},
         "s1": 0,
         "s2": 0,
         "h1": 1,
         "h2": 2,
         "h3": 3,
         "h4": 4,
-        "i1": "${AWG_I1_1}"
+        "i1": "${7}"
       }
-    },
-    {
-      "type": "wireguard",
-      "tag": "☁️ WARP Reserve (${EP2_IP}:${EP2_PORT})",
-      "mtu": 1280,
-      "address": [
-        "${WARP_IPV4}/32"
-      ],
-      "private_key": "${PRIV_KEY}",
-      "peers": [
-        {
-          "address": "${EP2_IP}",
-          "port": ${EP2_PORT},
-          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-          "allowed_ips": [
-            "0.0.0.0/0"
-          ]
-        }
-      ],
-      "amnezia": {
-        "jc": ${AWG_JC2},
-        "jmin": ${AWG_JMIN2},
-        "jmax": ${AWG_JMAX2},
-        "s1": 0,
-        "s2": 0,
-        "h1": 1,
-        "h2": 2,
-        "h3": 3,
-        "h4": 4,
-        "i1": "${AWG_I1_2}"
-      }
-    },
-    {
-      "type": "wireguard",
-      "tag": "☁️ WARP Alt (${EP3_IP}:${EP3_PORT})",
-      "mtu": 1280,
-      "address": [
-        "${WARP_IPV4}/32"
-      ],
-      "private_key": "${PRIV_KEY}",
-      "peers": [
-        {
-          "address": "${EP3_IP}",
-          "port": ${EP3_PORT},
-          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-          "allowed_ips": [
-            "0.0.0.0/0"
-          ]
-        }
-      ],
-      "amnezia": {
-        "jc": ${AWG_JC3},
-        "jmin": ${AWG_JMIN3},
-        "jmax": ${AWG_JMAX3},
-        "s1": 0,
-        "s2": 0,
-        "h1": 1,
-        "h2": 2,
-        "h3": 3,
-        "h4": 4,
-        "i1": "${AWG_I1_3}"
-      }
-    },
-    {
-      "type": "wireguard",
-      "tag": "☁️ WARP Engage (${EP4_IP}:${EP4_PORT})",
-      "mtu": 1280,
-      "address": [
-        "${WARP_IPV4}/32"
-      ],
-      "private_key": "${PRIV_KEY}",
-      "peers": [
-        {
-          "address": "${EP4_IP}",
-          "port": ${EP4_PORT},
-          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-          "allowed_ips": [
-            "0.0.0.0/0"
-          ]
-        }
-      ],
-      "amnezia": {
-        "jc": ${AWG_JC4},
-        "jmin": ${AWG_JMIN4},
-        "jmax": ${AWG_JMAX4},
-        "s1": 0,
-        "s2": 0,
-        "h1": 1,
-        "h2": 2,
-        "h3": 3,
-        "h4": 4,
-        "i1": "${AWG_I1_4}"
-      }
+    }${8}
+WG_NODE_EOF
     }
+
+    {
+        printf '{\n  "outbounds": [\n'
+        _emit_warp_wg_outbound "Fast"    "$EP1_IP" "$EP1_PORT" "$AWG_JC1" "$AWG_JMIN1" "$AWG_JMAX1" "$AWG_I1_1" ","
+        _emit_warp_wg_outbound "Reserve" "$EP2_IP" "$EP2_PORT" "$AWG_JC2" "$AWG_JMIN2" "$AWG_JMAX2" "$AWG_I1_2" ","
+        _emit_warp_wg_outbound "Alt"     "$EP3_IP" "$EP3_PORT" "$AWG_JC3" "$AWG_JMIN3" "$AWG_JMAX3" "$AWG_I1_3" ","
+        _emit_warp_wg_outbound "Engage"  "$EP4_IP" "$EP4_PORT" "$AWG_JC4" "$AWG_JMIN4" "$AWG_JMAX4" "$AWG_I1_4" ""
+        cat << WARP_EOF
   ],
   "masque": {
     "type": "masque",
@@ -430,9 +390,21 @@ generate_amnezia_warp() {
   }
 }
 WARP_EOF
+    } > "${WARP_NODES_FILE}.tmp.$$"
     chmod 600 "${WARP_NODES_FILE}.tmp.$$" 2>/dev/null || true
-    mv -f "${WARP_NODES_FILE}.tmp.$$" "$WARP_NODES_FILE"
-    chmod 600 "$WARP_NODES_FILE" 2>/dev/null || true
+    if command -v jq >/dev/null 2>&1; then
+        if jq --arg priv "$PRIV_KEY" --arg id "${REG_ID:-}" --arg tok "${REG_TOKEN:-}" --arg lic "${WARP_LICENSE:-}" '
+            (.outbounds[] | .private_key) = $priv
+            | .masque.profile.id = $id
+            | .masque.profile.auth_token = $tok
+            | .masque.profile.license_key = $lic
+        ' "${WARP_NODES_FILE}.tmp.$$" > "${WARP_NODES_FILE}.jq.$$" 2>/dev/null && [ -s "${WARP_NODES_FILE}.jq.$$" ]; then
+            mv -f "${WARP_NODES_FILE}.jq.$$" "${WARP_NODES_FILE}.tmp.$$"
+        else
+            rm -f "${WARP_NODES_FILE}.jq.$$" 2>/dev/null || true
+        fi
+    fi
+    atomic_commit_tmp "${WARP_NODES_FILE}.tmp.$$" "$WARP_NODES_FILE" 0600 "root:root" || return 1
     echo "${C_GRN}[✓] Гибридный пул WARP 2.0 (4 ноды UDP AWG: ${EP1}, ${EP2}, ${EP3}, ${EP4} + 1 нода TCP MASQUE H2) создан!${C_RES}"
     return 0
 }
@@ -441,7 +413,7 @@ WARP_EOF
 sanitize_sub_url_list() {
     RAW_URLS="$1"
     CLEAN_LIST=""
-    for U in $(printf "%s\n" "$RAW_URLS" | tr ' |,' '\n\n\n'); do
+    for U in $(printf "%s\n" "$RAW_URLS" | tr ' |' '\n\n'); do
         [ -z "$U" ] && continue
         C_U=$(printf "%s" "$U" | sed -E 's/([?&])fmt=(best|xray|v2ray)(&|$)/\1/; s/[?&]$//')
         if [ -z "$CLEAN_LIST" ]; then
@@ -459,14 +431,6 @@ apply_subscription_input() {
     RAW_INPUT="$1"
     mkdir -p "$SB_PROVIDERS_DIR"
     case "$RAW_INPUT" in
-        *warp_nodes*|warp|WARP|amnezia|masque|free)
-            SUB_URL=""
-            USE_INITIAL_WARP="yes"
-            ;;
-        none|NONE|direct|DIRECT|off|OFF)
-            SUB_URL=""
-            USE_INITIAL_WARP="no"
-            ;;
         http://*|https://*)
             CLEAN_SUB_URL=$(sanitize_sub_url_list "$RAW_INPUT")
             if [ "$CLEAN_SUB_URL" != "$RAW_INPUT" ]; then
@@ -475,9 +439,21 @@ apply_subscription_input() {
             SUB_URL="$CLEAN_SUB_URL"
             USE_INITIAL_WARP="no"
             ;;
+        *warp_nodes*|warp|WARP|amnezia|masque|free)
+            SUB_URL=""
+            USE_INITIAL_WARP="yes"
+            ;;
+        none|NONE|direct|DIRECT|off|OFF)
+            SUB_URL=""
+            USE_INITIAL_WARP="no"
+            ;;
         vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|hysteria://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|xhttp://*|splithttp://*|socks5://*|trusttunnel://*|sudoku://*|call://*|naive+https://*|naive+quic://*|naive://*|snell://*|openvpn://*|ssh://*)
             sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
-            format_uri_keys "$RAW_INPUT" >> "$CUSTOM_NODES_FILE"
+            format_uri_keys "$RAW_INPUT" | while IFS= read -r _ukey; do
+                [ -z "$_ukey" ] && continue
+                grep -qxF "$_ukey" "$CUSTOM_NODES_FILE" 2>/dev/null || printf "%s\n" "$_ukey" >> "$CUSTOM_NODES_FILE"
+            done
+            chmod 600 "$CUSTOM_NODES_FILE" 2>/dev/null || true
             SUB_URL=""
             USE_INITIAL_WARP="no"
             ;;
@@ -488,5 +464,3 @@ apply_subscription_input() {
     esac
     return 0
 }
-
-# Загрузка и установка веб-панели Zashboard с сохранением версии

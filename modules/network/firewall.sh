@@ -4,13 +4,20 @@ get_nft_bypass_saddr_clause() {
         printf ""
         return 0
     fi
-    BYP_CSV=$(awk '{
-        gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", $0);
-        if ($0 != "" && $0 !~ /^#/) {
-            if (c++) printf ", %s", $0;
-            else printf "%s", $0;
-        }
-    }' "$USER_BYPASS_IPS" 2>/dev/null || true)
+    BYP_CSV=""
+    while IFS= read -r _b_line || [ -n "$_b_line" ]; do
+        _b_line=$(printf "%s" "$_b_line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        case "$_b_line" in
+            ""|\#*) continue ;;
+        esac
+        if is_valid_ipv4 "$_b_line" || is_valid_ipv4_cidr "$_b_line"; then
+            if [ -z "$BYP_CSV" ]; then
+                BYP_CSV="$_b_line"
+            else
+                BYP_CSV="${BYP_CSV}, ${_b_line}"
+            fi
+        fi
+    done < "$USER_BYPASS_IPS"
     if [ -n "$BYP_CSV" ]; then
         printf "ip saddr != { %s } " "$BYP_CSV"
     fi
@@ -48,16 +55,22 @@ sync_dns_firewall() {
     LAN_TCP_PORTS=$(get_homelab_nft_tcp_ports)
     LAN_UDP_PORTS=$(get_homelab_nft_udp_ports)
 
+    if is_openwrt 2>/dev/null || [ "$LAN_IF" = "lxcbr0" ]; then
+        IN_IFS_MATCH="\"${LAN_IF}\""
+    else
+        IN_IFS_MATCH="{ \"${LAN_IF}\", \"lxcbr0\" }"
+    fi
+
     KS_COMMENT=""
     KS_RULE=""
     if [ "$KS_STATE" = "yes" ]; then
         KS_COMMENT="#KILLSWITCH_ACTIVE"
-        KS_RULE="iifname \"${LAN_IF}\" oifname != { \"${CORE_TUN_IF}\", \"lo\" } ${BYP_SADDR_CLAUSE}ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject"
+        KS_RULE="iifname ${IN_IFS_MATCH} oifname != { \"${CORE_TUN_IF}\", \"lo\" } ${BYP_SADDR_CLAUSE}ip daddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } reject"
     fi
 
     DNS_RULE=""
     if [ "$USE_DNS_REDIRECT" = "yes" ]; then
-        DNS_RULE="iifname \"${LAN_IF}\" meta l4proto { tcp, udp } th dport 53 redirect to :53"
+        DNS_RULE="iifname ${IN_IFS_MATCH} meta l4proto { tcp, udp } th dport 53 redirect to :53"
     fi
 
     if is_openwrt 2>/dev/null; then
@@ -72,8 +85,8 @@ chain gateway_input_guard {
     iifname "lo" accept
     ct state established,related accept
     meta l4proto { tcp, udp } th dport 853 reject
-    ip saddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } tcp dport { 3000, 7890, 9090 } drop
-    ip saddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } udp dport 7890 drop
+    ip saddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8 } tcp dport { 3000, 7890, 8095, 8096, 9090 } drop
+    ip saddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8 } udp dport 7890 drop
 }
 
 chain gateway_forward_mss {
@@ -101,8 +114,9 @@ chain gateway_postrouting_nat {
 NFT_OPENWRT
         }
         mkdir -p "$(dirname "$OPENWRT_NFT_CONF")" 2>/dev/null || true
-        OWRT_BAK="/tmp/gw_nft_owrt.bak.$$"
-        [ -f "$OPENWRT_NFT_CONF" ] && cp -f "$OPENWRT_NFT_CONF" "$OWRT_BAK" 2>/dev/null || true
+        ensure_gateway_runtime_dir >/dev/null 2>&1 || true
+        OWRT_BAK=$(mktemp "${GATEWAY_RUNTIME_DIR:-/run/gateway}/gw_nft_owrt.XXXXXX" 2>/dev/null || printf "%s" "${GATEWAY_RUNTIME_DIR:-/run/gateway}/gw_nft_owrt.bak.$$")
+        [ -f "$OPENWRT_NFT_CONF" ] && cp -f "$OPENWRT_NFT_CONF" "$OWRT_BAK" 2>/dev/null || rm -f "$OWRT_BAK" 2>/dev/null || true
 
         render_owrt_nft_conf "oifname \"${LAN_IF}\" masquerade persistent" > "$OPENWRT_NFT_CONF"
         if ! fw4 check >/dev/null 2>&1; then
@@ -113,10 +127,10 @@ NFT_OPENWRT
             fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
             return 0
         else
-            if [ -f "$OWRT_BAK" ]; then
+            if [ -s "$OWRT_BAK" ]; then
                 mv -f "$OWRT_BAK" "$OPENWRT_NFT_CONF" 2>/dev/null || true
             else
-                rm -f "$OPENWRT_NFT_CONF" 2>/dev/null || true
+                rm -f "$OWRT_BAK" "$OPENWRT_NFT_CONF" 2>/dev/null || true
             fi
             echo "${C_RED}[X] Ошибка проверки fw4 (/etc/nftables.d)! Сохранена предыдущая конфигурация.${C_RES}" >&2
             return 1
@@ -139,10 +153,13 @@ table inet gateway_fw {
         iifname "lo" accept
         ct state established,related accept
         meta l4proto { tcp, udp } th dport 853 reject
-        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } tcp dport { ${LAN_TCP_PORTS} } accept
-        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16 } udp dport { ${LAN_UDP_PORTS} } accept
+        iifname "lxcbr0" meta l4proto { tcp, udp } th dport 53 accept
+        iifname "lxcbr0" udp dport 67 accept
+        iifname "lxcbr0" drop
+        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8 } tcp dport { ${LAN_TCP_PORTS} } accept
+        ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8 } udp dport { ${LAN_UDP_PORTS} } accept
         ip daddr { 224.0.0.251, 239.255.255.250 } udp dport { 3702, 5353 } accept
-        tcp dport { 80, 443, 445, 3000, 3001, 5357, 7890, 8081, 8095, 8222, 8443, 9090, 9091 } drop
+        tcp dport { 80, 443, 445, 3000, 3001, 5357, 7890, 8081, 8095, 8096, 8222, 8443, 9090, 9091 } drop
         udp dport { 443, 3702, 5353, 7890 } drop
     }
 
@@ -155,7 +172,8 @@ table inet gateway_fw {
     chain forward_filter {
         type filter hook forward priority filter - 5; policy accept;
         meta nfproto ipv6 drop
-        iifname "${LAN_IF}" meta l4proto { tcp, udp } th dport 853 reject
+        iifname ${IN_IFS_MATCH} meta l4proto { tcp, udp } th dport 853 reject
+        iifname "lxcbr0" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } drop
         ${KS_RULE}
     }
 
@@ -194,5 +212,3 @@ NFT_ALPINE
     rc-service nftables start >/dev/null 2>&1 || true
     return 0
 }
-
-# Вычисление актуальных метрик загрузки ОЗУ и заполнения хранилища /srv/storage

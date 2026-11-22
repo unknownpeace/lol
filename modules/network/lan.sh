@@ -19,37 +19,35 @@ scan_lan_subnet() {
 discover_lan_devices() {
     load_gateway_env
     CUR_LAN=$(get_current_lan_ip)
+    ensure_gateway_runtime_dir >/dev/null 2>&1 || true
     rm -f "$LAN_SCAN_CACHE"
     touch "$LAN_SCAN_CACHE"
 
     LEASE_F=""
     if [ -f "$AGH_LEASES_JSON" ]; then
-        # Конвертируем AdGuard Home leases.json во временный формат ip mac hostname
-        LEASE_F="/tmp/agh_leases.tmp"
+        # Конвертируем AdGuard Home leases.json во временный формат ip mac hostname внутри /run/gateway
+        LEASE_F=$(mktemp "${GATEWAY_RUNTIME_DIR:-/run/gateway}/agh.leases.XXXXXX" 2>/dev/null || printf "%s" "${GATEWAY_RUNTIME_DIR:-/run/gateway}/agh.leases.$$")
         if command -v jq >/dev/null 2>&1; then
             jq -r '.leases[]? | [0, .mac, .ip, (.hostname // "*")] | @tsv' "$AGH_LEASES_JSON" > "$LEASE_F" 2>/dev/null || true
         elif command -v python3 >/dev/null 2>&1; then
-            python3 -c "
-import json
-try:
-    with open('${AGH_LEASES_JSON}') as f:
-        data = json.load(f)
-    with open('${LEASE_F}', 'w') as out:
-        for item in data.get('leases', []):
-            ip = item.get('ip', '')
-            mac = item.get('mac', '')
-            host = item.get('hostname', '*') or '*'
-            if ip and mac:
-                out.write(f'0 {mac} {ip} {host}\n')
-except Exception:
-    pass
-" 2>/dev/null || true
+            python3 - "$AGH_LEASES_JSON" "$LEASE_F" << 'PY_LEASES' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+with open(sys.argv[2], "w") as out:
+    for item in data.get("leases", []):
+        ip = item.get("ip", "")
+        mac = item.get("mac", "")
+        host = item.get("hostname", "*") or "*"
+        if ip and mac:
+            out.write(f"0 {mac} {ip} {host}\n")
+PY_LEASES
         fi
     fi
 
     echo " ${C_CYN}--- Обнаруженные устройства в локальной сети (ARP + DHCP) ---${C_RES}"
     # shellcheck disable=SC2086
-    awk -v gw="$GW_IP" -v self="$CUR_LAN" -v out_cache="$LAN_SCAN_CACHE" \
+    awk -v gw="$GW_IP" -v self="$CUR_LAN" -v out_cache="$LAN_SCAN_CACHE" -v lease_f="$LEASE_F" \
         -v byp_f="$USER_BYPASS_IPS" -v vpn_f="$USER_FORCE_PROXY_IPS" \
         -v c_cyn="$C_CYN" -v c_grn="$C_GRN" -v c_yel="$C_YEL" -v c_dim="$C_DIM" -v c_res="$C_RES" '
         BEGIN {
@@ -64,7 +62,7 @@ except Exception:
             }
             close(vpn_f)
         }
-        FILENAME ~ /leases$/ {
+        lease_f != "" && FILENAME == lease_f {
             ip = $3; mac = tolower($2); host = $4
             if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && ip != self) {
                 ips[ip] = 1
@@ -99,6 +97,7 @@ except Exception:
             }
         }
     ' $LEASE_F /proc/net/arp 2>/dev/null || true
+    [ -n "$LEASE_F" ] && rm -f "$LEASE_F" 2>/dev/null || true
     return 0
 }
 
@@ -126,5 +125,3 @@ resolve_device_ip_input() {
             ;;
     esac
 }
-
-# Интерактивный «Детектор сайта» (Рентген маршрута домена: AdGuard + FakeIP + Homelab .lan + TLS-пинг)

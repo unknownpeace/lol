@@ -69,9 +69,17 @@ show_service_logs_cli() {
         autoupdate|cron)
             tail -n "$LINES_Q" "$AUTOUPDATE_LOG" 2>/dev/null || echo "  (лог ${AUTOUPDATE_LOG} пуст)"
             ;;
+        webui|ui|dashboard)
+            tail -n "$LINES_Q" /var/log/gateway-webui.log 2>/dev/null || echo "  (лог /var/log/gateway-webui.log пуст)"
+            ;;
+        console|ttyd)
+            tail -n "$LINES_Q" /var/log/gateway-console.log 2>/dev/null || echo "  (лог /var/log/gateway-console.log пуст)"
+            ;;
         *)
             echo "  ${C_YEL}[▲] Неизвестная служба: ${SVC_Q}${C_RES}"
-            echo "  Доступные: sing-box, adguard, caddy, vaultwarden, metube, code, samba, forgejo, transmission, autoupdate"
+            echo "  Доступные: core, sing-box, mihomo, adguard, caddy, vaultwarden, metube, code, samba, forgejo, transmission, webui, console, autoupdate"
+            ui_box_bottom
+            return 1
             ;;
     esac
     ui_box_bottom
@@ -80,8 +88,8 @@ show_service_logs_cli() {
 
 # Быстрое добавление прокси/подписки из CLI: `gateway proxy add <url|key|warp>`
 cli_proxy_add() {
-    RAW_P_ARG=$(clean_clipboard_line "${1:-}")
-    if [ -z "$RAW_P_ARG" ]; then
+    _first_arg=$(clean_clipboard_line "${1:-}")
+    if [ -z "$_first_arg" ]; then
         ui_warn_box "Не указана ссылка на подписку или URI-ключ прокси." \
                     "Пример: gateway proxy add https://sub.example.com/api/v1/client/subscribe?token=..."
         return 1
@@ -89,22 +97,31 @@ cli_proxy_add() {
     backup_gateway_state
     load_gateway_env
     init_user_lists
-    case "$RAW_P_ARG" in
+    case "$_first_arg" in
         http://*|https://*)
-            CLEAN_P=$(sanitize_sub_url_list "$RAW_P_ARG")
-            case " ${SUB_URL:-} " in
-                *" ${CLEAN_P} "*) ;;
-                *) SUB_URL="${SUB_URL:+${SUB_URL} }${CLEAN_P}" ;;
-            esac
+            RAW_URLS_IN=$(clean_clipboard_line "$*")
+            CLEAN_P=$(sanitize_sub_url_list "$RAW_URLS_IN")
+            for _sub_i in $CLEAN_P; do
+                case " ${SUB_URL:-} " in
+                    *" ${_sub_i} "*) ;;
+                    *) SUB_URL="${SUB_URL:+${SUB_URL} }${_sub_i}" ;;
+                esac
+            done
             save_gateway_env
             apply_and_verify_core "CLI: Добавление подписки в Слот 1"
             ;;
         warp|WARP|amnezia|masque)
-            generate_amnezia_warp "${2:-}" && apply_and_verify_core "CLI: Активация Amnezia WARP 2.0 + MASQUE H2"
+            _wlic=$(clean_clipboard_line "${2:-}")
+            generate_amnezia_warp "$_wlic" && apply_and_verify_core "CLI: Активация Amnezia WARP 2.0 + MASQUE H2"
             ;;
         *)
+            RAW_KEYS_IN=$(clean_clipboard_line "$*")
             sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
-            format_uri_keys "$RAW_P_ARG" >> "$CUSTOM_NODES_FILE"
+            format_uri_keys "$RAW_KEYS_IN" | while IFS= read -r _ukey; do
+                [ -z "$_ukey" ] && continue
+                grep -qxF "$_ukey" "$CUSTOM_NODES_FILE" 2>/dev/null || printf "%s\n" "$_ukey" >> "$CUSTOM_NODES_FILE"
+            done
+            chmod 600 "$CUSTOM_NODES_FILE" 2>/dev/null || true
             apply_and_verify_core "CLI: Добавление ключа в Слот 2 (my_nodes.yaml)"
             ;;
     esac
@@ -223,39 +240,73 @@ verify_answers_file() {
     ui_box_top "📋 СВОДКА ПАРАМЕТРОВ ФАЙЛА ОТВЕТОВ"
     ui_box_row "• Файл:             ${C_CYN}${IN_F}${C_RES}"
 
-    # 1. Проверка синтаксиса sh
-    if ! sh -n "$IN_F" 2>/dev/null; then
+    # 1. Проверка синтаксиса KEY=VALUE (без sh -n, чтобы корректно разрешать & в URL)
+    _bad_line=$(awk '
+        {
+            sub(/\r$/, "")
+            if ($0 ~ /^[ \t]*$/ || $0 ~ /^[ \t]*#/) next
+            if ($0 !~ /^[ \t]*[A-Za-z_][A-Za-z0-9_]*=/) { print NR ": " $0; exit }
+        }
+    ' "$IN_F" 2>/dev/null || true)
+    if [ -n "$_bad_line" ]; then
         ui_box_bottom
-        ui_warn_box "Ошибка синтаксиса в файле ответов ${IN_F}!" \
-                    "Исправьте кавычки или незакрытые скобки."
+        ui_warn_box "Ошибка формата в файле ответов ${IN_F} (${_bad_line})!" \
+                    "Каждая строка должна иметь вид KEY=\"VALUE\" или быть комментарием #."
         return 1
     fi
-    ui_box_row "• Синтаксис shell:  ${C_GRN}[✔] КОРРЕКТЕН${C_RES}"
+    ui_box_row "• Формат .env:      ${C_GRN}[✔] КОРРЕКТЕН${C_RES}"
 
-    # 2. Изолированная безопасная загрузка переменных
+    # 2. Изолированная безопасная загрузка и валидация значений
     (
         parse_env_file_safely "$IN_F"
+        _v_err=0
 
-        # Сеть и ядро
+        # Проверка ядра и UI
+        case "${CORE_ENGINE:-singbox}" in
+            singbox|sing-box|sb|mihomo|clash|meta) ;;
+            *) echo "${C_RED}  [✖] Некорректное значение CORE_ENGINE=${CORE_ENGINE}${C_RES}"; _v_err=1 ;;
+        esac
+        case "${WEB_UI:-zashboard}" in
+            zashboard|zash|zb|metacubexd|metacube|xd) ;;
+            *) echo "${C_RED}  [✖] Некорректное значение WEB_UI=${WEB_UI}${C_RES}"; _v_err=1 ;;
+        esac
+        if [ -n "${TARGET_LAN_IP:-}" ] && [ "$TARGET_LAN_IP" != "auto" ] && ! is_valid_ipv4 "$TARGET_LAN_IP"; then
+            echo "${C_RED}  [✖] Некорректный TARGET_LAN_IP=${TARGET_LAN_IP}${C_RES}"; _v_err=1
+        fi
+        if [ -n "${GW_IP:-}" ] && [ "$GW_IP" != "auto" ] && ! is_valid_ipv4 "$GW_IP"; then
+            echo "${C_RED}  [✖] Некорректный GW_IP=${GW_IP}${C_RES}"; _v_err=1
+        fi
+        case "${STORAGE_FS:-ext4}" in
+            ext4|btrfs|f2fs) ;;
+            *) echo "${C_RED}  [✖] Некорректная ФС STORAGE_FS=${STORAGE_FS}${C_RES}"; _v_err=1 ;;
+        esac
+
         ui_box_row "• Ядро / Панель:    CORE=${CORE_ENGINE:-singbox} │ WEB_UI=${WEB_UI:-zashboard}"
-        ui_box_row "• Сеть:             LAN IP: ${TARGET_LAN_IP:-auto} │ GW IP: ${GW_IP:-auto} │ Подписка: ${SUB_URL:-warp}"
-        # Пользователь
+        ui_box_row "• Сеть:             LAN IP: ${TARGET_LAN_IP:-auto} │ GW IP: ${GW_IP:-auto} │ Подписка: $(mask_sub_url "${SUB_URL:-warp}")"
         if [ -n "${ADMIN_PASS:-}" ]; then
             ui_box_row "• Администратор:    Логин: ${ADMIN_USER:-admin} │ Мастер-пароль: [ЗАДАН (длина: ${#ADMIN_PASS})]"
         else
             ui_box_row "• Администратор:    Логин: ${ADMIN_USER:-admin} │ ${C_YEL}Мастер-пароль: [ПУСТО -> сгенерируется случайно]${C_RES}"
         fi
-        # Homelab
         ui_box_row "• Модули Homelab:   ${HOMELAB_MODULES:-none}"
-        # Storage
         ui_box_row "• Хранилище:        Диск: ${STORAGE_DISK:-none} │ Действие: ${STORAGE_ACTION:-mount} │ ФС: ${STORAGE_FS:-ext4} │ LUKS2: ${STORAGE_LUKS:-no}"
-        # SSL
         if [ "${SSL_TYPE:-local}" = "duckdns" ]; then
-            ui_box_row "• SSL / Домен:      DuckDNS (*.${DUCKDNS_SUBDOMAIN:-не указан}.duckdns.org) │ Токен: [ЗАДАН]"
+            if [ -n "${DUCKDNS_TOKEN:-}" ]; then
+                _dtok_lbl="${C_GRN}[ЗАДАН]${C_RES}"
+            else
+                _dtok_lbl="${C_RED}[НЕ ЗАДАН]${C_RES}"
+                _v_err=1
+            fi
+            [ -z "${DUCKDNS_SUBDOMAIN:-}" ] && _v_err=1
+            ui_box_row "• SSL / Домен:      DuckDNS (*.${DUCKDNS_SUBDOMAIN:-не указан}.duckdns.org) │ Токен: ${_dtok_lbl}"
         else
             ui_box_row "• SSL / Домен:      Локальный CA (*.lan)"
         fi
-    )
+        exit "$_v_err"
+    ) || {
+        ui_box_bottom
+        return 1
+    }
     ui_box_bottom
     ui_ok_msg "Файл ответов готов к запуску через: gw install --answers ${IN_F}"
     return 0
@@ -276,7 +327,7 @@ print_gateway_cli_help() {
     if is_openwrt 2>/dev/null; then
         ui_box_row "${C_CYN}gw logs [служба]${C_RES}             — Живые логи (core|sing-box|mihomo|adguard|autoupdate)"
     else
-        ui_box_row "${C_CYN}gw logs [служба]${C_RES}             — Живые логи (core|sing-box|mihomo|adguard|caddy|vaultwarden|metube|code|samba|forgejo|transmission|autoupdate)"
+        ui_box_row "${C_CYN}gw logs [служба]${C_RES}             — Живые логи (core|adguard|caddy|vaultwarden|webui|console|...)"
     fi
     ui_box_row "${C_CYN}gw core [singbox|mihomo]${C_RES}     — Горячее переключение ядра (Sing-Box Extended ⇄ Mihomo)"
     ui_box_row "${C_CYN}gw ui [zashboard|metacubexd]${C_RES} — Смена веб-панели (:9090/ui) без перезапуска ядра"
@@ -318,7 +369,3 @@ print_gateway_cli_help() {
     ui_box_bottom
     return 0
 }
-
-# ==============================================================================
-# Интерактивное подменю Homelab & Media Stack (Пункт 13 главного меню)
-# ==============================================================================

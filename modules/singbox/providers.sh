@@ -11,7 +11,8 @@ print_proxy_slots_report() {
     if [ "$SUB_CNT" -gt 1 ]; then
         SLOT1_INFO="${C_GRN}АКТИВНЫ${C_RES} (${SUB_CNT} подписки | ${RU_FLT_TAG})"
     elif [ "$SUB_CNT" -eq 1 ]; then
-        SLOT1_INFO="${C_GRN}АКТИВНА${C_RES} (${SUB_URL} | ${RU_FLT_TAG})"
+        MASKED_SUB=$(mask_sub_url "$SUB_URL")
+        SLOT1_INFO="${C_GRN}АКТИВНА${C_RES} (${MASKED_SUB} | ${RU_FLT_TAG})"
     else
         SLOT1_INFO="${C_DIM}ОТКЛЮЧЕНА${C_RES} (${RU_FLT_TAG})"
     fi
@@ -55,8 +56,18 @@ list_my_nodes() {
     echo " ${C_CYN}--- Список ваших ключей в ${CUSTOM_NODES_FILE} ---${C_RES}"
     awk -v c="${C_CYN}" -v r="${C_RES}" '
         NF && $0 !~ /^[[:space:]]*#/ && $0 !~ /^proxies:/ {
-            idx++
             line = $0
+            if (line ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/) {
+                idx++
+                yname = line
+                sub(/^[[:space:]]*-[[:space:]]*name:[[:space:]]*/, "", yname)
+                gsub(/^["'\'' ]+|["'\'' \r\n]+$/, "", yname)
+                printf "  %s[%d]%s %-10s | %-34s | %s\n", c, idx, r, "yaml", "(Clash YAML proxy)", yname
+                next
+            }
+            if (line ~ /^[[:space:]]+[A-Za-z0-9_-]+:/) next
+            if (index(line, "://") == 0) next
+            idx++
             proto = line
             sub(/:\/\/.*/, "", proto)
             tag = "(без названия)"
@@ -101,5 +112,3 @@ delete_my_node_by_index() {
     ' "$CUSTOM_NODES_FILE" > "${CUSTOM_NODES_FILE}.tmp" && mv "${CUSTOM_NODES_FILE}.tmp" "$CUSTOM_NODES_FILE"
     return 0
 }
-
-# Безопасное применение изменений с проверкой старта процесса и интерфейса singbox-tun

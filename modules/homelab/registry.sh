@@ -73,8 +73,62 @@ count_enabled_homelab_modules() {
     return 0
 }
 
+# Установка OpenRC Mount Guard скрипта и привязка start_pre() для сервисов /srv/storage
+write_storage_mount_guard_script() {
+    mkdir -p "${HOMELAB_LIB_DIR:-/usr/lib/gateway}" 2>/dev/null || true
+    chmod 755 "${HOMELAB_LIB_DIR:-/usr/lib/gateway}" 2>/dev/null || true
+    cat << 'MG_EOF' > "${HOMELAB_LIB_DIR:-/usr/lib/gateway}/storage-mount-guard.sh"
+#!/bin/sh
+_env="/etc/sing-box/homelab.env"
+[ -f "$_env" ] || _env="/etc/sing-box/homelab/homelab.env"
+_exp="no"
+_root="/srv/storage"
+if [ -f "$_env" ]; then
+    _v_exp=$(sed -n "s/^EXT_STORAGE_EXPECTED=['\"]\([^'\"]*\)['\"].*/\1/p" "$_env" 2>/dev/null | head -n 1)
+    _v_root=$(sed -n "s/^STORAGE_ROOT=['\"]\([^'\"]*\)['\"].*/\1/p" "$_env" 2>/dev/null | head -n 1)
+    [ -n "$_v_exp" ] && _exp="$_v_exp"
+    [ -n "$_v_root" ] && _root="$_v_root"
+fi
+if [ "$_exp" = "yes" ]; then
+    if ! awk -v mp="$_root" '$2 == mp {f=1} END {exit !f}' /proc/mounts 2>/dev/null; then
+        echo "Gateway Mount Guard: ${_root} не смонтирован (ожидается внешний диск / LUKS2)" >&2
+        exit 1
+    fi
+fi
+exit 0
+MG_EOF
+    chmod 755 "${HOMELAB_LIB_DIR:-/usr/lib/gateway}/storage-mount-guard.sh" 2>/dev/null || true
+    return 0
+}
+
+ensure_openrc_mount_guard() {
+    MG_SVC="$1"
+    MG_INIT="/etc/init.d/${MG_SVC}"
+    [ -f "$MG_INIT" ] || return 0
+    write_storage_mount_guard_script
+    grep -q "GW_MOUNT_GUARD" "$MG_INIT" 2>/dev/null && return 0
+    if grep -Eq '^[[:space:]]*start_pre[[:space:]]*\([[:space:]]*\)[[:space:]]*\{' "$MG_INIT" 2>/dev/null; then
+        awk '
+            !done && /^[[:space:]]*start_pre[[:space:]]*\([[:space:]]*\)[[:space:]]*\{/ {
+                sub(/\{/, "{\n\t/usr/lib/gateway/storage-mount-guard.sh || return 1 # GW_MOUNT_GUARD\n")
+                done=1
+            }
+            { print }
+        ' "$MG_INIT" > "${MG_INIT}.tmp.$$" && chmod +x "${MG_INIT}.tmp.$$" && mv -f "${MG_INIT}.tmp.$$" "$MG_INIT" || rm -f "${MG_INIT}.tmp.$$" 2>/dev/null || true
+    elif ! grep -Eq '^[[:space:]]*start_pre[[:space:]]*\(' "$MG_INIT" 2>/dev/null; then
+        cat << 'MG_HOOK' >> "$MG_INIT"
+
+start_pre() {
+	/usr/lib/gateway/storage-mount-guard.sh || return 1 # GW_MOUNT_GUARD
+}
+MG_HOOK
+    fi
+    return 0
+}
+
 # Создание единой группы media (GID 990) и системных пользователей для Samba и сервисов общего хранилища
 ensure_media_group_and_users() {
+    umask 022
     if [ -z "${SMB_USER:-}" ] || [ -z "${ADMIN_PASS:-}" ]; then
         load_gateway_env
     fi
@@ -93,7 +147,9 @@ ensure_media_group_and_users() {
     # Разблокировка сервисных и пользовательских аккаунтов ('!' -> '*' в /etc/shadow) для smbd, OpenRC и su
     for UNLOCK_U in "$SMB_USER" caddy vaultwarden forgejo metube transmission coder homelab; do
         if [ -f /etc/shadow ] && grep -q "^${UNLOCK_U}:!" /etc/shadow 2>/dev/null; then
+            _sh_mode=$(stat -c "%a" /etc/shadow 2>/dev/null || echo "640")
             sed -i "s/^${UNLOCK_U}:!/${UNLOCK_U}:*/" /etc/shadow 2>/dev/null || passwd -u "$UNLOCK_U" >/dev/null 2>&1 || true
+            chmod "$_sh_mode" /etc/shadow 2>/dev/null || true
         fi
     done
 
@@ -108,13 +164,16 @@ ensure_media_group_and_users() {
 
 # Инициализация структуры единого хранилища /srv/storage и настройка прав (setgid 2775 + POSIX ACL)
 init_homelab_storage() {
-    umask 002
+    umask 022
     ensure_media_group_and_users
+    write_storage_mount_guard_script
+    STORAGE_SHARED="${STORAGE_SHARED:-${STORAGE_ROOT:-/srv/storage}/Shared}"
     mkdir -p \
         "$STORAGE_MUSIC" \
         "$STORAGE_VIDEOS" \
         "$STORAGE_DOWNLOADS" \
         "$STORAGE_INCOMPLETE" \
+        "$STORAGE_SHARED" \
         "$STORAGE_BACKUPS"
 
     repair_storage_permissions
@@ -122,25 +181,34 @@ init_homelab_storage() {
     return 0
 }
 
-# Выставление эталонных прав доступа на /srv/storage (группа media, setgid 2775, POSIX ACL)
+# Выставление эталонных прав доступа на /srv/storage (изоляция Backups 0700 root:root, медиа/Shared 2775 + POSIX ACL rwX)
 repair_storage_permissions() {
+    umask 022
     ensure_media_group_and_users
     [ -d "$STORAGE_ROOT" ] || return 0
+    STORAGE_SHARED="${STORAGE_SHARED:-${STORAGE_ROOT:-/srv/storage}/Shared}"
 
     chmod 755 /srv 2>/dev/null || true
-    chown "${SMB_USER}:${MEDIA_GROUP}" "$STORAGE_ROOT" 2>/dev/null || chown root:"$MEDIA_GROUP" "$STORAGE_ROOT" 2>/dev/null || true
-    chmod 2775 "$STORAGE_ROOT" 2>/dev/null || true
+    chown root:root "$STORAGE_ROOT" 2>/dev/null || true
+    chmod 755 "$STORAGE_ROOT" 2>/dev/null || true
+
+    if [ -d "$STORAGE_BACKUPS" ]; then
+        chown -R root:root "$STORAGE_BACKUPS" 2>/dev/null || true
+        chmod 0700 "$STORAGE_BACKUPS" 2>/dev/null || true
+        find "$STORAGE_BACKUPS" -type d -exec chmod 0700 {} + 2>/dev/null || true
+        find "$STORAGE_BACKUPS" -type f -exec chmod 0600 {} + 2>/dev/null || true
+    fi
 
     for SUB_D in \
         "$STORAGE_MUSIC" \
         "$STORAGE_VIDEOS" \
         "$STORAGE_DOWNLOADS" \
         "$STORAGE_INCOMPLETE" \
-        "$STORAGE_BACKUPS"; do
+        "$STORAGE_SHARED"; do
         [ -d "$SUB_D" ] || mkdir -p "$SUB_D" 2>/dev/null || continue
     done
 
-    for TOP_D in "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" "$STORAGE_BACKUPS"; do
+    for TOP_D in "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" "$STORAGE_SHARED"; do
         [ -d "$TOP_D" ] || continue
         chown -R "${SMB_USER}:${MEDIA_GROUP}" "$TOP_D" 2>/dev/null || chgrp -R "$MEDIA_GROUP" "$TOP_D" 2>/dev/null || true
         find "$TOP_D" -type d -exec chmod 2775 {} + 2>/dev/null || true
@@ -155,13 +223,13 @@ repair_storage_permissions() {
 
     # Применение наследуемых POSIX ACL (если установлен пакет acl и ФС поддерживает ACL)
     if command -v setfacl >/dev/null 2>&1; then
-        setfacl -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" -d -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" "$STORAGE_ROOT" 2>/dev/null || true
-        setfacl -R -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" -d -m "u:${SMB_USER}:rwx,g:${MEDIA_GROUP}:rwx,o::rx" \
-            "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" 2>/dev/null || true
+        setfacl -b -k "$STORAGE_ROOT" 2>/dev/null || true
+        setfacl -R -m "u:${SMB_USER}:rwX,g:${MEDIA_GROUP}:rwX,o::rX" -d -m "u:${SMB_USER}:rwX,g:${MEDIA_GROUP}:rwX,o::rX" \
+            "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" "$STORAGE_SHARED" 2>/dev/null || true
         for ACL_U in metube transmission coder; do
             if id "$ACL_U" >/dev/null 2>&1; then
-                setfacl -R -m "u:${ACL_U}:rwx" -d -m "u:${ACL_U}:rwx" \
-                    "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" 2>/dev/null || true
+                setfacl -R -m "u:${ACL_U}:rwX" -d -m "u:${ACL_U}:rwX" \
+                    "$STORAGE_MUSIC" "$STORAGE_VIDEOS" "$STORAGE_DOWNLOADS" "$STORAGE_SHARED" 2>/dev/null || true
             fi
         done
     fi
@@ -170,7 +238,9 @@ repair_storage_permissions() {
 
 # Проверка: смонтирован ли внешний накопитель (и зашифрован ли он LUKS2) в /srv/storage
 get_storage_disk_badge() {
-    load_gateway_env
+    if [ -z "${STORAGE_ROOT:-}" ] || [ -z "${EXT_STORAGE_EXPECTED:-}" ]; then
+        load_gateway_env
+    fi
     MNT_SRC=$(awk -v mp="${STORAGE_ROOT:-/srv/storage}" '$2 == mp {print $1; exit}' /proc/mounts 2>/dev/null || true)
     MNT_FSTYPE=$(awk -v mp="${STORAGE_ROOT:-/srv/storage}" '$2 == mp {print $3; exit}' /proc/mounts 2>/dev/null || true)
     if [ -n "$MNT_SRC" ]; then
@@ -200,6 +270,7 @@ get_storage_disk_badge() {
 # Вывод статистики использования единого хранилища /srv/storage с прогресс-барами
 print_storage_stats() {
     load_gateway_env
+    STORAGE_SHARED="${STORAGE_SHARED:-${STORAGE_ROOT:-/srv/storage}/Shared}"
     if is_storage_mount_ready; then
         init_homelab_storage
     fi
@@ -216,6 +287,7 @@ print_storage_stats() {
     fi
     ui_box_sep "КАТАЛОГИ ХРАНИЛИЩА (SAMBA & МЕДИА)"
     for D_ITEM in \
+        "$STORAGE_SHARED" \
         "$STORAGE_MUSIC" \
         "$STORAGE_VIDEOS" \
         "$STORAGE_DOWNLOADS" \
@@ -230,11 +302,3 @@ print_storage_stats() {
     ui_box_bottom
     return 0
 }
-
-# ==============================================================================
-# Подсистема внешних накопителей (USB / SATA / NVMe):
-# Поддержка LUKS2 шифрования, форматирования (ext4 / btrfs / f2fs),
-# авто-разблокировки при загрузке и переноса тяжелых данных сервисов Homelab
-# ==============================================================================
-
-# Установка утилит для работы с дисками, LUKS2 и файловыми системами ext4, btrfs, f2fs

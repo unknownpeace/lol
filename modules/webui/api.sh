@@ -4,6 +4,12 @@
 # Используется как LuCI RPCD (OpenWrt), так и Alpine Web Dashboard (server.py)
 # ==============================================================================
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+umask 077
+
+RUN_GW_DIR="/run/gateway"
+mkdir -p "$RUN_GW_DIR" "${RUN_GW_DIR}/console_tokens" 2>/dev/null || true
+chown root:root "$RUN_GW_DIR" "${RUN_GW_DIR}/console_tokens" 2>/dev/null || true
+chmod 700 "$RUN_GW_DIR" "${RUN_GW_DIR}/console_tokens" 2>/dev/null || true
 
 [ "${1:-}" = "call" ] || exit 1
 METHOD="${2:-}"
@@ -45,11 +51,27 @@ _is_safe_id() {
     esac
 }
 
+_is_ip_literal() {
+    case "${1:-}" in
+        *:*) return 0 ;;
+    esac
+    printf "%s" "${1:-}" | awk -F'.' '
+        NF != 4 { exit 1 }
+        {
+            for (i = 1; i <= 4; i++) {
+                if ($i !~ /^[0-9]+$/) exit 1
+                if ($i + 0 < 0 || $i + 0 > 255) exit 1
+            }
+            exit 0
+        }
+    ' >/dev/null 2>&1
+}
+
 _is_job_running() {
     _jid="$1"
-    _pf="/tmp/gw_luci_job_${_jid}.pid"
-    _rf="/tmp/gw_luci_job_${_jid}.rc"
-    _sf="/tmp/gw_luci_job_${_jid}.starting"
+    _pf="${RUN_GW_DIR}/gw_job_${_jid}.pid"
+    _rf="${RUN_GW_DIR}/gw_job_${_jid}.rc"
+    _sf="${RUN_GW_DIR}/gw_job_${_jid}.starting"
     [ -f "$_rf" ] && return 1
     if [ -f "$_pf" ]; then
         _jpid=$(cat "$_pf" 2>/dev/null | tr -dc '0-9' || true)
@@ -105,8 +127,8 @@ _collect_alpine_ssl_json() {
         _exp=$(openssl x509 -in "$SSL_FULLCHAIN_FILE" -noout -enddate 2>/dev/null | cut -d= -f2 | tr -d '\r\n' || true)
         if [ -n "$_exp" ]; then
             _clean_dt=$(printf "%s" "$_exp" | sed -E 's/  +/ 0/')
-            _exp_s=$(date -D '%b %d %T %Y GMT' -d "$_clean_dt" +%s 2>/dev/null || date -d "$_exp" +%s 2>/dev/null || echo 0)
-            _now_s=$(date +%s 2>/dev/null || echo 0)
+            _exp_s=$(TZ=UTC date -D '%b %d %T %Y GMT' -d "$_clean_dt" +%s 2>/dev/null || TZ=UTC date -d "$_exp" +%s 2>/dev/null || echo 0)
+            _now_s=$(TZ=UTC date +%s 2>/dev/null || echo 0)
             [ "${_exp_s:-0}" -gt "${_now_s:-0}" ] && _days=$(( (_exp_s - _now_s) / 86400 ))
         fi
     fi
@@ -149,9 +171,8 @@ _collect_alpine_homelab_json() {
     _le_on="no"
     is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ] && _le_on="yes"
 
-    _hl_tmp="/tmp/gw_api_hl.$$"
-    : > "$_hl_tmp"
-    while IFS='|' read -r M_ID M_EN M_SVC M_PORT M_DOM M_USR M_TITLE <&3; do
+    _hl_tmp=$(mktemp "${RUN_GW_DIR}/hl.XXXXXX") || return 1
+    while IFS='|' read -r M_ID M_EN M_SVC M_PORT M_DOM _M_USR M_TITLE <&3; do
         case "$M_ID" in ''|\#*) continue ;; esac
         _run="false"
         if [ -n "$M_SVC" ]; then
@@ -241,17 +262,17 @@ _collect_alpine_storage_json() {
         _st_fs=$(awk -v mp="$_st_mp" '$2 == mp {print $3; exit}' /proc/mounts 2>/dev/null || true)
     fi
     _st_badge=$(get_storage_disk_badge 2>/dev/null || true)
-    _dirs_tmp="/tmp/gw_api_stdirs.$$"
-    : > "$_dirs_tmp"
+    _dirs_tmp=$(mktemp "${RUN_GW_DIR}/stdirs.XXXXXX") || return 1
     for _dspec in \
         "Music|${STORAGE_MUSIC:-${_st_root}/Music}" \
         "Videos|${STORAGE_VIDEOS:-${_st_root}/Videos}" \
         "Downloads|${STORAGE_DOWNLOADS:-${_st_root}/Downloads}" \
-        "Incomplete|${STORAGE_INCOMPLETE:-${_st_root}/Incomplete}" \
+        "Incomplete|${STORAGE_INCOMPLETE:-${_st_root}/Downloads/Incomplete}" \
         "Backups|${STORAGE_BACKUPS:-${_st_root}/Backups}" \
         "LXC|${_st_root}/lxc" \
-        "Git-Repos|${_st_root}/git-repos" \
-        "Workspace|${_st_root}/workspace"; do
+        "Git-Repos|${STORAGE_REPOS:-${_st_root}/Git-Repos}" \
+        "Workspace|${STORAGE_CODE:-${_st_root}/Workspace}" \
+        "Shared|${STORAGE_SHARED:-${_st_root}/Shared}"; do
         _dn="${_dspec%%|*}"
         _dp="${_dspec#*|}"
         if [ -d "$_dp" ]; then
@@ -311,8 +332,7 @@ _collect_alpine_lxc_json() {
     _cts_json='[]'
     if [ "$_lxc_inst" = "true" ]; then
         _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
-        _lxc_tmp="/tmp/gw_api_lxc.$$"
-        : > "$_lxc_tmp"
+        _lxc_tmp=$(mktemp "${RUN_GW_DIR}/lxc.XXXXXX") || return 1
         if [ -d "$_real_path" ]; then
             for _ct_dir in "${_real_path}/"*; do
                 [ -d "$_ct_dir" ] || continue
@@ -352,8 +372,7 @@ _collect_alpine_lxc_json() {
                 if [ -d "${_ct_dir}/rootfs" ]; then
                     _disk_use=$(timeout 2 du -sh "${_ct_dir}/rootfs" 2>/dev/null | awk '{print $1}' || true)
                 fi
-                _snaps_tmp="/tmp/gw_api_snaps.$$"
-                : > "$_snaps_tmp"
+                _snaps_tmp=$(mktemp "${RUN_GW_DIR}/snaps.XXXXXX") || return 1
                 if [ -d "${_ct_dir}/snaps" ]; then
                     for _sd in "${_ct_dir}/snaps/"*; do
                         [ -d "$_sd" ] || continue
@@ -544,8 +563,9 @@ _cmd_status() {
     fi
     UPD_STAT=""
     UPD_BEHIND=0
-    if [ -f /tmp/gateway_update_check.cache ]; then
-        IFS='|' read -r UPD_STAT UPD_BEHIND _ _ < /tmp/gateway_update_check.cache 2>/dev/null || true
+    _upd_cache_f="${GATEWAY_UPDATE_CACHE:-/run/gateway/update_check.cache}"
+    if [ -f "$_upd_cache_f" ]; then
+        IFS='|' read -r UPD_STAT UPD_BEHIND _ _ < "$_upd_cache_f" 2>/dev/null || true
     fi
 
     SUB_CNT=$(count_sub_urls)
@@ -613,7 +633,7 @@ _cmd_status() {
         fi
     fi
 
-    _leases_tmp="/tmp/gw_luci_leases.$$"
+    _leases_tmp=$(mktemp "${RUN_GW_DIR}/leases.XXXXXX") || return 1
     printf "%s" "$AGH_DHCP_JSON" | jq -r '.leases[]? | [.ip, (.mac // ""), (.hostname // "")] | @tsv' > "$_leases_tmp" 2>/dev/null || : > "$_leases_tmp"
 
     DEVICES_JSON=$(awk -v self="$LAN_IP" -v gw="${GW_IP:-}" -v byp_f="$USER_BYPASS_IPS" -v vpn_f="$USER_FORCE_PROXY_IPS" '
@@ -672,8 +692,8 @@ _cmd_status() {
     rm -f "$_leases_tmp" 2>/dev/null || true
 
     ACT_JOB=""
-    if [ -f /tmp/gw_luci_current.id ]; then
-        _cur_jid=$(cat /tmp/gw_luci_current.id 2>/dev/null | tr -dc 'A-Za-z0-9_-' || true)
+    if [ -f "${RUN_GW_DIR}/job_current.id" ]; then
+        _cur_jid=$(cat "${RUN_GW_DIR}/job_current.id" 2>/dev/null | tr -dc 'A-Za-z0-9_-' || true)
         if [ -n "$_cur_jid" ] && _is_job_running "$_cur_jid"; then
             ACT_JOB="$_cur_jid"
         fi
@@ -719,7 +739,7 @@ _cmd_status() {
         --arg agh_pid "$AGH_PID" \
         --arg agh_rss "$AGH_RSS" \
         --arg agh_ver "$AGH_VER" \
-        --arg agh_user "${AGH_USER:-neko}" \
+        --arg agh_user "${AGH_USER:-admin}" \
         --argjson agh_status "$AGH_ST_JSON" \
         --argjson dhcp_enabled "$DHCP_EN" \
         --argjson dhcp_status "$AGH_DHCP_JSON" \
@@ -845,12 +865,12 @@ _cmd_status() {
 }
 
 _cmd_trace() {
-    DNS_AI=$(nslookup chatgpt.com 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
-    DNS_RU=$(nslookup ya.ru 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
-    DNS_DDR_A=$(nslookup -type=A _dns.resolver.arpa 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
-    DNS_DOH_A=$(nslookup -type=A use-application-dns.net 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
+    DNS_AI=$(nslookup -timeout=2 chatgpt.com 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
+    DNS_RU=$(nslookup -timeout=2 ya.ru 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
+    DNS_DDR_A=$(nslookup -timeout=2 -type=A _dns.resolver.arpa 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
+    DNS_DOH_A=$(nslookup -timeout=2 -type=A use-application-dns.net 127.0.0.1 2>/dev/null | awk '/^Address/ && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $2 !~ /^127\./ {print $2; exit}')
     DDR_OK="false"
-    if [ -z "$DNS_DDR_A" ] && [ -z "$DNS_DOH_A" ] && ! nslookup -type=A -port=1053 _dns.resolver.arpa 127.0.0.1 >/dev/null 2>&1; then
+    if [ -z "$DNS_DDR_A" ] && [ -z "$DNS_DOH_A" ] && ! nslookup -timeout=2 -type=A -port=1053 _dns.resolver.arpa 127.0.0.1 >/dev/null 2>&1; then
         DDR_OK="true"
     fi
 
@@ -881,9 +901,16 @@ _cmd_trace() {
 
 _cmd_domain_inspect() {
     RAW_D=$(_jq_arg "domain")
+    _d_norm=$(printf "%s" "$RAW_D" | sed -E 's|^[[:space:]]*([a-zA-Z0-9+.-]+://)?||; s|^//||; s|[/?#].*$||; s|^[^@]*@||; s|:\S*$||; s|[\[\]]||g; s/[[:space:]]*$//')
+    if [ -n "$_d_norm" ] && _is_ip_literal "$_d_norm"; then
+        _json_err "Введите доменное имя, а не IP-адрес: ${RAW_D}"; return 0
+    fi
     CLEAN_SUF=$(sanitize_domain_entry "$RAW_D" 2>/dev/null || true)
     [ -z "$CLEAN_SUF" ] && { _json_err "Некорректное имя домена: ${RAW_D}"; return 0; }
     CLEAN_HOST="${CLEAN_SUF#+.}"
+    if _is_ip_literal "$CLEAN_HOST"; then
+        _json_err "Введите доменное имя, а не IP-адрес: ${RAW_D}"; return 0
+    fi
 
     LIST_SRC="rules"
     if grep -qxF "$CLEAN_SUF" "$USER_DIRECT_FILE" 2>/dev/null; then
@@ -946,7 +973,7 @@ _cmd_set_dhcp() {
         on|off) ;;
         *) _json_err "Недопустимый режим DHCP: ${MODE}"; return 0 ;;
     esac
-    _out_f="/tmp/gw_luci_dhcp.$$"
+    _out_f=$(mktemp "${RUN_GW_DIR}/dhcp.XXXXXX") || return 1
     _rc=0
     configure_smart_dhcp "$MODE" >"$_out_f" 2>&1 || _rc=$?
     MSG=$(_strip_ansi < "$_out_f" | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -1023,7 +1050,7 @@ _cmd_set_network() {
         }
     fi
 
-    _net_out="/tmp/gw_luci_net.$$"
+    _net_out=$(mktemp "${RUN_GW_DIR}/net.XXXXXX") || return 1
     _rc=0
     apply_network_ips "$IN_LAN" "$IN_GW" </dev/null >"$_net_out" 2>&1 || _rc=$?
     MSG=$(_strip_ansi < "$_net_out" | tail -n 5 | tr '\n' ' ')
@@ -1047,17 +1074,26 @@ _cmd_set_subscription() {
         CLEAN_LIST=$(sanitize_sub_url_list "$URLS_RAW" 2>/dev/null || true)
         BAD="no"
         _valid_cnt=0
+        set -f
         for _u in $CLEAN_LIST; do
             case "$_u" in
                 http://*|https://*)
                     case "$_u" in
-                        *[\"\'\\\`\;\|\&\<\>\$\(\)]*) BAD="yes" ;;
-                        *) _valid_cnt=$((_valid_cnt + 1)) ;;
+                        *[!A-Za-z0-9:/?\&=._~#%+-@\[\]]*|*[\"\'\\\`\;\|\<\>\$\(\)]*) BAD="yes" ;;
+                        *)
+                            _u_rest="${_u#*://}"
+                            if [ -z "$_u_rest" ]; then
+                                BAD="yes"
+                            else
+                                _valid_cnt=$((_valid_cnt + 1))
+                            fi
+                            ;;
                     esac
                     ;;
                 *) BAD="yes" ;;
             esac
         done
+        set +f
         if [ "$BAD" = "yes" ] || [ "$_valid_cnt" -eq 0 ]; then
             _json_err "Некорректная ссылка подписки (разрешены http:// или https:// без спецсимволов)"
             return 0
@@ -1076,13 +1112,25 @@ _cmd_set_subscription() {
 }
 
 _cmd_node_add() {
-    RAW_URI=$(_jq_arg "uri" | tr -d '\r\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    RAW_URI=$(_jq_arg "uri" | tr -d '\r\n\t' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     case "$RAW_URI" in
         vless://*|vmess://*|ss://*|ssr://*|trojan://*|hy2://*|hysteria2://*|hysteria://*|tuic://*|wg://*|wireguard://*|anytls://*|mieru://*|xhttp://*|splithttp://*|socks5://*|trusttunnel://*|sudoku://*|call://*|naive+https://*|naive+quic://*|naive://*|snell://*|openvpn://*|ssh://*)
+            _uri_after="${RAW_URI#*://}"
+            _uri_host="${_uri_after##*@}"
+            _uri_host="${_uri_host%%[/?#]*}"
+            if [ -z "$_uri_after" ] || [ -z "$_uri_host" ]; then
+                _json_err "Некорректный URI-ключ: отсутствует адрес узла"
+                return 0
+            fi
+            _fmt_nodes=$(format_uri_keys "$RAW_URI" 2>/dev/null || true)
+            if [ -z "$(printf "%s" "$_fmt_nodes" | tr -d ' \t\r\n')" ]; then
+                _json_err "Не удалось распознать URI-ключ"
+                return 0
+            fi
             mkdir -p "$SB_PROVIDERS_DIR" 2>/dev/null || true
             [ -f "$CUSTOM_NODES_FILE" ] || : > "$CUSTOM_NODES_FILE"
             sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
-            format_uri_keys "$RAW_URI" >> "$CUSTOM_NODES_FILE"
+            printf "%s\n" "$_fmt_nodes" >> "$CUSTOM_NODES_FILE"
             jq -cn '{ok: true}'
             ;;
         *)
@@ -1117,6 +1165,9 @@ _cmd_domain_rule() {
 
     CLEAN_SUF=$(sanitize_domain_entry "$RAW_DOM" 2>/dev/null || true)
     [ -z "$CLEAN_SUF" ] && { _json_err "Некорректный домен: ${RAW_DOM}"; return 0; }
+    if _is_ip_literal "${CLEAN_SUF#+.}" || _is_ip_literal "$RAW_DOM"; then
+        _json_err "Укажите доменное имя, а не IP-адрес: ${RAW_DOM}"; return 0
+    fi
 
     case "$ACT" in
         add)
@@ -1206,7 +1257,7 @@ _cmd_set_telegram() {
 _cmd_set_password() {
     NEW_P=$(_jq_arg "password" | tr -d '\r\n')
     [ "${#NEW_P}" -lt 4 ] && { _json_err "Пароль должен быть не короче 4 символов"; return 0; }
-    _pw_out="/tmp/gw_luci_pw.$$"
+    _pw_out=$(mktemp "${RUN_GW_DIR}/pw.XXXXXX") || return 1
     _rc=0
     change_unified_password "$NEW_P" "yes" </dev/null >"$_pw_out" 2>&1 || _rc=$?
     MSG=$(_strip_ansi < "$_pw_out" | tail -n 3 | tr '\n' ' ')
@@ -1234,7 +1285,8 @@ _cmd_update_check() {
     check_gateway_repo_updates "force" >/dev/null 2>&1 || true
     STAT="UP_TO_DATE"
     BEHIND=0
-    [ -f /tmp/gateway_update_check.cache ] && IFS='|' read -r STAT BEHIND _ _ < /tmp/gateway_update_check.cache 2>/dev/null || true
+    _upd_cache_f="${GATEWAY_UPDATE_CACHE:-/run/gateway/update_check.cache}"
+    [ -f "$_upd_cache_f" ] && IFS='|' read -r STAT BEHIND _ _ < "$_upd_cache_f" 2>/dev/null || true
     COMMITS_JSON='[]'
     if [ "$STAT" = "UPDATE_AVAILABLE" ]; then
         COMMITS_JSON=$(git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" log --oneline -n 10 "HEAD..origin/${CUR_BR}" 2>/dev/null | jq -Rn '[inputs | select(length > 0)]' 2>/dev/null || echo '[]')
@@ -1329,7 +1381,7 @@ _cmd_lxc_templates() {
     is_openwrt 2>/dev/null && { _json_err "LXC доступен только в Alpine Linux"; return 0; }
     FORCE_T=$(_jq_arg "force")
     LXC_ARCH=$(get_lxc_system_arch 2>/dev/null || echo "amd64")
-    CACHE_T="/tmp/lxc_web_catalog_${LXC_ARCH}.tsv"
+    CACHE_T="${RUN_GW_DIR}/lxc_web_catalog_${LXC_ARCH}.tsv"
     SRC_LBL="images.linuxcontainers.org"
 
     NEED_FETCH="no"
@@ -1340,13 +1392,13 @@ _cmd_lxc_templates() {
     fi
 
     if [ "$NEED_FETCH" = "yes" ]; then
-        _tmp_idx="/tmp/lxc_idx_raw.$$"
-        if curl -fsS --connect-timeout 8 -m 15 "https://images.linuxcontainers.org/meta/1.0/index-system" 2>/dev/null | \
+        _tmp_idx=$(mktemp "${RUN_GW_DIR}/lxc_idx.XXXXXX") || _tmp_idx=""
+        if [ -n "$_tmp_idx" ] && curl -fsS --connect-timeout 8 -m 15 "https://images.linuxcontainers.org/meta/1.0/index-system" 2>/dev/null | \
             awk -F';' -v a="$LXC_ARCH" '($3 == a && NF >= 4 && $1 != "" && $2 != "") { v = ($4 != "" ? $4 : "default"); b = ($5 != "" ? $5 : ""); print $1 "\t" $2 "\t" v "\t" b }' | \
             sort -u > "$_tmp_idx" 2>/dev/null && [ -s "$_tmp_idx" ]; then
             mv -f "$_tmp_idx" "$CACHE_T"
         else
-            rm -f "$_tmp_idx" 2>/dev/null || true
+            [ -n "$_tmp_idx" ] && rm -f "$_tmp_idx" 2>/dev/null || true
             SRC_LBL="fallback"
         fi
     fi
@@ -1409,14 +1461,14 @@ _cmd_lxc_console_token() {
     fi
 
     # Очистка просроченных токенов старше 120 сек
-    find /tmp -maxdepth 1 -name 'gw_console_tok_*' -mmin +2 -delete 2>/dev/null || true
+    find "${RUN_GW_DIR}/console_tokens" -maxdepth 1 -type f -mmin +2 -delete 2>/dev/null || true
 
     TOK=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -dc '0-9a-f' | head -c 32 || true)
     [ "${#TOK}" -ne 32 ] && { _json_err "Не удалось сгенерировать токен консоли"; return 0; }
     EXP_TS=$(( $(date +%s 2>/dev/null || echo 0) + 60 ))
     (
         umask 077
-        printf "%s|%s\n" "$CT_NAME" "$EXP_TS" > "/tmp/gw_console_tok_${TOK}"
+        printf "%s|%s\n" "$CT_NAME" "$EXP_TS" > "${RUN_GW_DIR}/console_tokens/${TOK}"
     )
     jq -cn --arg token "$TOK" --arg url "/console/?arg=${TOK}" '{ok: true, token: $token, url: $url}'
 }
@@ -1431,10 +1483,18 @@ _cmd_lxc_exec() {
     if ! lxc-info -n "$CT_NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
         _json_err "Контейнер ${CT_NAME} не запущен"; return 0
     fi
-    _exec_f="/tmp/gw_lxc_exec.$$"
+    _exec_f=$(mktemp "${RUN_GW_DIR}/lxc_exec.XXXXXX") || return 1
     _rc=0
-    timeout 20 lxc-attach -n "$CT_NAME" -- /bin/sh -c "$CMD_STR" </dev/null >"$_exec_f" 2>&1 || _rc=$?
-    _out=$(head -c 16000 "$_exec_f" 2>/dev/null | _strip_ansi || true)
+    if timeout -k 1 1 true >/dev/null 2>&1; then
+        timeout -k 3 20 lxc-attach -n "$CT_NAME" -- /bin/sh -c "$CMD_STR" </dev/null >"$_exec_f" 2>&1 || _rc=$?
+    else
+        timeout 20 lxc-attach -n "$CT_NAME" -- /bin/sh -c "$CMD_STR" </dev/null >"$_exec_f" 2>&1 || _rc=$?
+    fi
+    if command -v iconv >/dev/null 2>&1; then
+        _out=$(head -c 16000 "$_exec_f" 2>/dev/null | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null | _strip_ansi || true)
+    else
+        _out=$(head -c 16000 "$_exec_f" 2>/dev/null | _strip_ansi || true)
+    fi
     rm -f "$_exec_f" 2>/dev/null || true
     jq -cn --argjson exit_code "$_rc" --arg output "$_out" '{ok: true, exit_code: $exit_code, output: $output}'
 }
@@ -1456,23 +1516,24 @@ _cmd_lxc_config() {
 
     case "$MEM_IN" in
         ""|none|0) MEM_VAL="none" ;;
-        *[KkMmGg])
-            case "$MEM_IN" in
-                *[!0-9KkMmGg]*) _json_err "Некорректный лимит ОЗУ (пример: 512M, 2G)"; return 0 ;;
-                *) MEM_VAL="$MEM_IN" ;;
-            esac
+        *)
+            if printf "%s" "$MEM_IN" | grep -Eq '^[1-9][0-9]*[MGKmgk]$'; then
+                MEM_VAL="$MEM_IN"
+            elif printf "%s" "$MEM_IN" | grep -Eq '^[1-9][0-9]*$'; then
+                MEM_VAL="${MEM_IN}M"
+            else
+                _json_err "Некорректный лимит ОЗУ (пример: 512M, 2G)"; return 0
+            fi
             ;;
-        *[!0-9]*) _json_err "Некорректный лимит ОЗУ (пример: 512M, 2G)"; return 0 ;;
-        *) MEM_VAL="${MEM_IN}M" ;;
     esac
 
     case "$CPU_IN" in
         ""|none|0) CPU_VAL="none" ;;
         *)
-            if printf "%s" "$CPU_IN" | grep -Eq '^[0-9]+([.][0-9]+)?$'; then
+            if printf "%s" "$CPU_IN" | grep -Eq '^([1-9][0-9]*([.][0-9]+)?|0[.][0-9]*[1-9][0-9]*)$'; then
                 CPU_VAL="$CPU_IN"
             else
-                _json_err "Некорректный лимит CPU (пример: 1, 2, 0.5)"; return 0
+                _json_err "Некорректный лимит CPU (должен быть > 0, пример: 1, 2, 0.5)"; return 0
             fi
             ;;
     esac
@@ -1489,11 +1550,19 @@ _cmd_lxc_config() {
     fi
 
     if [ -n "$RPASS_IN" ]; then
+        _pw_ok=0
         if lxc-info -n "$CT_NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
-            printf "root:%s\n" "$RPASS_IN" | lxc-attach -n "$CT_NAME" -- chpasswd >/dev/null 2>&1 || true
+            printf "root:%s\n" "$RPASS_IN" | lxc-attach -n "$CT_NAME" -- chpasswd >/dev/null 2>&1 && _pw_ok=1
         elif [ -d "${_real_path}/${CT_NAME}/rootfs" ]; then
-            printf "root:%s\n" "$RPASS_IN" | chroot "${_real_path}/${CT_NAME}/rootfs" /usr/sbin/chpasswd >/dev/null 2>&1 || \
-            printf "root:%s\n" "$RPASS_IN" | chroot "${_real_path}/${CT_NAME}/rootfs" /sbin/chpasswd >/dev/null 2>&1 || true
+            if [ -x "${_real_path}/${CT_NAME}/rootfs/usr/sbin/chpasswd" ]; then
+                printf "root:%s\n" "$RPASS_IN" | chroot "${_real_path}/${CT_NAME}/rootfs" /usr/sbin/chpasswd >/dev/null 2>&1 && _pw_ok=1
+            elif [ -x "${_real_path}/${CT_NAME}/rootfs/sbin/chpasswd" ]; then
+                printf "root:%s\n" "$RPASS_IN" | chroot "${_real_path}/${CT_NAME}/rootfs" /sbin/chpasswd >/dev/null 2>&1 && _pw_ok=1
+            fi
+        fi
+        if [ "$_pw_ok" -ne 1 ]; then
+            _json_err "Настройки сохранены, но не удалось сменить пароль root внутри ${CT_NAME}"
+            return 0
         fi
     fi
 
@@ -1519,15 +1588,7 @@ _cmd_job_start() {
     A1=$(_jq_arg "arg1")
     A2=$(_jq_arg "arg2")
 
-    if [ -f /tmp/gw_luci_current.id ]; then
-        OLD_ID=$(cat /tmp/gw_luci_current.id 2>/dev/null | tr -dc 'A-Za-z0-9_-' || true)
-        if [ -n "$OLD_ID" ] && _is_job_running "$OLD_ID"; then
-            jq -cn --arg id "$OLD_ID" '{ok: false, running_id: $id, error: "Уже выполняется фоновая операция"}'
-            return 0
-        fi
-    fi
-
-    # Валидация параметров строго по белому списку
+    # Валидация параметров строго по белому списку до захвата блокировки
     CMD_BODY=""
     case "$ACT" in
         restart)
@@ -1570,7 +1631,7 @@ _cmd_job_start() {
             CMD_BODY='restore_unified_backup'
             ;;
         update)
-            CMD_BODY='exec /usr/bin/gw update </dev/null'
+            # Запускается напрямую через /usr/bin/gw update (без source gateway.sh, чтобы git pull не переписал под собой исполняемый файл)
             ;;
         homelab_action)
             is_openwrt 2>/dev/null && { _json_err "Модули Homelab доступны только в Alpine Linux"; return 0; }
@@ -1636,7 +1697,33 @@ _cmd_job_start() {
                 _json_err "Некорректная спецификация контейнера"; return 0
             fi
             _spec_name=$(printf "%s" "$A1" | jq -r '.name // empty' 2>/dev/null || true)
+            _spec_dist=$(printf "%s" "$A1" | jq -r '.distro // empty' 2>/dev/null || true)
+            _spec_rel=$(printf "%s" "$A1" | jq -r '.release // empty' 2>/dev/null || true)
+            _spec_var=$(printf "%s" "$A1" | jq -r '.variant // empty' 2>/dev/null || true)
+            _spec_net=$(printf "%s" "$A1" | jq -r '.net_mode // empty' 2>/dev/null || true)
+            _spec_sip=$(printf "%s" "$A1" | jq -r '.static_ip // empty' 2>/dev/null || true)
+            _spec_sgw=$(printf "%s" "$A1" | jq -r '.static_gw // empty' 2>/dev/null || true)
+            _spec_sdns=$(printf "%s" "$A1" | jq -r '.static_dns // empty' 2>/dev/null || true)
+            _spec_mem=$(printf "%s" "$A1" | jq -r '.mem_limit // empty' 2>/dev/null | tr -d ' \t\r\n' || true)
+            _spec_cpu=$(printf "%s" "$A1" | jq -r '.cpu_limit // empty' 2>/dev/null | tr -d ' \t\r\n' || true)
+
             _is_safe_id "$_spec_name" || { _json_err "Некорректное имя контейнера (латиница, цифры, - и _)"; return 0; }
+            printf "%s" "$_spec_dist" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || { _json_err "Некорректный дистрибутив LXC"; return 0; }
+            printf "%s" "$_spec_rel" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || { _json_err "Некорректный релиз LXC"; return 0; }
+            case "$_spec_dist$_spec_rel$_spec_var" in *..*) _json_err "Недопустимый путь в параметрах образа"; return 0 ;; esac
+            [ -n "$_spec_var" ] && ! printf "%s" "$_spec_var" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' && { _json_err "Некорректный вариант образа"; return 0; }
+            case "$_spec_net" in ""|nat|macvlan) ;; *) _json_err "Некорректный сетевой режим LXC"; return 0 ;; esac
+            [ -n "$_spec_sip" ] && ! is_valid_ipv4_cidr "$_spec_sip" && { _json_err "Некорректный статический IPv4/CIDR (пример: 10.0.3.50/24)"; return 0; }
+            [ -n "$_spec_sgw" ] && ! is_valid_ipv4 "$_spec_sgw" && { _json_err "Некорректный IPv4 шлюза контейнера"; return 0; }
+            [ -n "$_spec_sdns" ] && ! is_valid_ipv4 "$_spec_sdns" && { _json_err "Некорректный IPv4 DNS контейнера"; return 0; }
+            case "$_spec_mem" in
+                ""|none|0) ;;
+                *) printf "%s" "$_spec_mem" | grep -Eq '^[1-9][0-9]*[MGKmgk]?$' || { _json_err "Некорректный лимит ОЗУ (пример: 512M, 2G)"; return 0; } ;;
+            esac
+            case "$_spec_cpu" in
+                ""|none|0) ;;
+                *) printf "%s" "$_spec_cpu" | grep -Eq '^([1-9][0-9]*([.][0-9]+)?|0[.][0-9]*[1-9][0-9]*)$' || { _json_err "Некорректный лимит CPU (должен быть > 0)"; return 0; } ;;
+            esac
             _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
             [ -e "${_real_path}/${_spec_name}" ] && { _json_err "Контейнер ${_spec_name} уже существует"; return 0; }
             ;;
@@ -1644,6 +1731,7 @@ _cmd_job_start() {
             is_openwrt 2>/dev/null && { _json_err "LXC доступен только в Alpine Linux"; return 0; }
             _is_safe_id "$A1" || { _json_err "Некорректное имя исходного контейнера"; return 0; }
             _is_safe_id "$A2" || { _json_err "Некорректное имя клона (латиница, цифры, - и _)"; return 0; }
+            [ "$A1" = "$A2" ] && { _json_err "Имя клона должно отличаться от исходного контейнера"; return 0; }
             _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
             [ -f "${_real_path}/${A1}/config" ] || { _json_err "Контейнер ${A1} не найден"; return 0; }
             [ -e "${_real_path}/${A2}" ] && { _json_err "Контейнер ${A2} уже существует"; return 0; }
@@ -1677,8 +1765,11 @@ _cmd_job_start() {
         ssl_duckdns)
             is_openwrt 2>/dev/null && { _json_err "SSL доступен только в Alpine Linux"; return 0; }
             case "$A1" in
-                ""|*[!A-Za-z0-9.-]*) _json_err "Некорректный субдомен DuckDNS"; return 0 ;;
+                *..*) _json_err "Некорректный субдомен DuckDNS"; return 0 ;;
             esac
+            if ! printf "%s" "$A1" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$'; then
+                _json_err "Некорректный субдомен DuckDNS"; return 0
+            fi
             if [ -n "$A2" ]; then
                 case "$A2" in
                     *[!A-Za-z0-9-]*) _json_err "Недопустимые символы в токене DuckDNS"; return 0 ;;
@@ -1701,60 +1792,90 @@ _cmd_job_start() {
             _json_err "Неизвестное задание: ${ACT}"; return 0 ;;
     esac
 
-    ls -1t /tmp/gw_luci_job_*.rc 2>/dev/null | awk 'NR>3' | while IFS= read -r old_rc; do
+    _job_lock="${RUN_GW_DIR}/job.lock"
+    if ! mkdir "$_job_lock" 2>/dev/null; then
+        if [ -n "$(find "$_job_lock" -maxdepth 0 -mmin +1 2>/dev/null || true)" ]; then
+            rmdir "$_job_lock" 2>/dev/null || rm -rf "$_job_lock" 2>/dev/null || true
+            mkdir "$_job_lock" 2>/dev/null || { _json_err "Выполняется запуск операции, повторите"; return 0; }
+        else
+            _cur_jid=""
+            [ -f "${RUN_GW_DIR}/job_current.id" ] && _cur_jid=$(cat "${RUN_GW_DIR}/job_current.id" 2>/dev/null | tr -dc 'A-Za-z0-9_-' || true)
+            if [ -n "$_cur_jid" ]; then
+                jq -cn --arg id "$_cur_jid" '{ok: false, running_id: $id, error: "Уже выполняется фоновая операция"}'
+            else
+                _json_err "Уже выполняется запуск фоновой операции"
+            fi
+            return 0
+        fi
+    fi
+
+    if [ -f "${RUN_GW_DIR}/job_current.id" ]; then
+        OLD_ID=$(cat "${RUN_GW_DIR}/job_current.id" 2>/dev/null | tr -dc 'A-Za-z0-9_-' || true)
+        if [ -n "$OLD_ID" ] && _is_job_running "$OLD_ID"; then
+            rmdir "$_job_lock" 2>/dev/null || rm -rf "$_job_lock" 2>/dev/null || true
+            jq -cn --arg id "$OLD_ID" '{ok: false, running_id: $id, error: "Уже выполняется фоновая операция"}'
+            return 0
+        fi
+    fi
+
+    ls -1t "${RUN_GW_DIR}"/gw_job_*.rc 2>/dev/null | awk 'NR>3' | while IFS= read -r old_rc; do
         _b="${old_rc%.rc}"
         rm -f "${_b}.rc" "${_b}.log" "${_b}.pid" "${_b}.sh" "${_b}.starting" 2>/dev/null || true
     done
+    find "$RUN_GW_DIR" -maxdepth 1 \( -name 'gw_job_*' -o -name 'gw_lxc_*' \) -mmin +60 -delete 2>/dev/null || true
 
     JOB_ID="j_$(date +%s)_$$"
-    JOB_BASE="/tmp/gw_luci_job_${JOB_ID}"
-    printf "%s\n" "$JOB_ID" > /tmp/gw_luci_current.id
+    JOB_BASE="${RUN_GW_DIR}/gw_job_${JOB_ID}"
+    printf "%s\n" "$JOB_ID" > "${RUN_GW_DIR}/job_current.id"
 
     if [ "$ACT" = "lxc_create" ]; then
-        _spec_f="/tmp/gw_lxc_spec_${JOB_ID}.json"
-        (
-            umask 077
-            printf "%s\n" "$A1" > "$_spec_f"
-        )
+        _spec_f="${RUN_GW_DIR}/gw_lxc_spec_${JOB_ID}.json"
+        printf "%s\n" "$A1" > "$_spec_f"
         CMD_BODY="lxc_create_from_spec '${_spec_f}'; _cr_rc=\$?; rm -f '${_spec_f}' 2>/dev/null || true; (exit \$_cr_rc)"
     elif [ "$ACT" = "lxc_snap_create" ]; then
         _real_path=$(readlink -f "${LXC_VAR_LIB:-/var/lib/lxc}" 2>/dev/null || echo "${LXC_VAR_LIB:-/var/lib/lxc}")
-        _scom_f="/tmp/gw_lxc_scom_${JOB_ID}.txt"
+        _scom_f="${RUN_GW_DIR}/gw_lxc_scom_${JOB_ID}.txt"
         printf "%s" "$A2" | tr -d '\r\n\t' | cut -c1-120 > "$_scom_f"
         CMD_BODY="_bef=''; [ -d '${_real_path}/${A1}/snaps' ] && _bef=\$(ls -1 '${_real_path}/${A1}/snaps' 2>/dev/null | tr '\n' ' '); lxc_manage_snapshots '${A1}' 'create'; _sn_rc=\$?; if [ \$_sn_rc -eq 0 ] && [ -s '${_scom_f}' ] && [ -d '${_real_path}/${A1}/snaps' ]; then _new_s=\$(ls -1t '${_real_path}/${A1}/snaps' 2>/dev/null | while IFS= read -r _s; do case \" \${_bef} \" in *\" \${_s} \"*) ;; *) printf '%s' \"\$_s\"; break ;; esac; done); [ -n \"\$_new_s\" ] && cp -f '${_scom_f}' \"${_real_path}/${A1}/snaps/\${_new_s}/comment\" 2>/dev/null || true; fi; if [ \$_sn_rc -eq 0 ] && lxc-info -n '${A1}' 2>/dev/null | grep -q 'State:.*RUNNING'; then for _w in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do lxc-info -n '${A1}' -iH 2>/dev/null | grep -q '[0-9][.][0-9]' && break; sleep 1; done; fi; rm -f '${_scom_f}' 2>/dev/null || true; (exit \$_sn_rc)"
     fi
 
-    if [ "$ACT" = "update" ]; then
-        cat << JOB_UPD > "${JOB_BASE}.sh"
+    cat << JOB_HDR > "${JOB_BASE}.sh"
 #!/bin/sh
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+umask 077
 export NO_COLOR=1
+_job_done=0
+_job_cleanup() {
+    _ex=\$?
+    if [ "\$_job_done" -eq 0 ]; then
+        printf "%s\n" "\${_ex:-1}" > "${JOB_BASE}.rc" 2>/dev/null || true
+    fi
+    rm -f "${JOB_BASE}.pid" "${JOB_BASE}.sh" "${JOB_BASE}.starting" 2>/dev/null || true
+}
+trap '_job_cleanup' EXIT
 exec </dev/null >"${JOB_BASE}.log" 2>&1
 echo "\$\$" > "${JOB_BASE}.pid"
 rm -f "${JOB_BASE}.starting" 2>/dev/null || true
+JOB_HDR
+    if [ "$ACT" = "update" ]; then
+        cat << JOB_UPD >> "${JOB_BASE}.sh"
 /usr/bin/gw update </dev/null
 _rc=\$?
 printf "%s\n" "\$_rc" > "${JOB_BASE}.rc"
-rm -f "${JOB_BASE}.pid" "${JOB_BASE}.sh" "${JOB_BASE}.starting" 2>/dev/null || true
+_job_done=1
 JOB_UPD
     else
-        cat << JOB_EOF > "${JOB_BASE}.sh"
-#!/bin/sh
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        cat << JOB_EOF >> "${JOB_BASE}.sh"
 export GATEWAY_NO_RUN=1
 export GATEWAY_DIR="${GATEWAY_DIR}"
-export NO_COLOR=1
-exec </dev/null >"${JOB_BASE}.log" 2>&1
-echo "\$\$" > "${JOB_BASE}.pid"
-rm -f "${JOB_BASE}.starting" 2>/dev/null || true
-. "${GATEWAY_DIR}/gateway.sh"
+. "${GATEWAY_DIR}/gateway.sh" || { _rc=\$?; printf "%s\n" "\$_rc" > "${JOB_BASE}.rc"; _job_done=1; exit "\$_rc"; }
 set +e
 detect_os >/dev/null 2>&1 || true
 load_gateway_env >/dev/null 2>&1 || true
 _rc=0
 { ${CMD_BODY}; } || _rc=\$?
 printf "%s\n" "\$_rc" > "${JOB_BASE}.rc"
-rm -f "${JOB_BASE}.pid" "${JOB_BASE}.sh" "${JOB_BASE}.starting" 2>/dev/null || true
+_job_done=1
 JOB_EOF
     fi
     chmod 700 "${JOB_BASE}.sh"
@@ -1765,13 +1886,14 @@ JOB_EOF
     else
         ( /bin/sh "${JOB_BASE}.sh" ) </dev/null >/dev/null 2>&1 &
     fi
+    rmdir "$_job_lock" 2>/dev/null || rm -rf "$_job_lock" 2>/dev/null || true
     jq -cn --arg id "$JOB_ID" '{ok: true, id: $id}'
 }
 
 _cmd_job_poll() {
     JOB_ID=$(_jq_arg "id")
     _is_safe_id "$JOB_ID" || { _json_err "Некорректный ID задания"; return 0; }
-    JOB_BASE="/tmp/gw_luci_job_${JOB_ID}"
+    JOB_BASE="${RUN_GW_DIR}/gw_job_${JOB_ID}"
     if [ ! -f "${JOB_BASE}.log" ] && [ ! -f "${JOB_BASE}.pid" ] && [ ! -f "${JOB_BASE}.rc" ]; then
         _json_err "Задание не найдено"
         return 0

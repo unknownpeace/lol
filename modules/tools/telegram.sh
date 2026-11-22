@@ -25,23 +25,22 @@ _tg_api_post() {
     EP="$1"
     shift
     TG_URL="https://api.telegram.org/bot${TG_BOT_TOKEN}/${EP}"
+    TG_URL_ESC=$(printf "%s" "$TG_URL" | sed 's/\\/\\\\/g; s/"/\\"/g')
     TG_LAST_ERR=""
     _M_SEC=10
     [ "$EP" = "sendDocument" ] && _M_SEC=60
     for CURL_P in "-x http://127.0.0.1:7890" ""; do
-        for CURV_OPT in "--curves X25519:P-256" ""; do
-            # shellcheck disable=SC2086
-            RESP=$(curl -sS $CURV_OPT --connect-timeout 5 -m "$_M_SEC" $CURL_P "$@" "$TG_URL" 2>/dev/null || true)
-            if _tg_resp_is_ok "$RESP"; then
-                TG_LAST_ERR=""
-                return 0
-            fi
-            API_DESC=$(_tg_extract_error "$RESP")
-            if [ -n "$API_DESC" ]; then
-                TG_LAST_ERR="$API_DESC"
-                return 1
-            fi
-        done
+        # shellcheck disable=SC2086
+        RESP=$(printf 'url = "%s"\n' "$TG_URL_ESC" | gw_curl -sS -K - --connect-timeout 5 -m "$_M_SEC" $CURL_P "$@" 2>/dev/null || true)
+        if _tg_resp_is_ok "$RESP"; then
+            TG_LAST_ERR=""
+            return 0
+        fi
+        API_DESC=$(_tg_extract_error "$RESP")
+        if [ -n "$API_DESC" ]; then
+            TG_LAST_ERR="$API_DESC"
+            return 1
+        fi
     done
     TG_LAST_ERR="Ошибка сети или TLS при обращении к api.telegram.org"
     return 1

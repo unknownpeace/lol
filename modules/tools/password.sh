@@ -24,6 +24,31 @@ change_unified_password() {
     fi
 
     detect_os >/dev/null 2>&1 || true
+
+    CUR_AGH_USER=""
+    NEW_HASH=""
+    if [ -f "$AGH_CONF" ]; then
+        if ! command -v htpasswd >/dev/null 2>&1 && [ ! -x /usr/sbin/caddy ]; then
+            if is_openwrt; then
+                apk add apache-utils >/dev/null 2>&1 || true
+            else
+                apk add --no-cache apache2-utils >/dev/null 2>&1 || true
+            fi
+            disable_apache_daemon
+        fi
+        CUR_AGH_USER=$(get_agh_admin_user)
+        [ -z "$CUR_AGH_USER" ] && CUR_AGH_USER="${AGH_USER:-admin}" || true
+        if command -v htpasswd >/dev/null 2>&1; then
+            NEW_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$CUR_AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
+        elif [ -x /usr/sbin/caddy ]; then
+            NEW_HASH=$(/usr/sbin/caddy hash-password --plaintext "$ADMIN_PASS" 2>/dev/null | tail -n 1 | tr -d '\r\n' || true)
+        fi
+        if [ -z "$NEW_HASH" ]; then
+            echo "${C_RED}[X] Ошибка: Не удалось вычислить bcrypt-хэш для AdGuard Home — пароль не изменен!${C_RES}"
+            return 1
+        fi
+    fi
+
     save_gateway_env
     if ! is_openwrt; then
         save_homelab_env
@@ -31,42 +56,27 @@ change_unified_password() {
     core_generate_config
 
     service_ctl adguardhome stop
-    if ! command -v htpasswd >/dev/null 2>&1; then
-        if is_openwrt; then
-            apk add apache-utils >/dev/null 2>&1 || true
-        else
-            apk add --no-cache apache2-utils >/dev/null 2>&1 || true
-        fi
-        disable_apache_daemon
-    fi
-    if [ -f "$AGH_CONF" ]; then
-        CUR_AGH_USER=$(sed -n '/^users:/,/^auth_attempts:/ s/^[[:space:]]*-[[:space:]]*name:[[:space:]]*\(.*\)/\1/p' "$AGH_CONF" | head -n 1 | tr -d ' \t\r\n"')
-        [ -z "$CUR_AGH_USER" ] && CUR_AGH_USER="admin" || true
-        NEW_HASH=""
-        if command -v htpasswd >/dev/null 2>&1; then
-            NEW_HASH=$(printf "%s\n" "$ADMIN_PASS" | htpasswd -inBC 10 "$CUR_AGH_USER" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true)
-            [ -z "$NEW_HASH" ] && NEW_HASH=$(htpasswd -nbBC 10 "$CUR_AGH_USER" "$ADMIN_PASS" 2>/dev/null | cut -d: -f2 | tr -d ' \t\r\n' || true) || true
-        elif [ -x /usr/sbin/caddy ]; then
-            NEW_HASH=$(/usr/sbin/caddy hash-password --plaintext "$ADMIN_PASS" 2>/dev/null | tail -n 1 | tr -d '\r\n' || true)
-        fi
-        if [ -n "$NEW_HASH" ]; then
-            CUR_AGH_USER="$CUR_AGH_USER" NEW_HASH="$NEW_HASH" awk '
-                BEGIN {
-                    u = ENVIRON["CUR_AGH_USER"];
-                    h = ENVIRON["NEW_HASH"];
-                }
-                /^users:/ {
-                    print "users:"
-                    print "  - name: " u
-                    print "    password: " h
-                    in_users=1; next
-                }
-                in_users && /^[^[:space:]]/ { in_users=0 }
-                in_users { next }
-                { print }
-            ' "$AGH_CONF" > "${AGH_CONF}.tmp" && mv "${AGH_CONF}.tmp" "$AGH_CONF"
-            chmod 600 "$AGH_CONF" 2>/dev/null || true
-        fi
+    if [ -f "$AGH_CONF" ] && [ -n "$NEW_HASH" ]; then
+        CUR_AGH_USER="$CUR_AGH_USER" NEW_HASH="$NEW_HASH" awk '
+            BEGIN {
+                u = ENVIRON["CUR_AGH_USER"];
+                h = ENVIRON["NEW_HASH"];
+            }
+            /^users:/ {
+                print "users:"
+                print "  - name: " u
+                print "    password: " h
+                in_users=1; next
+            }
+            in_users && /^[^[:space:]]/ { in_users=0 }
+            in_users { next }
+            { print }
+        ' "$AGH_CONF" > "${AGH_CONF}.tmp.$$" 2>/dev/null || true
+        atomic_commit_tmp "${AGH_CONF}.tmp.$$" "$AGH_CONF" 0600 "root:root" || {
+            echo "${C_RED}[X] Ошибка записи ${AGH_CONF}!${C_RES}"
+            service_ctl adguardhome start >/dev/null 2>&1 || true
+            return 1
+        }
     fi
 
     if ! is_openwrt; then
@@ -116,15 +126,18 @@ change_unified_password() {
     service_ctl adguardhome start || true
 
     PW_IDX=0
+    CORE_READY=0
+    AGH_READY=0
     while [ "$PW_IDX" -lt 10 ]; do
         CORE_READY=0
         AGH_READY=0
-        if curl -fsS -m 1 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
+        if clash_api_curl -fsS -m 1 "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
             CORE_READY=1
         fi
         if pgrep AdGuardHome >/dev/null 2>&1; then
-            if curl -fsS -m 1 -u "${CUR_AGH_USER:-${AGH_USER:-admin}}:${ADMIN_PASS}" "http://127.0.0.1:3000/control/status" >/dev/null 2>&1 || \
-               (ss -tln 2>/dev/null || netstat -tln 2>/dev/null) | grep -q ':3000 '; then
+            _agh_u_esc=$(printf "%s" "${CUR_AGH_USER:-${AGH_USER:-admin}}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            _agh_p_esc=$(printf "%s" "${ADMIN_PASS}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            if printf 'user = "%s:%s"\n' "$_agh_u_esc" "$_agh_p_esc" | curl -K - -fsS -m 1 "http://127.0.0.1:3000/control/status" >/dev/null 2>&1; then
                 AGH_READY=1
             fi
         fi
@@ -134,12 +147,14 @@ change_unified_password() {
     done
 
     if is_sub_enabled && command -v jq >/dev/null 2>&1; then
-        _PROV_J=$(curl -fsS -m 2 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/providers/proxies" 2>/dev/null || true)
+        _PROV_J=$(clash_api_curl -fsS -m 2 "http://127.0.0.1:9090/providers/proxies" 2>/dev/null || true)
         _EMPTY_SUB=$(printf "%s" "$_PROV_J" | jq -r '[.providers // {} | to_entries[] | select((.value.vehicleType == "Remote" or .value.vehicleType == "HTTP") and ((.value.proxies // []) | length == 0))] | length' 2>/dev/null || echo "0")
         [ "${_EMPTY_SUB:-0}" -gt 0 ] && core_reload_api >/dev/null 2>&1 || true
     fi
 
-    backup_gateway_state >/dev/null 2>&1 || true
+    if [ "$CORE_READY" -eq 1 ] && core_check_config; then
+        backup_gateway_state >/dev/null 2>&1 || true
+    fi
     if is_openwrt; then
         echo "${C_GRN}[✓] Единый пароль успешно синхронизирован (Шлюз + AdGuard Home)!${C_RES}"
     else

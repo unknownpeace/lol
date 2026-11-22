@@ -9,6 +9,91 @@
 LXC_STORAGE_DIR="/srv/storage/lxc"
 LXC_VAR_LIB="/var/lib/lxc"
 
+_lxc_is_valid_name() {
+    _nm="${1:-}"
+    [ -n "$_nm" ] || return 1
+    case "$_nm" in
+        .|..|-*) return 1 ;;
+    esac
+    printf "%s" "$_nm" | grep -Eq '^[A-Za-z0-9_-]{1,64}$'
+}
+
+_lxc_is_valid_ipv4() {
+    [ -n "${1:-}" ] && is_valid_ipv4 "$1"
+}
+
+_lxc_apply_macvlan_config() {
+    _mv_conf="$1"
+    LAN_IF=$(get_lan_ifname)
+    MAC_TAIL=$(_lxc_gen_mac_tail) || {
+        ui_warn_msg "Не удалось сгенерировать случайный MAC-адрес."
+        return 1
+    }
+    sed -i '/lxc\.net\.0\./d' "$_mv_conf"
+    cat << NET_MACVLAN >> "$_mv_conf"
+lxc.net.0.type = macvlan
+lxc.net.0.macvlan.mode = bridge
+lxc.net.0.link = ${LAN_IF}
+lxc.net.0.flags = up
+lxc.net.0.hwaddr = 10:66:6a:${MAC_TAIL}
+NET_MACVLAN
+    return 0
+}
+
+_lxc_is_valid_ipv4_cidr() {
+    _cidr="${1:-}"
+    [ -n "$_cidr" ] || return 1
+    case "$_cidr" in
+        */*)
+            _ip_p="${_cidr%%/*}"
+            _pfx="${_cidr#*/}"
+            _lxc_is_valid_ipv4 "$_ip_p" || return 1
+            case "$_pfx" in
+                ''|*[!0-9]*) return 1 ;;
+            esac
+            [ "$_pfx" -ge 1 ] && [ "$_pfx" -le 32 ] || return 1
+            printf "%s/%s" "$_ip_p" "$_pfx"
+            return 0
+            ;;
+        *)
+            _lxc_is_valid_ipv4 "$_cidr" || return 1
+            printf "%s/24" "$_cidr"
+            return 0
+            ;;
+    esac
+}
+
+_lxc_normalize_mem_limit() {
+    _ml=$(printf "%s" "${1:-}" | tr -d ' \t\r\n')
+    case "$_ml" in
+        ""|none|0)
+            printf "none"
+            return 0
+            ;;
+    esac
+    if printf "%s" "$_ml" | grep -Eq '^[1-9][0-9]*[KkMmGg]$'; then
+        printf "%s" "$_ml"
+        return 0
+    fi
+    if printf "%s" "$_ml" | grep -Eq '^[1-9][0-9]*$'; then
+        printf "%sM" "$_ml"
+        return 0
+    fi
+    return 1
+}
+
+_lxc_gen_mac_tail() {
+    _mt=$(hexdump -n 3 -e '/1 ":%02x"' /dev/urandom 2>/dev/null | cut -c 2- || true)
+    if [ -z "$_mt" ]; then
+        _mt=$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | awk '{printf "%s:%s:%s", $1, $2, $3}' || true)
+    fi
+    if printf "%s" "$_mt" | grep -Eq '^[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}$'; then
+        printf "%s" "$_mt"
+        return 0
+    fi
+    return 1
+}
+
 # Определение архитектуры для шаблонов images.linuxcontainers.org
 get_lxc_system_arch() {
     ARCH=$(uname -m 2>/dev/null || echo "x86_64")
@@ -47,20 +132,35 @@ ensure_lxc_subsystem() {
         chmod 755 "$LXC_STORAGE_DIR" 2>/dev/null || true
         if [ ! -L "$LXC_VAR_LIB" ]; then
             if [ -d "$LXC_VAR_LIB" ]; then
-                # Переносим существующие контейнеры при первой привязке
-                cp -a "${LXC_VAR_LIB}/." "${LXC_STORAGE_DIR}/" 2>/dev/null || true
-                rm -rf "$LXC_VAR_LIB"
+                # Останавливаем контейнеры и безопасно переносим с проверкой cp -a перед rm -rf
+                if command -v lxc-stop >/dev/null 2>&1; then
+                    for _old_ct in "${LXC_VAR_LIB}/"*; do
+                        [ -d "$_old_ct" ] && [ -f "${_old_ct}/config" ] || continue
+                        _old_n=$(basename "$_old_ct")
+                        if lxc-info -n "$_old_n" 2>/dev/null | grep -q "State:.*RUNNING"; then
+                            lxc-stop -n "$_old_n" -t 15 >/dev/null 2>&1 || lxc-stop -n "$_old_n" -k >/dev/null 2>&1 || true
+                        fi
+                    done
+                fi
+                if cp -a "${LXC_VAR_LIB}/." "${LXC_STORAGE_DIR}/"; then
+                    rm -rf "$LXC_VAR_LIB"
+                else
+                    ui_warn_msg "Ошибка переноса ${LXC_VAR_LIB} в ${LXC_STORAGE_DIR}! Исходные файлы сохранены."
+                    return 1
+                fi
             fi
             ln -sfn "$LXC_STORAGE_DIR" "$LXC_VAR_LIB"
         fi
+        command -v ensure_openrc_mount_guard >/dev/null 2>&1 && ensure_openrc_mount_guard "lxc" >/dev/null 2>&1 || true
     else
         mkdir -p "$LXC_VAR_LIB"
         chmod 755 "$LXC_VAR_LIB" 2>/dev/null || true
     fi
 
-    # 4. Настройка сетевого моста lxcbr0 и DHCP (dnsmasq с port=0)
+    # 4. Настройка сетевого моста lxcbr0 и DHCP (создаем только если отсутствуют, чтобы не затирать правки пользователя)
     mkdir -p /etc/conf.d /etc/lxc
-    cat << 'CONF_EOF' > /etc/conf.d/dnsmasq.lxcbr0
+    if [ ! -s /etc/conf.d/dnsmasq.lxcbr0 ]; then
+        cat << 'CONF_EOF' > /etc/conf.d/dnsmasq.lxcbr0
 rc_before="lxc"
 BRIDGE_ADDR="10.0.3.1"
 BRIDGE_NETMASK="255.255.255.0"
@@ -71,21 +171,25 @@ BRIDGE_MAC="00:16:3e:00:00:00"
 DNSMASQ_CONFFILE="/etc/lxc/dnsmasq.conf"
 DISABLE_IPTABLES="yes"
 CONF_EOF
+    fi
 
     # port=0 отключает встроенный DNS dnsmasq, чтобы не конфликтовать с AdGuard Home (:53)
-    # dhcp-option передает контейнерам адрес шлюза как DNS-резолвер
-    cat << 'DNSM_EOF' > /etc/lxc/dnsmasq.conf
+    if [ ! -s /etc/lxc/dnsmasq.conf ]; then
+        cat << 'DNSM_EOF' > /etc/lxc/dnsmasq.conf
 port=0
 dhcp-option=option:dns-server,10.0.3.1
 DNSM_EOF
+    fi
 
     # Конфигурация интерфейса по умолчанию для новых контейнеров
-    cat << 'DEF_EOF' > /etc/lxc/default.conf
+    if [ ! -s /etc/lxc/default.conf ]; then
+        cat << 'DEF_EOF' > /etc/lxc/default.conf
 lxc.net.0.type = veth
 lxc.net.0.link = lxcbr0
 lxc.net.0.flags = up
 lxc.net.0.hwaddr = 10:66:6a:xx:xx:xx
 DEF_EOF
+    fi
 
     # 5. Запуск и регистрация служб в OpenRC
     rc-service dnsmasq.lxcbr0 start >/dev/null 2>&1 || true
@@ -173,16 +277,53 @@ lxc_list_containers() {
 }
 
 # Автоконфигурация сетевых интерфейсов и DHCP/DNS внутри rootfs гостевых ОС
-# Гарантирует немедленное получение IP для Debian, Kali, Ubuntu, Arch, Alma, Alpine
+# Сохраняет статическую конфигурацию LXC и исключает утечку DNS мимо шлюза
 lxc_autoseed_container_network() {
     CT_NAME="$1"
-    DNS_IP="${2:-10.0.3.1}"
-    ROOTFS="${LXC_VAR_LIB}/${CT_NAME}/rootfs"
+    DNS_IN="${2:-}"
+    FORCE_DNS="${3:-no}"
+    _lxc_is_valid_name "$CT_NAME" || return 1
+
+    CT_DIR="${LXC_VAR_LIB}/${CT_NAME}"
+    CT_CONF="${CT_DIR}/config"
+    ROOTFS="${CT_DIR}/rootfs"
     [ -d "$ROOTFS" ] || return 0
+
+    _has_static=""
+    _is_macvlan="no"
+    if [ -f "$CT_CONF" ]; then
+        _has_static=$(awk -F= '/^[[:space:]]*lxc\.net\.0\.ipv4\.address/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$CT_CONF" 2>/dev/null || true)
+        grep -q '^[[:space:]]*lxc\.net\.0\.type[[:space:]]*=[[:space:]]*macvlan' "$CT_CONF" 2>/dev/null && _is_macvlan="yes"
+    fi
+
+    DNS_IP="$DNS_IN"
+    if [ -z "$DNS_IP" ] && [ -s "${CT_DIR}/.gw_dns" ]; then
+        DNS_IP=$(tr -d ' \t\r\n' < "${CT_DIR}/.gw_dns" 2>/dev/null || true)
+    fi
+    if [ -z "$DNS_IP" ]; then
+        if [ "$_is_macvlan" = "yes" ]; then
+            DNS_IP=$(get_default_router_ip 2>/dev/null || echo "${DEFAULT_ROUTER_IP:-192.168.1.5}")
+        else
+            DNS_IP="10.0.3.1"
+        fi
+    fi
 
     # 1. Debian / Ubuntu / Kali / Devuan (/etc/network/interfaces)
     if [ -d "${ROOTFS}/etc/network" ]; then
-        if [ ! -f "${ROOTFS}/etc/network/interfaces" ] || ! grep -q "eth0" "${ROOTFS}/etc/network/interfaces" 2>/dev/null; then
+        if [ -n "$_has_static" ]; then
+            if [ -f "${ROOTFS}/etc/network/interfaces" ] && grep -q "iface eth0 inet dhcp" "${ROOTFS}/etc/network/interfaces" 2>/dev/null; then
+                sed -i 's/iface eth0 inet dhcp/iface eth0 inet manual/g' "${ROOTFS}/etc/network/interfaces" 2>/dev/null || true
+            elif [ ! -f "${ROOTFS}/etc/network/interfaces" ] || ! grep -q "eth0" "${ROOTFS}/etc/network/interfaces" 2>/dev/null; then
+                cat << 'EOF' >> "${ROOTFS}/etc/network/interfaces"
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet manual
+EOF
+            fi
+        elif [ ! -f "${ROOTFS}/etc/network/interfaces" ] || ! grep -q "eth0" "${ROOTFS}/etc/network/interfaces" 2>/dev/null; then
             cat << 'EOF' >> "${ROOTFS}/etc/network/interfaces"
 
 auto lo
@@ -197,7 +338,16 @@ EOF
     # 2. systemd-networkd (Debian, Kali, Ubuntu, Arch Linux, AlmaLinux, Fedora)
     if [ -d "${ROOTFS}/etc/systemd" ]; then
         mkdir -p "${ROOTFS}/etc/systemd/network"
-        if [ ! -f "${ROOTFS}/etc/systemd/network/80-container-eth0.network" ]; then
+        if [ -n "$_has_static" ]; then
+            cat << 'EOF' > "${ROOTFS}/etc/systemd/network/80-container-eth0.network"
+[Match]
+Name=eth0
+
+[Network]
+DHCP=no
+KeepConfiguration=yes
+EOF
+        elif [ ! -f "${ROOTFS}/etc/systemd/network/80-container-eth0.network" ]; then
             cat << 'EOF' > "${ROOTFS}/etc/systemd/network/80-container-eth0.network"
 [Match]
 Name=eth0
@@ -216,30 +366,16 @@ EOF
         done
     fi
 
-    # 3. Alpine Linux (OpenRC)
-    if [ -d "${ROOTFS}/etc/runlevels" ]; then
-        if [ -f "${ROOTFS}/etc/network/interfaces" ] && ! grep -q "eth0" "${ROOTFS}/etc/network/interfaces" 2>/dev/null; then
-            cat << 'EOF' >> "${ROOTFS}/etc/network/interfaces"
-
-auto lo
-iface lo inet loopback
-
-auto eth0
-iface eth0 inet dhcp
-EOF
-        fi
-        if [ -f "${ROOTFS}/etc/init.d/networking" ]; then
-            mkdir -p "${ROOTFS}/etc/runlevels/default"
-            ln -sf /etc/init.d/networking "${ROOTFS}/etc/runlevels/default/networking" 2>/dev/null || true
-        fi
+    # 3. Alpine Linux (OpenRC): /etc/network/interfaces уже настроен на шаге 1, включаем автозапуск networking
+    if [ -d "${ROOTFS}/etc/runlevels" ] && [ -f "${ROOTFS}/etc/init.d/networking" ]; then
+        mkdir -p "${ROOTFS}/etc/runlevels/default"
+        ln -sf /etc/init.d/networking "${ROOTFS}/etc/runlevels/default/networking" 2>/dev/null || true
     fi
 
-    # 4. Базовый resolv.conf (на случай задержек DHCP)
-    if [ ! -s "${ROOTFS}/etc/resolv.conf" ]; then
-        cat << EOF > "${ROOTFS}/etc/resolv.conf"
-nameserver ${DNS_IP}
-nameserver 1.1.1.1
-EOF
+    # 4. Базовый resolv.conf (строго через шлюз/роутер, без утечки на 1.1.1.1)
+    if [ "$FORCE_DNS" = "force" ] || [ ! -s "${ROOTFS}/etc/resolv.conf" ] || grep -q "1\.1\.1\.1" "${ROOTFS}/etc/resolv.conf" 2>/dev/null; then
+        [ -L "${ROOTFS}/etc/resolv.conf" ] && rm -f "${ROOTFS}/etc/resolv.conf" 2>/dev/null || true
+        printf "nameserver %s\n" "$DNS_IP" > "${ROOTFS}/etc/resolv.conf"
     fi
 }
 
@@ -250,11 +386,11 @@ lxc_create_wizard() {
 
     LXC_ARCH=$(get_lxc_system_arch)
 
-    echo "${C_BLD}Введите имя нового контейнера (латиница, цифры, дефис):${C_RES}"
-    read -r CT_NAME
-    CT_NAME=$(echo "$CT_NAME" | tr -cd 'a-zA-Z0-9_-')
-    if [ -z "$CT_NAME" ]; then
-        ui_warn_msg "Имя контейнера не может быть пустым. Отмена."
+    echo "${C_BLD}Введите имя нового контейнера (латиница, цифры, - и _):${C_RES}"
+    read -r CT_NAME < /dev/tty || return 1
+    CT_NAME=$(printf "%s" "$CT_NAME" | tr -d ' \t\r\n')
+    if ! _lxc_is_valid_name "$CT_NAME"; then
+        ui_warn_msg "Некорректное имя контейнера (допустимы только латиница, цифры, '-' и '_'). Отмена."
         return 1
     fi
 
@@ -264,8 +400,8 @@ lxc_create_wizard() {
     fi
 
     echo ""
-    LXC_ARCH=$(get_lxc_system_arch)
-    CACHE_FILE="/tmp/lxc_templates_${LXC_ARCH}.txt"
+    ensure_gateway_runtime_dir || return 1
+    CACHE_FILE="${GATEWAY_RUNTIME_DIR:-/run/gateway}/lxc_templates_${LXC_ARCH}.txt"
 
     # Загружаем актуальный индекс образов images.linuxcontainers.org
     if [ ! -s "$CACHE_FILE" ] || [ -n "$(find "$CACHE_FILE" -mmin +60 2>/dev/null)" ]; then
@@ -275,6 +411,8 @@ lxc_create_wizard() {
             sort -u -k1,1 -k2,2 > "${CACHE_FILE}.tmp" 2>/dev/null
         if [ -s "${CACHE_FILE}.tmp" ]; then
             mv -f "${CACHE_FILE}.tmp" "$CACHE_FILE"
+        else
+            rm -f "${CACHE_FILE}.tmp" 2>/dev/null || true
         fi
     fi
 
@@ -330,16 +468,16 @@ FALLBACK_EOF
     [ -z "$DEFAULT_NUM" ] && DEFAULT_NUM=$(grep -n "^alpine" "$CACHE_FILE" 2>/dev/null | head -n1 | cut -d: -f1 || echo "1")
 
     printf "Выберите номер шаблона [1-%s, 0 для ручного ввода, по умолчанию %s]: " "$TOTAL_TMPL" "$DEFAULT_NUM"
-    read -r DIST_CHOICE
+    read -r DIST_CHOICE < /dev/tty || DIST_CHOICE=""
     [ -z "$DIST_CHOICE" ] && DIST_CHOICE="$DEFAULT_NUM"
 
     T_DIST="alpine"
     T_REL="3.24"
     if [ "$DIST_CHOICE" = "0" ]; then
         echo "Введите название дистрибутива (например, fedora, debian, kali, opensuse):"
-        read -r T_DIST
+        read -r T_DIST < /dev/tty || T_DIST=""
         echo "Введите версию релиза (например, current, bookworm, noble, 41):"
-        read -r T_REL
+        read -r T_REL < /dev/tty || T_REL=""
     elif [ "$DIST_CHOICE" -ge 1 ] 2>/dev/null && [ "$DIST_CHOICE" -le "$TOTAL_TMPL" ] 2>/dev/null; then
         SELECTED_LINE=$(sed -n "${DIST_CHOICE}p" "$CACHE_FILE")
         T_DIST=$(echo "$SELECTED_LINE" | awk '{print $1}')
@@ -355,7 +493,7 @@ FALLBACK_EOF
     echo "  1) NAT / Изолированный мост lxcbr0 (10.0.3.X, DNS AdGuard, трафик через Sing-Box) [Рекомендуется]"
     echo "  2) Прямой мост в домашнюю сеть (Macvlan на $(get_lan_ifname), свой IP от домашнего роутера)"
     printf "Ваш выбор [1-2, по умолчанию 1]: "
-    read -r NET_CHOICE
+    read -r NET_CHOICE < /dev/tty || NET_CHOICE="1"
     [ -z "$NET_CHOICE" ] && NET_CHOICE="1"
 
     echo ""
@@ -363,7 +501,7 @@ FALLBACK_EOF
     echo "  1) Динамический DHCP (автоматическое получение адреса) [Рекомендуется]"
     echo "  2) Статический IPv4 (ручная фиксация адреса, шлюза и DNS)"
     printf "Ваш выбор [1-2, по умолчанию 1]: "
-    read -r IP_MODE_CHOICE
+    read -r IP_MODE_CHOICE < /dev/tty || IP_MODE_CHOICE="1"
     [ -z "$IP_MODE_CHOICE" ] && IP_MODE_CHOICE="1"
 
     STATIC_IP=""
@@ -371,26 +509,50 @@ FALLBACK_EOF
     STATIC_DNS=""
     if [ "$IP_MODE_CHOICE" = "2" ]; then
         DEFAULT_GW="10.0.3.1"
-        [ "$NET_CHOICE" = "2" ] && DEFAULT_GW="$(get_current_lan_ip)"
+        [ "$NET_CHOICE" = "2" ] && DEFAULT_GW="$(get_default_router_ip)"
         echo "Введите статический IPv4 с CIDR маской (например, $([ "$NET_CHOICE" = "2" ] && echo "192.168.1.150/24" || echo "10.0.3.50/24")):"
-        read -r STATIC_IP
+        read -r RAW_STATIC_IP < /dev/tty || RAW_STATIC_IP=""
+        RAW_STATIC_IP=$(printf "%s" "$RAW_STATIC_IP" | tr -d ' \t\r\n')
+        STATIC_IP=$(_lxc_is_valid_ipv4_cidr "$RAW_STATIC_IP" || true)
+        if [ -z "$STATIC_IP" ]; then
+            ui_warn_msg "Некорректный статический IPv4/CIDR (${RAW_STATIC_IP}). Отмена."
+            return 1
+        fi
         echo "Введите шлюз по умолчанию [Enter для ${DEFAULT_GW}]:"
-        read -r STATIC_GW
+        read -r STATIC_GW < /dev/tty || STATIC_GW=""
+        STATIC_GW=$(printf "%s" "$STATIC_GW" | tr -d ' \t\r\n')
         [ -z "$STATIC_GW" ] && STATIC_GW="$DEFAULT_GW"
+        if ! _lxc_is_valid_ipv4 "$STATIC_GW"; then
+            ui_warn_msg "Некорректный IPv4 шлюза (${STATIC_GW}). Отмена."
+            return 1
+        fi
         echo "Введите DNS сервер [Enter для ${DEFAULT_GW}]:"
-        read -r STATIC_DNS
+        read -r STATIC_DNS < /dev/tty || STATIC_DNS=""
+        STATIC_DNS=$(printf "%s" "$STATIC_DNS" | tr -d ' \t\r\n')
         [ -z "$STATIC_DNS" ] && STATIC_DNS="$DEFAULT_GW"
+        if ! _lxc_is_valid_ipv4 "$STATIC_DNS"; then
+            ui_warn_msg "Некорректный IPv4 DNS (${STATIC_DNS}). Отмена."
+            return 1
+        fi
+    else
+        [ "$NET_CHOICE" = "2" ] && STATIC_DNS="$(get_default_router_ip)" || STATIC_DNS="10.0.3.1"
     fi
 
     echo ""
     ui_info_msg "Ограничение оперативной памяти (cgroups v2):"
-    echo "  Введите лимит (например: 256M, 512M, 1G) или нажмите Enter для безлимитного:"
-    read -r MEM_LIMIT
+    echo "  Введите лимит (например: 256M, 512M, 1G — число без суффикса считается МБ) или Enter для безлимитного:"
+    read -r RAW_MEM_LIMIT < /dev/tty || RAW_MEM_LIMIT=""
+    MEM_LIMIT=$(_lxc_normalize_mem_limit "$RAW_MEM_LIMIT" || true)
+    if [ -z "$MEM_LIMIT" ]; then
+        ui_warn_msg "Некорректный формат лимита памяти (${RAW_MEM_LIMIT}). Пример: 512M или 1G."
+        return 1
+    fi
+    [ "$MEM_LIMIT" = "none" ] && MEM_LIMIT=""
 
     echo ""
     ui_info_msg "Включить автозапуск контейнера при старте сервера Gateway?"
     printf "Автозапуск (y/n, по умолчанию y): "
-    read -r AUTO_START_ANS
+    read -r AUTO_START_ANS < /dev/tty || AUTO_START_ANS="y"
     [ -z "$AUTO_START_ANS" ] && AUTO_START_ANS="y"
 
     echo ""
@@ -412,21 +574,14 @@ FALLBACK_EOF
     fi
 
     # Настройка конфигурационного файла контейнера
-    CT_CONF="${LXC_VAR_LIB}/${CT_NAME}/config"
+    CT_DIR="${LXC_VAR_LIB}/${CT_NAME}"
+    CT_CONF="${CT_DIR}/config"
+    printf "%s\n" "${STATIC_DNS:-10.0.3.1}" > "${CT_DIR}/.gw_dns" 2>/dev/null || true
     if [ -f "$CT_CONF" ]; then
         ui_step_progress 2 3 "Применение параметров сети, лимитов и автозапуска..."
 
         if [ "$NET_CHOICE" = "2" ]; then
-            # Переопределение на Macvlan
-            LAN_IF=$(get_lan_ifname)
-            sed -i '/lxc\.net\.0\./d' "$CT_CONF"
-            cat << NET_MACVLAN >> "$CT_CONF"
-lxc.net.0.type = macvlan
-lxc.net.0.macvlan.mode = bridge
-lxc.net.0.link = ${LAN_IF}
-lxc.net.0.flags = up
-lxc.net.0.hwaddr = 10:66:6a:$(hexdump -n 3 -e '/1 ":%02x"' /dev/urandom 2>/dev/null | cut -c 2- || echo "11:22:33")
-NET_MACVLAN
+            _lxc_apply_macvlan_config "$CT_CONF" || return 1
         fi
 
         if [ -n "$STATIC_IP" ]; then
@@ -441,14 +596,14 @@ NET_MACVLAN
         fi
 
         if [ "$AUTO_START_ANS" = "y" ] || [ "$AUTO_START_ANS" = "Y" ]; then
-            sed -i '/lxc\.start\.auto/d' "$CT_CONF"
+            sed -i '/lxc\.start\.auto/d; /lxc\.start\.delay/d' "$CT_CONF"
             echo "lxc.start.auto = 1" >> "$CT_CONF"
             echo "lxc.start.delay = 3" >> "$CT_CONF"
         fi
     fi
 
     # Автонастройка сетевых сервисов внутри гостевого rootfs
-    lxc_autoseed_container_network "$CT_NAME" "${STATIC_DNS:-10.0.3.1}"
+    lxc_autoseed_container_network "$CT_NAME" "${STATIC_DNS:-10.0.3.1}" "force"
 
     ui_step_progress 3 3 "Запуск контейнера ${CT_NAME}..."
     lxc-start -n "$CT_NAME" 2>/dev/null || true
@@ -467,15 +622,23 @@ lxc_control() {
 
     if [ -z "$NAME" ]; then
         echo "Введите имя контейнера:"
-        read -r NAME
+        read -r NAME < /dev/tty || return 1
     fi
-    [ -z "$NAME" ] && return 1
+    NAME=$(printf "%s" "$NAME" | tr -d ' \t\r\n')
+    if ! _lxc_is_valid_name "$NAME"; then
+        ui_warn_msg "Некорректное имя контейнера '${NAME}'."
+        return 1
+    fi
+    if [ ! -f "${LXC_VAR_LIB}/${NAME}/config" ]; then
+        ui_warn_msg "Контейнер '${NAME}' не найден."
+        return 1
+    fi
 
     case "$ACTION" in
         start)
             ui_info_msg "Запуск контейнера ${NAME}..."
             lxc_autoseed_container_network "$NAME"
-            lxc-start -n "$NAME" && ui_ok_msg "Контейнер ${NAME} запущен." || ui_warn_msg "Ошибка запуска ${NAME}."
+            lxc-start -n "$NAME" && ui_ok_msg "Контейнер ${NAME} запущен." || { ui_warn_msg "Ошибка запуска ${NAME}."; return 1; }
             ;;
         stop)
             ui_info_msg "Остановка контейнера ${NAME}..."
@@ -484,18 +647,20 @@ lxc_control() {
         restart)
             ui_info_msg "Перезапуск контейнера ${NAME}..."
             lxc_autoseed_container_network "$NAME"
-            lxc-stop -n "$NAME" -t 5 2>/dev/null || true
+            lxc-stop -n "$NAME" -t 10 2>/dev/null || true
             sleep 1
-            lxc-start -n "$NAME" && ui_ok_msg "Контейнер ${NAME} перезапущен." || ui_warn_msg "Ошибка перезапуска."
+            lxc-start -n "$NAME" && ui_ok_msg "Контейнер ${NAME} перезапущен." || { ui_warn_msg "Ошибка перезапуска."; return 1; }
             ;;
         fix-net|net-fix)
             ui_info_msg "Автоисправление сетевой конфигурации для '${NAME}'..."
-            lxc_autoseed_container_network "$NAME"
+            lxc_autoseed_container_network "$NAME" "" "force"
             if lxc-info -n "$NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
                 lxc-attach -n "$NAME" -- ip link set eth0 up 2>/dev/null || true
-                lxc-attach -n "$NAME" -- systemctl enable --now systemd-networkd 2>/dev/null || \
-                lxc-attach -n "$NAME" -- dhclient eth0 2>/dev/null || \
-                lxc-attach -n "$NAME" -- udhcpc -i eth0 2>/dev/null || true
+                if ! awk -F= '/^[[:space:]]*lxc\.net\.0\.ipv4\.address/ {found=1} END {exit !found}' "${LXC_VAR_LIB}/${NAME}/config" 2>/dev/null; then
+                    lxc-attach -n "$NAME" -- systemctl enable --now systemd-networkd 2>/dev/null || \
+                    lxc-attach -n "$NAME" -- dhclient eth0 2>/dev/null || \
+                    lxc-attach -n "$NAME" -- udhcpc -i eth0 2>/dev/null || true
+                fi
             fi
             ui_ok_msg "Сетевая конфигурация для '${NAME}' успешно применена."
             ;;
@@ -506,29 +671,24 @@ lxc_control() {
         delete|destroy)
             ui_warn_msg "ВНИМАНИЕ! Контейнер '${NAME}' и все его файлы будут безвозвратно удалены."
             printf "Вы уверены? (yes/no): "
-            read -r CONFIRM
+            read -r CONFIRM < /dev/tty || CONFIRM=""
             if [ "$CONFIRM" = "yes" ]; then
                 lxc-stop -n "$NAME" -k 2>/dev/null || true
-                lxc-destroy -n "$NAME" -s -f && ui_ok_msg "Контейнер ${NAME} успешно удален." || ui_warn_msg "Ошибка удаления."
+                lxc-destroy -n "$NAME" -s -f && ui_ok_msg "Контейнер ${NAME} успешно удален." || { ui_warn_msg "Ошибка удаления."; return 1; }
             else
                 ui_info_msg "Удаление отменено."
             fi
             ;;
         autostart)
             CT_CONF="${LXC_VAR_LIB}/${NAME}/config"
-            if [ ! -f "$CT_CONF" ]; then
-                ui_warn_msg "Контейнер ${NAME} не найден."
-                return 1
-            fi
             MODE="$3"
             if [ "$MODE" = "on" ] || { [ -z "$MODE" ] && ! grep -q "^lxc\.start\.auto[ \t]*=[ \t]*1" "$CT_CONF"; }; then
-                sed -i '/lxc\.start\.auto/d' "$CT_CONF"
+                sed -i '/lxc\.start\.auto/d; /lxc\.start\.delay/d' "$CT_CONF"
                 echo "lxc.start.auto = 1" >> "$CT_CONF"
                 echo "lxc.start.delay = 3" >> "$CT_CONF"
                 ui_ok_msg "Автозапуск для '${NAME}' ВКЛЮЧЕН."
             else
-                sed -i '/lxc\.start\.auto/d' "$CT_CONF"
-                sed -i '/lxc\.start\.delay/d' "$CT_CONF"
+                sed -i '/lxc\.start\.auto/d; /lxc\.start\.delay/d' "$CT_CONF"
                 ui_info_msg "Автозапуск для '${NAME}' ВЫКЛЮЧЕН."
             fi
             ;;
@@ -544,21 +704,28 @@ lxc_apply_config_updates() {
     UPD_AUTO="${4:-__KEEP__}"
     UPD_NEST="${5:-__KEEP__}"
     UPD_STOR="${6:-__KEEP__}"
+    _lxc_is_valid_name "$CT_NAME" || return 1
     CT_CONF="${LXC_VAR_LIB}/${CT_NAME}/config"
     [ -f "$CT_CONF" ] || return 1
 
     if [ "$UPD_MEM" != "__KEEP__" ]; then
+        _norm_mem=$(_lxc_normalize_mem_limit "$UPD_MEM" || true)
+        [ -z "$_norm_mem" ] && return 1
         sed -i '/^lxc\.cgroup2\.memory\.max/d' "$CT_CONF" 2>/dev/null || true
-        if [ -n "$UPD_MEM" ] && [ "$UPD_MEM" != "none" ] && [ "$UPD_MEM" != "0" ]; then
-            echo "lxc.cgroup2.memory.max = ${UPD_MEM}" >> "$CT_CONF"
+        if [ "$_norm_mem" != "none" ]; then
+            echo "lxc.cgroup2.memory.max = ${_norm_mem}" >> "$CT_CONF"
         fi
     fi
 
     if [ "$UPD_CPU" != "__KEEP__" ]; then
-        sed -i '/^lxc\.cgroup2\.cpu\.max/d' "$CT_CONF" 2>/dev/null || true
         if [ -n "$UPD_CPU" ] && [ "$UPD_CPU" != "none" ] && [ "$UPD_CPU" != "0" ]; then
+            printf "%s" "$UPD_CPU" | grep -Eq '^[0-9]+([.][0-9]+)?$' || return 1
+            awk -v c="$UPD_CPU" 'BEGIN { exit (c + 0 > 0 ? 0 : 1) }' || return 1
+            sed -i '/^lxc\.cgroup2\.cpu\.max/d' "$CT_CONF" 2>/dev/null || true
             CPU_QUOTA=$(awk -v c="$UPD_CPU" 'BEGIN { v = int((c + 0) * 100000); if (v < 10000) v = 10000; printf "%d", v }' 2>/dev/null || echo "")
             [ -n "$CPU_QUOTA" ] && echo "lxc.cgroup2.cpu.max = ${CPU_QUOTA} 100000" >> "$CT_CONF"
+        else
+            sed -i '/^lxc\.cgroup2\.cpu\.max/d' "$CT_CONF" 2>/dev/null || true
         fi
     fi
 
@@ -579,9 +746,7 @@ lxc_apply_config_updates() {
         if [ "$UPD_NEST" = "yes" ] || [ "$UPD_NEST" = "on" ] || [ "$UPD_NEST" = "true" ] || [ "$UPD_NEST" = "1" ]; then
             cat << 'NEST_EOF' >> "$CT_CONF"
 # --- GW_NESTING_BEGIN ---
-lxc.mount.auto = proc:mixed sys:rw cgroup:rw
-lxc.mount.entry = proc dev/.lxc/proc proc create=dir,optional 0 0
-lxc.mount.entry = sys dev/.lxc/sys sysfs create=dir,optional 0 0
+lxc.include = /usr/share/lxc/config/nesting.conf
 # --- GW_NESTING_END ---
 NEST_EOF
         fi
@@ -594,7 +759,7 @@ NEST_EOF
             !skip { print }
         ' "$CT_CONF" > "${CT_CONF}.tmp.$$" && mv -f "${CT_CONF}.tmp.$$" "$CT_CONF"
         if [ "$UPD_STOR" = "yes" ] || [ "$UPD_STOR" = "on" ] || [ "$UPD_STOR" = "true" ] || [ "$UPD_STOR" = "1" ]; then
-            ST_MNT_PATH="${STORAGE_ROOT:-/srv/storage}"
+            ST_MNT_PATH="${STORAGE_SHARED:-${STORAGE_ROOT:-/srv/storage}/Shared}"
             mkdir -p "$ST_MNT_PATH" "${LXC_VAR_LIB}/${CT_NAME}/rootfs/mnt/storage" 2>/dev/null || true
             cat << STOR_EOF >> "$CT_CONF"
 # --- GW_STORAGE_BEGIN ---
@@ -614,17 +779,23 @@ lxc_create_from_spec() {
         return 1
     fi
 
-    CT_NAME=$(jq -r '.name // empty' "$SPEC_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9_-')
+    RAW_CT_NAME=$(jq -r '.name // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
+    if ! _lxc_is_valid_name "$RAW_CT_NAME"; then
+        ui_warn_msg "Некорректное имя контейнера '${RAW_CT_NAME}' (допустимы латиница, цифры, '-' и '_')."
+        return 1
+    fi
+    CT_NAME="$RAW_CT_NAME"
+
     T_DIST=$(jq -r '.distro // empty' "$SPEC_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9._-')
     T_REL=$(jq -r '.release // empty' "$SPEC_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9._-')
     T_VAR=$(jq -r '.variant // "default"' "$SPEC_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9._-')
     T_ARCH=$(jq -r '.arch // empty' "$SPEC_FILE" 2>/dev/null | tr -cd 'A-Za-z0-9_-')
     NET_MODE=$(jq -r '.net_mode // "nat"' "$SPEC_FILE" 2>/dev/null)
-    STATIC_IP=$(jq -r '.static_ip // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
-    STATIC_GW=$(jq -r '.static_gw // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
-    STATIC_DNS=$(jq -r '.static_dns // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
-    MEM_LIMIT=$(jq -r '.mem_limit // empty' "$SPEC_FILE" 2>/dev/null | tr -cd '0-9KkMmGg')
-    CPU_LIMIT=$(jq -r '.cpu_limit // empty' "$SPEC_FILE" 2>/dev/null | tr -cd '0-9.')
+    RAW_STATIC_IP=$(jq -r '.static_ip // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
+    RAW_STATIC_GW=$(jq -r '.static_gw // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
+    RAW_STATIC_DNS=$(jq -r '.static_dns // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
+    RAW_MEM_LIMIT=$(jq -r '.mem_limit // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
+    RAW_CPU_LIMIT=$(jq -r '.cpu_limit // empty' "$SPEC_FILE" 2>/dev/null | tr -d ' \t\r\n')
     AUTO_EN=$(jq -r 'if .autostart == true or .autostart == "yes" then "yes" else "no" end' "$SPEC_FILE" 2>/dev/null)
     NEST_EN=$(jq -r 'if .nesting == true or .nesting == "yes" then "yes" else "no" end' "$SPEC_FILE" 2>/dev/null)
     STOR_EN=$(jq -r 'if .storage_mount == true or .storage_mount == "yes" then "yes" else "no" end' "$SPEC_FILE" 2>/dev/null)
@@ -633,10 +804,54 @@ lxc_create_from_spec() {
 
     [ -z "$T_VAR" ] && T_VAR="default"
     [ -z "$T_ARCH" ] && T_ARCH=$(get_lxc_system_arch)
-    case "$MEM_LIMIT" in
-        ''|*[KkMmGg]) ;;
-        *) MEM_LIMIT="${MEM_LIMIT}M" ;;
-    esac
+
+    MEM_LIMIT=""
+    if [ -n "$RAW_MEM_LIMIT" ]; then
+        MEM_LIMIT=$(_lxc_normalize_mem_limit "$RAW_MEM_LIMIT" || true)
+        if [ -z "$MEM_LIMIT" ]; then
+            ui_warn_msg "Некорректный лимит ОЗУ (${RAW_MEM_LIMIT}). Пример: 512M, 2G."
+            return 1
+        fi
+    fi
+    [ -z "$MEM_LIMIT" ] && MEM_LIMIT="none"
+
+    CPU_LIMIT=""
+    if [ -n "$RAW_CPU_LIMIT" ] && [ "$RAW_CPU_LIMIT" != "none" ] && [ "$RAW_CPU_LIMIT" != "0" ]; then
+        if ! printf "%s" "$RAW_CPU_LIMIT" | grep -Eq '^[0-9]+([.][0-9]+)?$' || ! awk -v c="$RAW_CPU_LIMIT" 'BEGIN { exit (c + 0 > 0 ? 0 : 1) }'; then
+            ui_warn_msg "Некорректный лимит CPU (${RAW_CPU_LIMIT})."
+            return 1
+        fi
+        CPU_LIMIT="$RAW_CPU_LIMIT"
+    else
+        CPU_LIMIT="none"
+    fi
+
+    STATIC_IP=""
+    if [ -n "$RAW_STATIC_IP" ]; then
+        STATIC_IP=$(_lxc_is_valid_ipv4_cidr "$RAW_STATIC_IP" || true)
+        if [ -z "$STATIC_IP" ]; then
+            ui_warn_msg "Некорректный static_ip (${RAW_STATIC_IP})."
+            return 1
+        fi
+    fi
+
+    STATIC_GW=""
+    if [ -n "$RAW_STATIC_GW" ]; then
+        if ! _lxc_is_valid_ipv4 "$RAW_STATIC_GW"; then
+            ui_warn_msg "Некорректный static_gw (${RAW_STATIC_GW})."
+            return 1
+        fi
+        STATIC_GW="$RAW_STATIC_GW"
+    fi
+
+    STATIC_DNS=""
+    if [ -n "$RAW_STATIC_DNS" ]; then
+        if ! _lxc_is_valid_ipv4 "$RAW_STATIC_DNS"; then
+            ui_warn_msg "Некорректный static_dns (${RAW_STATIC_DNS})."
+            return 1
+        fi
+        STATIC_DNS="$RAW_STATIC_DNS"
+    fi
 
     if [ -z "$CT_NAME" ] || [ -z "$T_DIST" ] || [ -z "$T_REL" ]; then
         ui_warn_msg "Не указано имя контейнера, дистрибутив или релиз."
@@ -664,19 +879,13 @@ lxc_create_from_spec() {
     ui_step_progress 2 4 "Настройка сети (${NET_MODE}), ресурсов и монтирования..."
     if [ -f "$CT_CONF" ]; then
         if [ "$NET_MODE" = "macvlan" ]; then
-            LAN_IF=$(get_lan_ifname)
-            sed -i '/lxc\.net\.0\./d' "$CT_CONF"
-            cat << NET_MV_SPEC >> "$CT_CONF"
-lxc.net.0.type = macvlan
-lxc.net.0.macvlan.mode = bridge
-lxc.net.0.link = ${LAN_IF}
-lxc.net.0.flags = up
-lxc.net.0.hwaddr = 10:66:6a:$(hexdump -n 3 -e '/1 ":%02x"' /dev/urandom 2>/dev/null | cut -c 2- || echo "11:22:33")
-NET_MV_SPEC
-            [ -z "$STATIC_DNS" ] && STATIC_DNS=$(get_current_lan_ip)
+            _lxc_apply_macvlan_config "$CT_CONF" || return 1
+            [ -z "$STATIC_DNS" ] && STATIC_DNS=$(get_default_router_ip)
+            [ -n "$STATIC_IP" ] && [ -z "$STATIC_GW" ] && STATIC_GW=$(get_default_router_ip)
         else
             [ -z "$STATIC_DNS" ] && STATIC_DNS="10.0.3.1"
         fi
+        printf "%s\n" "$STATIC_DNS" > "${CT_DIR}/.gw_dns" 2>/dev/null || true
 
         if [ -n "$STATIC_IP" ]; then
             sed -i '/lxc\.net\.0\.ipv4\./d' "$CT_CONF"
@@ -692,7 +901,7 @@ NET_MV_SPEC
     fi
 
     ui_step_progress 3 4 "Автоконфигурация сети и DNS внутри контейнера..."
-    lxc_autoseed_container_network "$CT_NAME" "${STATIC_DNS:-10.0.3.1}"
+    lxc_autoseed_container_network "$CT_NAME" "${STATIC_DNS:-10.0.3.1}" "force"
 
     if [ "$START_NOW" = "yes" ]; then
         ui_step_progress 4 4 "Запуск контейнера ${CT_NAME} и ожидание IP-адреса..."
@@ -712,13 +921,22 @@ NET_MV_SPEC
     fi
 
     if [ -n "$ROOT_PASS" ]; then
+        _pw_ok="no"
         if lxc-info -n "$CT_NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
-            printf "root:%s\n" "$ROOT_PASS" | lxc-attach -n "$CT_NAME" -- chpasswd >/dev/null 2>&1 || true
+            printf "root:%s\n" "$ROOT_PASS" | lxc-attach -n "$CT_NAME" -- chpasswd >/dev/null 2>&1 && _pw_ok="yes"
         elif [ -d "${CT_DIR}/rootfs" ]; then
-            printf "root:%s\n" "$ROOT_PASS" | chroot "${CT_DIR}/rootfs" /usr/sbin/chpasswd >/dev/null 2>&1 || \
-            printf "root:%s\n" "$ROOT_PASS" | chroot "${CT_DIR}/rootfs" /sbin/chpasswd >/dev/null 2>&1 || true
+            for _cpw in /usr/sbin/chpasswd /sbin/chpasswd /usr/bin/chpasswd; do
+                if [ -x "${CT_DIR}/rootfs${_cpw}" ]; then
+                    printf "root:%s\n" "$ROOT_PASS" | chroot "${CT_DIR}/rootfs" "$_cpw" >/dev/null 2>&1 && _pw_ok="yes"
+                    break
+                fi
+            done
         fi
-        ui_ok_msg "Пароль пользователя root установлен."
+        if [ "$_pw_ok" = "yes" ]; then
+            ui_ok_msg "Пароль пользователя root установлен."
+        else
+            ui_warn_msg "Не удалось установить пароль пользователя root внутри контейнера ${CT_NAME}."
+        fi
     fi
 
     ui_ok_msg "Контейнер '${CT_NAME}' (${T_DIST} ${T_REL}) успешно развёрнут!"
@@ -748,19 +966,39 @@ lxc_manage_snapshots() {
 
     if [ -z "$NAME" ]; then
         echo "Введите имя контейнера:"
-        read -r NAME
+        read -r NAME < /dev/tty || return 1
     fi
-    [ -z "$NAME" ] && return 1
+    NAME=$(printf "%s" "$NAME" | tr -d ' \t\r\n')
+    if ! _lxc_is_valid_name "$NAME"; then
+        ui_warn_msg "Некорректное имя контейнера '${NAME}'."
+        return 1
+    fi
+    if [ ! -f "${LXC_VAR_LIB}/${NAME}/config" ]; then
+        ui_warn_msg "Контейнер '${NAME}' не найден."
+        return 1
+    fi
 
     case "$SUBACTION" in
         create|snap)
             ui_info_msg "Создание снимка (снапшота) контейнера ${NAME}..."
-            # Директории требуют остановки или флага --allowrunning
-            lxc-snapshot -n "$NAME" --allowrunning 2>/dev/null || {
-                lxc-stop -n "$NAME" -t 5 2>/dev/null || true
-                lxc-snapshot -n "$NAME"
-                lxc-start -n "$NAME" 2>/dev/null || true
-            }
+            _was_running="no"
+            if lxc-info -n "$NAME" 2>/dev/null | grep -q "State:.*RUNNING"; then
+                _was_running="yes"
+                if ! lxc-stop -n "$NAME" -t 15 >/dev/null 2>&1; then
+                    if ! lxc-stop -n "$NAME" -k >/dev/null 2>&1; then
+                        ui_warn_msg "Не удалось остановить контейнер ${NAME} перед созданием снимка."
+                        return 1
+                    fi
+                fi
+            fi
+            if ! lxc-snapshot -n "$NAME"; then
+                ui_warn_msg "Ошибка создания снимка контейнера ${NAME}."
+                [ "$_was_running" = "yes" ] && { lxc-start -n "$NAME" >/dev/null 2>&1 || true; }
+                return 1
+            fi
+            if [ "$_was_running" = "yes" ]; then
+                lxc-start -n "$NAME" >/dev/null 2>&1 || ui_warn_msg "Снимок создан, но контейнер ${NAME} не смог запуститься обратно."
+            fi
             ui_ok_msg "Снимок контейнера ${NAME} успешно создан."
             lxc-snapshot -n "$NAME" -L 2>/dev/null || true
             ;;
@@ -781,13 +1019,14 @@ lxc_manage_snapshots() {
                 ui_info_msg "Доступные снимки:"
                 lxc-snapshot -n "$NAME" -L 2>/dev/null || true
                 echo "Введите имя снимка для отката (например: snap0):"
-                read -r SNAPNAME
+                read -r SNAPNAME < /dev/tty || return 1
             fi
-            [ -z "$SNAPNAME" ] && return 1
+            SNAPNAME=$(printf "%s" "$SNAPNAME" | tr -d ' \t\r\n')
+            _lxc_is_valid_name "$SNAPNAME" || { ui_warn_msg "Некорректное имя снимка."; return 1; }
 
             ui_warn_msg "Откат контейнера ${NAME} к снимку ${SNAPNAME} уничтожит текущие несохраненные изменения!"
             printf "Продолжить откат? (yes/no): "
-            read -r C_ROLL
+            read -r C_ROLL < /dev/tty || C_ROLL=""
             if [ "$C_ROLL" = "yes" ]; then
                 lxc-stop -n "$NAME" -k 2>/dev/null || true
                 if lxc-snapshot -n "$NAME" -r "$SNAPNAME"; then
@@ -795,16 +1034,18 @@ lxc_manage_snapshots() {
                     lxc-start -n "$NAME" 2>/dev/null || true
                 else
                     ui_warn_msg "Ошибка восстановления из снимка."
+                    return 1
                 fi
             fi
             ;;
         delete|del|rm)
             if [ -z "$SNAPNAME" ]; then
                 echo "Введите имя снимка для удаления (например: snap0):"
-                read -r SNAPNAME
+                read -r SNAPNAME < /dev/tty || return 1
             fi
-            [ -z "$SNAPNAME" ] && return 1
-            lxc-snapshot -n "$NAME" -d "$SNAPNAME" && ui_ok_msg "Снимок ${SNAPNAME} удален." || ui_warn_msg "Ошибка удаления снимка."
+            SNAPNAME=$(printf "%s" "$SNAPNAME" | tr -d ' \t\r\n')
+            _lxc_is_valid_name "$SNAPNAME" || { ui_warn_msg "Некорректное имя снимка."; return 1; }
+            lxc-snapshot -n "$NAME" -d "$SNAPNAME" && ui_ok_msg "Снимок ${SNAPNAME} удален." || { ui_warn_msg "Ошибка удаления снимка."; return 1; }
             ;;
         *)
             echo "Использование: gw lxc snap <имя> [create|list|restore|delete] [имя_снимка]"
@@ -840,6 +1081,23 @@ check_and_heal_lxc_doctor() {
     if [ -f "/etc/init.d/lxcfs" ] && ! pgrep lxcfs >/dev/null 2>&1; then
         rc-service lxcfs start >/dev/null 2>&1 || true
     fi
+
+    # 5. Привязка Mount Guard к lxc при внешнем хранилище и изоляция legacy storage_mount от корня /srv/storage
+    if [ -L "$LXC_VAR_LIB" ]; then
+        command -v ensure_openrc_mount_guard >/dev/null 2>&1 && ensure_openrc_mount_guard "lxc" >/dev/null 2>&1 || true
+    fi
+    _st_root="${STORAGE_ROOT:-/srv/storage}"
+    _st_shared="${STORAGE_SHARED:-${_st_root}/Shared}"
+    _real_lxc=$(readlink -f "$LXC_VAR_LIB" 2>/dev/null || echo "$LXC_VAR_LIB")
+    if [ -d "$_real_lxc" ]; then
+        for _ct_c in "${_real_lxc}"/*/config; do
+            [ -f "$_ct_c" ] || continue
+            if grep -q "lxc\.mount\.entry[[:space:]]*=[[:space:]]*${_st_root}[[:space:]]*mnt/storage" "$_ct_c" 2>/dev/null; then
+                mkdir -p "$_st_shared" 2>/dev/null || true
+                sed -i "s|lxc\.mount\.entry[[:space:]]*=[[:space:]]*${_st_root}[[:space:]]*mnt/storage|lxc.mount.entry = ${_st_shared} mnt/storage|g" "$_ct_c" 2>/dev/null || true
+            fi
+        done
+    fi
     return 0
 }
 
@@ -863,7 +1121,7 @@ lxc_interactive_menu() {
         echo "  0) ⬅  Назад в главное меню"
         echo ""
         printf "Выберите действие [0-9]: "
-        read -r M_ACT
+        read -r M_ACT < /dev/tty || break
         case "$M_ACT" in
             1) lxc_create_wizard ;;
             2) lxc_control "start" ;;
@@ -872,14 +1130,14 @@ lxc_interactive_menu() {
             5) lxc_control "attach" ;;
             6)
                 echo "Введите имя контейнера для работы со снимками:"
-                read -r S_CT
+                read -r S_CT < /dev/tty || S_CT=""
                 if [ -n "$S_CT" ]; then
                     echo "  1) Создать снимок (snapshot)"
                     echo "  2) Список снимков"
                     echo "  3) Восстановить из снимка"
                     echo "  4) Удалить снимок"
                     printf "Действие [1-4]: "
-                    read -r SS_ACT
+                    read -r SS_ACT < /dev/tty || SS_ACT=""
                     case "$SS_ACT" in
                         1) lxc_manage_snapshots "create" "$S_CT" ;;
                         2) lxc_manage_snapshots "list" "$S_CT" ;;
@@ -890,12 +1148,12 @@ lxc_interactive_menu() {
                 ;;
             7)
                 echo "Введите имя контейнера для переключения автозапуска:"
-                read -r A_CT
+                read -r A_CT < /dev/tty || A_CT=""
                 [ -n "$A_CT" ] && lxc_control "autostart" "$A_CT"
                 ;;
             8)
                 echo "Введите имя контейнера для автоисправления сети:"
-                read -r N_CT
+                read -r N_CT < /dev/tty || N_CT=""
                 [ -n "$N_CT" ] && lxc_control "fix-net" "$N_CT"
                 ;;
             9) lxc_control "delete" ;;
@@ -903,7 +1161,7 @@ lxc_interactive_menu() {
         esac
         echo ""
         echo "Нажмите Enter для продолжения..."
-        read -r _DUMMY
+        read -r _DUMMY < /dev/tty || true
     done
     return 0
 }

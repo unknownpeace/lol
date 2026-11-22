@@ -25,10 +25,24 @@ if command -v apk >/dev/null 2>&1; then
     if [ -f /etc/openwrt_release ]; then
         echo "[*] Проверка системных пакетов OpenWrt (jq, curl, ca-bundle, git)..."
         apk update >/dev/null 2>&1 || true
-        apk add jq curl ca-bundle ca-certificates git git-http >/dev/null 2>&1 || true
+        if ! apk add jq curl ca-bundle ca-certificates git git-http >/dev/null 2>&1; then
+            for _req_bin in jq curl git; do
+                if ! command -v "$_req_bin" >/dev/null 2>&1; then
+                    echo "[!] Ошибка: Не удалось установить обязательный пакет '${_req_bin}' (OpenWrt apk)." >&2
+                    exit 1
+                fi
+            done
+        fi
     else
         echo "[*] Проверка системных пакетов (jq, curl, nftables, ca-certificates, git)..."
-        apk add --no-cache jq curl nftables ca-certificates git >/dev/null 2>&1 || true
+        if ! apk add --no-cache jq curl nftables ca-certificates git >/dev/null 2>&1; then
+            for _req_bin in jq curl nft git; do
+                if ! command -v "$_req_bin" >/dev/null 2>&1; then
+                    echo "[!] Ошибка: Не удалось установить обязательный пакет '${_req_bin}' (Alpine apk)." >&2
+                    exit 1
+                fi
+            done
+        fi
     fi
 fi
 
@@ -93,7 +107,11 @@ if [ -n "$BASH_VERSION" ]; then
                 return 0
                 ;;
             lxc|container|containers)
-                COMPREPLY=($(compgen -W "list create start stop restart attach snap autostart rm menu doctor" -- "$cur"))
+                COMPREPLY=($(compgen -W "list create start stop restart attach snap autostart fix-net rm menu doctor" -- "$cur"))
+                return 0
+                ;;
+            logs|log)
+                COMPREPLY=($(compgen -W "core sing-box mihomo adguard caddy vaultwarden metube code samba forgejo transmission webui console autoupdate" -- "$cur"))
                 return 0
                 ;;
             proxy)

@@ -206,6 +206,10 @@ apply_network_ips() {
     LAN_SUBNET="${TARGET_LAN_IP%.*}"
     GW_SUBNET="${TARGET_GW_IP%.*}"
     if [ "$LAN_SUBNET" != "$GW_SUBNET" ]; then
+        if [ ! -t 0 ] || [ "${IS_UNATTENDED:-no}" = "yes" ]; then
+            echo "${C_RED}[X] Ошибка: Подсеть шлюза (${LAN_SUBNET}.x) отличается от подсети роутера (${GW_SUBNET}.x) в неинтерактивном режиме!${C_RES}"
+            return 1
+        fi
         echo "${C_YEL}[!] Внимание: Подсеть шлюза (${LAN_SUBNET}.x) отличается от подсети роутера (${GW_SUBNET}.x)!${C_RES}"
         printf "Введите IP основного роутера в новой подсети [Enter = %s.1 / отмена = n]: " "$LAN_SUBNET"
         read -r FIX_GW < /dev/tty || true
@@ -227,7 +231,10 @@ apply_network_ips() {
     update_agh_gateway_ip "$GW_IP" "$TARGET_LAN_IP"
     ACT_SVC=$(get_active_core_service)
     if [ -f "$SB_CONF" ] || [ -f "$MIHOMO_CONF" ]; then
+        GW_TARGET_LAN_IP_OVERRIDE="$TARGET_LAN_IP"
+        export GW_TARGET_LAN_IP_OVERRIDE
         core_generate_config || true
+        unset GW_TARGET_LAN_IP_OVERRIDE
     fi
 
     if is_openwrt 2>/dev/null; then
@@ -239,7 +246,8 @@ apply_network_ips() {
         configure_smart_dhcp "on" "$TARGET_LAN_IP" >/dev/null 2>&1 || true
     fi
 
-    SW_SCRIPT="/tmp/switch_lan_ip.$$.sh"
+    ensure_gateway_runtime_dir || return 1
+    SW_SCRIPT=$(mktemp "${GATEWAY_RUNTIME_DIR:-/run/gateway}/switch_lan_ip.XXXXXX" 2>/dev/null || printf "%s" "${GATEWAY_RUNTIME_DIR:-/run/gateway}/switch_lan_ip.$$.sh")
     if is_openwrt 2>/dev/null; then
         cat << SW_OWRT > "$SW_SCRIPT"
 #!/bin/sh
@@ -248,6 +256,9 @@ sleep 1
 /etc/init.d/network reload >/dev/null 2>&1 || true
 sleep 2
 ip -4 route replace default via ${GW_IP} dev ${LAN_IF} >/dev/null 2>&1 || true
+printf "nameserver 127.0.0.1\nnameserver %s\nnameserver 77.88.8.8\n" "${GW_IP}" > /tmp/resolv.conf.tmp.\$\$ 2>/dev/null && \
+    chmod 0644 /tmp/resolv.conf.tmp.\$\$ 2>/dev/null && \
+    mv -f /tmp/resolv.conf.tmp.\$\$ /tmp/resolv.conf 2>/dev/null || true
 fw4 reload >/dev/null 2>&1 || /etc/init.d/firewall reload >/dev/null 2>&1 || true
 /etc/init.d/${ACT_SVC} start >/dev/null 2>&1 || true
 /etc/init.d/adguardhome restart >/dev/null 2>&1 || true
@@ -303,5 +314,3 @@ nameserver 77.88.8.8"
     fi
     return 0
 }
-
-# Проверка, включено ли автообновление и Watchdog в cron

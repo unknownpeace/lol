@@ -89,7 +89,7 @@ run_homelab_self_test() {
             AVAHI_ST=$(rc-service avahi-daemon status >/dev/null 2>&1 && echo "Avahi:OK" || echo "Avahi:OFF")
             PDB_ST="PDB:OK"
             if command -v pdbedit >/dev/null 2>&1; then
-                pdbedit -L -w "${SMB_USER:-homelab}" 2>/dev/null | grep -q "^${SMB_USER:-homelab}:" || PDB_ST="PDB:FAIL"
+                pdbedit -L -w -u "${SMB_USER:-homelab}" 2>/dev/null | grep -q "^${SMB_USER:-homelab}:" || PDB_ST="PDB:FAIL"
             fi
             ui_box_row "▸ [${M_ID}] ${M_TITLE}: ${SVC_TXT} │ Юзер: ${SMB_USER:-homelab} (${PDB_ST}) │ LAN: ${C_CYN}${WSDD_ST}, ${AVAHI_ST}${C_RES}"
         elif [ "$M_ID" = "caddy" ]; then
@@ -115,5 +115,3 @@ run_homelab_self_test() {
     ui_box_bottom
     return 0
 }
-
-# Мастер выбора модулей Homelab при первоначальной установке или доустановке

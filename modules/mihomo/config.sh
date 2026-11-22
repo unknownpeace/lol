@@ -9,16 +9,21 @@ yaml_sq() {
 }
 
 generate_mihomo_config() {
-    _PREV_CORE="${CORE_ENGINE:-}"
-    _PREV_UI="${WEB_UI:-}"
+    _OVERRIDE_CORE="${1:-}"
+    calc_hardware_limits >/dev/null 2>&1 || true
     check_github_mirror
     sync_user_domain_rulesets
     load_gateway_env || true
-    [ -n "$_PREV_CORE" ] && CORE_ENGINE="$_PREV_CORE" || true
-    [ -n "$_PREV_UI" ] && WEB_UI="$_PREV_UI" || true
+    [ -n "$_OVERRIDE_CORE" ] && CORE_ENGINE="$_OVERRIDE_CORE" || true
     [ -z "${ADMIN_PASS:-}" ] && ADMIN_PASS="admin" || true
     [ -z "${GW_IP:-}" ] && GW_IP=$(get_default_router_ip) || true
     CUR_LIP_MH=$(get_current_lan_ip)
+
+    if [ "${TOTAL_RAM_MB:-512}" -le 1200 ]; then
+        MH_UT_INT=600
+    else
+        MH_UT_INT=180
+    fi
 
     mkdir -p "$MIHOMO_DIR" "${MIHOMO_DIR}/providers" "${MIHOMO_DIR}/rules"
     chmod 700 "$MIHOMO_DIR" 2>/dev/null || true
@@ -46,7 +51,7 @@ generate_mihomo_config() {
               "    type: wireguard\n" +
               "    server: " + (.peers[0].address | @json) + "\n" +
               "    port: " + (.peers[0].port | tostring) + "\n" +
-              "    ip: " + ((.address[0] // "172.16.0.2/32") | @json) + "\n" +
+              "    ip: " + (((.address[0] // "172.16.0.2") | split("/")[0]) | @json) + "\n" +
               "    public-key: " + (.peers[0].public_key | @json) + "\n" +
               "    private-key: " + (.private_key | @json) + "\n" +
               "    udp: true\n" +
@@ -89,21 +94,49 @@ generate_mihomo_config() {
     fi
 
     FORCE_IPS_YAML=""
+    FORCE_QUIC_YAML=""
+    FORCE_FAKEIP_YAML=""
     if [ -s "$USER_FORCE_PROXY_IPS" ]; then
-        FORCE_IPS_YAML=$(sed 's/\r$//' "$USER_FORCE_PROXY_IPS" 2>/dev/null | awk 'NF && $0 !~ /^#/ {
-            ip=$0; gsub(/^[ \t]+|[ \t]+$/, "", ip);
-            if (index(ip, "/") == 0) ip = ip "/32";
-            printf "  - \"SRC-IP-CIDR,%s,📺 Устройства (Full-VPN)\"\n", ip
-        }' || true)
+        while IFS= read -r _f_line || [ -n "$_f_line" ]; do
+            _f_line=$(printf "%s" "$_f_line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            case "$_f_line" in
+                ""|\#*) continue ;;
+            esac
+            _f_cidr=""
+            if is_valid_ipv4 "$_f_line"; then
+                _f_cidr="${_f_line}/32"
+            elif is_valid_ipv4_cidr "$_f_line"; then
+                _f_cidr="$_f_line"
+            fi
+            if [ -n "$_f_cidr" ]; then
+                FORCE_IPS_YAML="${FORCE_IPS_YAML}  - \"SRC-IP-CIDR,${_f_cidr},📺 Устройства (Full-VPN)\"
+"
+                FORCE_QUIC_YAML="${FORCE_QUIC_YAML}  - \"AND,((SRC-IP-CIDR,${_f_cidr}),(NETWORK,UDP),(DST-PORT,443)),REJECT\"
+"
+                FORCE_FAKEIP_YAML="${FORCE_FAKEIP_YAML}    - \"SRC-IP-CIDR,${_f_cidr},fake-ip\"
+"
+            fi
+        done < "$USER_FORCE_PROXY_IPS"
     fi
 
     BYPASS_IPS_YAML=""
     if [ -s "$USER_BYPASS_IPS" ]; then
-        BYPASS_IPS_YAML=$(sed 's/\r$//' "$USER_BYPASS_IPS" 2>/dev/null | awk 'NF && $0 !~ /^#/ {
-            ip=$0; gsub(/^[ \t]+|[ \t]+$/, "", ip);
-            if (index(ip, "/") == 0) ip = ip "/32";
-            printf "  - \"SRC-IP-CIDR,%s,DIRECT\"\n", ip
-        }' || true)
+        while IFS= read -r _b_line || [ -n "$_b_line" ]; do
+            _b_line=$(printf "%s" "$_b_line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            case "$_b_line" in
+                ""|\#*) continue ;;
+            esac
+            _b_cidr=""
+            if is_valid_ipv4 "$_b_line"; then
+                _b_cidr="${_b_line}/32"
+            elif is_valid_ipv4_cidr "$_b_line"; then
+                _b_cidr="$_b_line"
+            fi
+            if [ -n "$_b_cidr" ]; then
+                BYPASS_IPS_YAML="${BYPASS_IPS_YAML}  - \"SRC-IP-CIDR,${_b_cidr},DIRECT\"
+"
+            fi
+        done < "$USER_BYPASS_IPS"
     fi
 
     [ -f "$MIHOMO_CONF" ] && cp -f "$MIHOMO_CONF" "${MIHOMO_CONF}.bak" || true
@@ -243,6 +276,7 @@ MH_DNS_PRX
         if [ "$IS_DIRECT_ONLY" = "yes" ]; then
             echo '    - "MATCH,real-ip"'
         else
+            [ -n "$FORCE_FAKEIP_YAML" ] && printf "%s" "$FORCE_FAKEIP_YAML"
             [ "$HAS_USER_PROXY" = "yes" ] && echo '    - "RULE-SET,user_proxy_domains,fake-ip"'
             emit_yaml_typed_rules "    " "DOMAIN-SUFFIX" "$AI_EXPLICIT_DOMAINS" "fake-ip"
             for _rs in ai_domain google_gemini_domain openai_domain anthropic_domain perplexity_domain xai_domain cursor_domain copilot_domain; do
@@ -281,7 +315,7 @@ MH_DNS_PRX
             echo "proxy-providers:"
             if [ "$USE_SUB" = "yes" ]; then
                 IDX=0
-                for U_ITEM in $(printf "%s\n" "$SUB_URL" | tr ' |,' '\n\n\n' | grep -E '^https?://'); do
+                for U_ITEM in $(printf "%s\n" "$SUB_URL" | tr ' |' '\n\n' | grep -E '^https?://'); do
                     IDX=$((IDX + 1))
                     if [ "$IDX" -eq 1 ]; then
                         P_TAG="custom_sub"
@@ -300,10 +334,7 @@ MH_DNS_PRX
       User-Agent: ["clash.meta"]
     exclude-filter: $(yaml_sq "$ACTIVE_SUB_REGEX")
     health-check:
-      enable: true
-      url: "https://www.gstatic.com/generate_204"
-      interval: 300
-      lazy: true
+      enable: false
 MH_PROV
                 done
             fi
@@ -315,10 +346,7 @@ MH_PROV
     type: file
     path: $(yaml_sq "$CUSTOM_NODES_FILE")
     health-check:
-      enable: true
-      url: "https://www.gstatic.com/generate_204"
-      interval: 300
-      lazy: true
+      enable: false
 MH_MYPROV
             fi
         } >> "${MIHOMO_CONF}.tmp.$$"
@@ -340,12 +368,12 @@ MH_MYPROV
                 printf "%s\n" "$WARP_TAGS_YAML"
                 [ "$_allow_direct" = "yes" ] && echo '      - "DIRECT"'
             else
-                echo '      - "DIRECT"'
+                [ "$_allow_direct" = "yes" ] && echo '      - "DIRECT"'
             fi
         }
 
         if [ "$USE_PROVIDERS" = "yes" ]; then
-            cat << MH_SEL_SUB
+            cat << MH_SEL_SUB | awk 'NF'
   - name: "🤖 Нейросети (ИИ)"
     type: select
     proxies:
@@ -427,7 +455,7 @@ $(emit_selector_tail "no")
 $(emit_selector_tail "no")
 MH_SEL_SUB
             if [ -n "$FORCE_IPS_YAML" ]; then
-                cat << MH_FORCE_GRP
+                cat << MH_FORCE_GRP | awk 'NF'
   - name: "📺 Устройства (Full-VPN)"
     type: select
     proxies:
@@ -439,7 +467,7 @@ MH_SEL_SUB
 $(emit_selector_tail "no")
 MH_FORCE_GRP
             fi
-            cat << MH_REST_SUB
+            cat << MH_REST_SUB | awk 'NF'
   - name: "🌐 Остальной трафик"
     type: select
     proxies:
@@ -455,7 +483,7 @@ $(emit_selector_tail "no")
     use:${USE_TAGS_YAML}
     filter: $(yaml_sq "$FILTER_AI_INCLUDE")
     url: "https://www.gstatic.com/generate_204"
-    interval: 180
+    interval: ${MH_UT_INT}
     tolerance: 50
   - name: "🎮 Авто-Гейминг"
     type: url-test
@@ -464,7 +492,7 @@ $(emit_selector_tail "no")
     use:${USE_TAGS_YAML}
     filter: $(yaml_sq "$FILTER_GAME_INCLUDE")
     url: "https://www.gstatic.com/generate_204"
-    interval: 180
+    interval: ${MH_UT_INT}
     tolerance: 25
   - name: "🇺🇸 Авто-US"
     type: url-test
@@ -473,7 +501,7 @@ $(emit_selector_tail "no")
     use:${USE_TAGS_YAML}
     filter: $(yaml_sq "$FILTER_US_INCLUDE")
     url: "https://www.gstatic.com/generate_204"
-    interval: 180
+    interval: ${MH_UT_INT}
     tolerance: 40
   - name: "🇩🇪 Авто-DE"
     type: url-test
@@ -483,7 +511,7 @@ $(emit_selector_tail "no")
     filter: $(yaml_sq "$FILTER_DE_INCLUDE")
     exclude-filter: $(yaml_sq "$FILTER_DE_EXCLUDE")
     url: "https://www.gstatic.com/generate_204"
-    interval: 180
+    interval: ${MH_UT_INT}
     tolerance: 35
   - name: "⚡ Авто (Самый быстрый)"
     type: url-test
@@ -494,12 +522,12 @@ $(emit_selector_tail "no")
     use:${USE_TAGS_YAML}
     exclude-filter: $(yaml_sq "$FILTER_AUTO_EXCLUDE")
     url: "https://www.gstatic.com/generate_204"
-    interval: 180
+    interval: ${MH_UT_INT}
     tolerance: 35
 MH_REST_SUB
         else
             # WARP-only or DIRECT-only (no regional/provider groups)
-            cat << MH_SEL_NOWP
+            cat << MH_SEL_NOWP | awk 'NF'
   - name: "🤖 Нейросети (ИИ)"
     type: select
     proxies:
@@ -545,7 +573,7 @@ $(emit_selector_tail "no")
 $(emit_selector_tail "no")
 MH_SEL_NOWP
             if [ -n "$FORCE_IPS_YAML" ]; then
-                cat << MH_FORCE_NOWP
+                cat << MH_FORCE_NOWP | awk 'NF'
   - name: "📺 Устройства (Full-VPN)"
     type: select
     proxies:
@@ -554,7 +582,7 @@ MH_SEL_NOWP
 $(emit_selector_tail "yes")
 MH_FORCE_NOWP
             fi
-            cat << MH_REST_NOWP
+            cat << MH_REST_NOWP | awk 'NF'
   - name: "🌐 Остальной трафик"
     type: select
     proxies:
@@ -564,9 +592,9 @@ $(emit_selector_tail "no")
   - name: "⚡ Авто (Самый быстрый)"
     type: url-test
     proxies:
-$(emit_selector_tail "no")
+$(emit_selector_tail "yes")
     url: "https://www.gstatic.com/generate_204"
-    interval: 180
+    interval: ${MH_UT_INT}
     tolerance: 50
 MH_REST_NOWP
         fi
@@ -578,7 +606,7 @@ MH_REST_NOWP
     proxies:
 ${WARP_TAGS_YAML}
     url: "https://cp.cloudflare.com/generate_204"
-    interval: 180
+    interval: ${MH_UT_INT}
     tolerance: 50
 MH_WARP_GRP
         fi
@@ -678,17 +706,21 @@ MH_UP
         echo '  - "RULE-SET,ntp_domain,DIRECT"'
         echo '  - "DST-PORT,123,DIRECT"'
         echo '  - "DST-PORT,853,REJECT"'
+
+        # QUIC block (UDP:443 -> REJECT) for AI + key proxy domains + Full-VPN devices
+        emit_yaml_quic_reject_rules "  " "DOMAIN-SUFFIX" "$AI_EXPLICIT_DOMAINS $SPOTIFY_EXTRA_DOMAINS $TWITCH_EXTRA_DOMAINS $ROBLOX_EXTRA_DOMAINS"
+        [ "$HAS_USER_PROXY" = "yes" ] && emit_yaml_quic_reject_rules "  " "RULE-SET" "user_proxy_domains"
+        emit_yaml_quic_reject_rules "  " "RULE-SET" "ai_domain google_gemini_domain openai_domain anthropic_domain perplexity_domain xai_domain cursor_domain copilot_domain youtube_domain spotify_domain twitch_domain meta_domain discord_domain roblox_domain tiktok_domain cloudflare_domain ru_bundle"
+        for _iprs in refilter_ip facebook_ip cloudflare_ip; do
+            printf '  - "AND,((RULE-SET,%s),(NETWORK,UDP),(DST-PORT,443)),REJECT,no-resolve"\n' "$_iprs"
+        done
+        [ -n "$FORCE_QUIC_YAML" ] && printf "%s" "$FORCE_QUIC_YAML"
+
+        [ -n "$FORCE_IPS_YAML" ] && printf "%s" "$FORCE_IPS_YAML"
         echo '  - "RULE-SET,torrent_domain,🧲 Торренты"'
         echo '  - "DST-PORT,6881-6889,🧲 Торренты"'
         echo '  - "SRC-PORT,51413,🧲 Торренты"'
-
-        # QUIC block (UDP:443 -> REJECT) for AI + key proxy domains
-        emit_yaml_quic_reject_rules "  " "DOMAIN-SUFFIX" "$AI_EXPLICIT_DOMAINS"
-        [ "$HAS_USER_PROXY" = "yes" ] && emit_yaml_quic_reject_rules "  " "RULE-SET" "user_proxy_domains"
-        emit_yaml_quic_reject_rules "  " "RULE-SET" "ai_domain google_gemini_domain openai_domain anthropic_domain perplexity_domain xai_domain cursor_domain copilot_domain youtube_domain meta_domain discord_domain tiktok_domain ru_bundle"
-
         [ "$HAS_USER_PROXY" = "yes" ] && echo '  - "RULE-SET,user_proxy_domains,🛑 Обход блокировок"'
-        [ -n "$FORCE_IPS_YAML" ] && printf "%s\n" "$FORCE_IPS_YAML"
 
         # AI rules BEFORE Google & DIRECT
         emit_yaml_typed_rules "  " "DOMAIN-SUFFIX" "$AI_EXPLICIT_DOMAINS" "🤖 Нейросети (ИИ)"
@@ -719,9 +751,11 @@ MH_UP
         echo '  - "MATCH,🌐 Остальной трафик"'
     } >> "${MIHOMO_CONF}.tmp.$$"
 
-    chmod 600 "${MIHOMO_CONF}.tmp.$$" 2>/dev/null || true
-    mv -f "${MIHOMO_CONF}.tmp.$$" "$MIHOMO_CONF"
-    chmod 600 "$MIHOMO_CONF" 2>/dev/null || true
-    save_gateway_env
+    if ! atomic_commit_tmp "${MIHOMO_CONF}.tmp.$$" "$MIHOMO_CONF" 0600 "root:root"; then
+        [ -f "${MIHOMO_CONF}.bak" ] && cp -f "${MIHOMO_CONF}.bak" "$MIHOMO_CONF" 2>/dev/null || true
+        chmod 600 "$MIHOMO_CONF" 2>/dev/null || true
+        return 1
+    fi
+    [ -f "$SB_ENV" ] || save_gateway_env
     return 0
 }

@@ -1,4 +1,4 @@
-name: CI / Shell Syntax & Code Quality
+name: CI / Syntax, Lint & Hygiene
 
 on:
   push:
@@ -14,17 +14,133 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate Shell Syntax (POSIX sh -n)
+      - name: Enforce LF line endings and no UTF-8 BOM
         run: |
-          echo "Checking syntax across all shell scripts..."
-          find . -type f -name "*.sh" -not -path "*/.git/*" -print0 | while IFS= read -r -d '' script; do
-            sh -n "$script" || { echo "::error file=$script::Syntax error in $script"; exit 1; }
-          done
-          echo "All shell scripts passed syntax validation."
+          python3 - <<'PY'
+          import os, sys
 
-      - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@master
-        with:
-          severity: error
-          ignore_paths: >-
-            .git
+          crlf_files = []
+          bom_files = []
+          checked = 0
+
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d != ".git"]
+              for fname in sorted(files):
+                  path = os.path.join(root, fname)
+                  with open(path, "rb") as fh:
+                      data = fh.read()
+                  checked += 1
+                  if data.startswith(b"\xef\xbb\xbf"):
+                      bom_files.append(path)
+                  if b"\x00" not in data and b"\r\n" in data:
+                      crlf_files.append(path)
+
+          for p in bom_files:
+              print(f"::error file={p}::UTF-8 BOM detected in {p}")
+          for p in crlf_files:
+              print(f"::error file={p}::CRLF line endings detected in {p}")
+
+          print(f"Checked {checked} files: BOM={len(bom_files)} CRLF={len(crlf_files)}")
+          if bom_files or crlf_files:
+              sys.exit(1)
+          PY
+
+      - name: Validate POSIX Shell Syntax (sh -n)
+        run: |
+          set -eu
+          count=0
+          for script in $(find . -type f -name "*.sh" -not -path "*/.git/*" | sort) ./modules/luci/rpcd/gateway; do
+            [ -f "$script" ] || continue
+            sh -n "$script" || { echo "::error file=$script::POSIX sh syntax error in $script"; exit 1; }
+            count=$((count + 1))
+          done
+          echo "POSIX sh -n passed across ${count} shell scripts."
+
+      - name: Run ShellCheck (POSIX sh, severity=error)
+        run: |
+          set -eu
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          fi
+          shellcheck --version
+          count=0
+          for script in $(find . -type f -name "*.sh" -not -path "*/.git/*" | sort) ./modules/luci/rpcd/gateway; do
+            [ -f "$script" ] || continue
+            shellcheck -s sh -S error "$script" || { echo "::error file=$script::ShellCheck error in $script"; exit 1; }
+            count=$((count + 1))
+          done
+          echo "ShellCheck (-s sh -S error) passed across ${count} shell scripts."
+
+      - name: Validate Python Syntax (py_compile)
+        run: |
+          python3 -m py_compile modules/webui/server.py
+          echo "Python py_compile passed for modules/webui/server.py."
+
+      - name: Validate JSON Files (jq empty)
+        run: |
+          set -eu
+          count=0
+          for jf in $(find . -type f -name "*.json" -not -path "*/.git/*" | sort); do
+            if command -v jq >/dev/null 2>&1; then
+              jq empty "$jf" || { echo "::error file=$jf::Invalid JSON in $jf"; exit 1; }
+            else
+              python3 -m json.tool "$jf" >/dev/null || { echo "::error file=$jf::Invalid JSON in $jf"; exit 1; }
+            fi
+            count=$((count + 1))
+          done
+          echo "JSON validation passed across ${count} files."
+
+      - name: Validate JavaScript Syntax (WebUI & LuCI)
+        run: |
+          set -eu
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::warning::node is not installed; skipping JS syntax validation"
+            exit 0
+          fi
+          count=0
+          for js in $(find modules/webui/static -type f -name "*.js" | sort); do
+            node --check "$js" || { echo "::error file=$js::JavaScript syntax error in $js"; exit 1; }
+            count=$((count + 1))
+          done
+          # LuCI JS views are evaluated inside a function wrapper (top-level return is valid by LuCI spec)
+          for js in $(find modules/luci/root/www -type f -name "*.js" | sort); do
+            node -e "const fs = require('fs'); new Function(fs.readFileSync(process.argv[1], 'utf8'));" "$js" \
+              || { echo "::error file=$js::LuCI JavaScript syntax error in $js"; exit 1; }
+            count=$((count + 1))
+          done
+          echo "JavaScript syntax validation passed across ${count} files."
+
+      - name: Secret & Credential Hygiene Scan
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+
+          patterns = [
+              ("Private Key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
+              ("Telegram Bot Token", re.compile(r"\b[0-9]{8,10}:[A-Za-z0-9_-]{35}\b")),
+              ("GitHub Token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b")),
+              ("DuckDNS UUID Secret", re.compile(r'DUCKDNS_TOKEN="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"')),
+          ]
+
+          hits = []
+          for root, dirs, files in os.walk("."):
+              dirs[:] = [d for d in dirs if d != ".git"]
+              for fname in sorted(files):
+                  rel = os.path.normpath(os.path.join(root, fname)).replace("\\", "/")
+                  if rel == ".github/workflows/ci.yml":
+                      continue
+                  with open(rel, "rb") as fh:
+                      raw = fh.read()
+                  if b"\x00" in raw:
+                      continue
+                  text = raw.decode("utf-8", errors="replace")
+                  for label, rx in patterns:
+                      if rx.search(text):
+                          hits.append((rel, label))
+
+          for rel, label in hits:
+              print(f"::error file={rel}::Potential secret detected ({label}) in {rel}")
+          print(f"Secret hygiene scan complete: {len(hits)} matches.")
+          if hits:
+              sys.exit(1)
+          PY

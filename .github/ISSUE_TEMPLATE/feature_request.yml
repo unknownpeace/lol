@@ -1,5 +1,5 @@
 name: "✨ Feature Request"
-description: "Suggest a new Homelab module, CLI improvement, or core enhancement"
+description: "Suggest a new Homelab module, WebUI/LuCI improvement, CLI feature, or routing enhancement"
 title: "[Feature]: "
 labels: ["enhancement"]
 body:
@@ -13,7 +13,7 @@ body:
   - type: textarea
     id: solution
     attributes:
-      label: "Proposed design (Alpine Linux + OpenRC compatible)"
-      placeholder: "Describe how the feature should work without Docker or non-Alpine dependencies."
+      label: "Proposed design (Alpine Linux OpenRC &/or OpenWrt >= 25.12.6 compatible)"
+      placeholder: "Describe how the feature should work with POSIX sh, apk, zero Docker, and zero Node/npm build chains."
     validations:
       required: true

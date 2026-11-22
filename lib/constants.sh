@@ -1,5 +1,4 @@
 #!/bin/sh
-set -e
 
 # ==============================================================================
 # Глобальные пути и переменные (Alpine Linux Homelab Edition)
@@ -7,7 +6,7 @@ set -e
 # ==============================================================================
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-# Автоматическое определение GATEWAY_DIR
+# Автоматическое определение GATEWAY_DIR (строго без side-effect записей на диск)
 if [ -z "${GATEWAY_DIR:-}" ] || [ ! -f "${GATEWAY_DIR}/gateway.sh" ]; then
     TARGET_EXEC="${BASH_SOURCE:-$0}"
     case "$TARGET_EXEC" in
@@ -29,22 +28,6 @@ if [ -z "${GATEWAY_DIR:-}" ] || [ ! -f "${GATEWAY_DIR}/gateway.sh" ]; then
     export GATEWAY_DIR
 fi
 
-if [ -d "/usr/bin" ] && [ -w "/usr/bin" ]; then
-    mkdir -p "/opt/gateway" 2>/dev/null || true
-    if [ -f "/opt/gateway/gateway.sh" ]; then
-        ln -sf /opt/gateway/gateway.sh /usr/bin/gateway 2>/dev/null || true
-        ln -sf /opt/gateway/gateway.sh /usr/bin/gw 2>/dev/null || true
-    fi
-    if [ -d "/etc/profile.d" ] && [ ! -f "/etc/profile.d/00-gateway-motd.sh" ]; then
-        cat << 'MOTD_EOF' > /etc/profile.d/00-gateway-motd.sh
-if [ -t 1 ] && [ -x /usr/bin/gateway ]; then
-    /usr/bin/gateway motd
-fi
-MOTD_EOF
-        chmod 644 /etc/profile.d/00-gateway-motd.sh 2>/dev/null || true
-    fi
-fi
-
 CORE_ENGINE="singbox"
 WEB_UI="zashboard"
 CORE_TUN_IF="gateway-tun"
@@ -64,16 +47,18 @@ USER_DIRECT_JSON="${SB_RULES_DIR}/user_direct_domains.json"
 USER_PROXY_JSON="${SB_RULES_DIR}/user_proxy_domains.json"
 USER_BYPASS_IPS="${SB_DIR}/bypass_devices.conf"
 USER_FORCE_PROXY_IPS="${SB_DIR}/force_proxy_devices.conf"
+GATEWAY_RUNTIME_DIR="/run/gateway"
 BACKUP_ARCHIVE="/root/gateway_backup.tar.gz"
 STATE_BAK_DIR="${SB_DIR}/.last_good_state"
 POWER_LOSS_FLAG="${SB_DIR}/.power_loss_recovered"
-STORAGE_ALERT_CACHE="/tmp/gateway_storage_alert.ts"
+STORAGE_ALERT_CACHE="${GATEWAY_RUNTIME_DIR}/storage_alert.ts"
 CRON_FILE="/etc/crontabs/root"
 AUTOUPDATE_LOG="/var/log/gateway_autoupdate.log"
 SB_LOG_FILE="/var/log/sing-box.log"
-VER_CACHE_FILE="/tmp/gateway_ver.cache"
-LAN_SCAN_CACHE="/tmp/gateway_lan_scan.cache"
-GATEWAY_LOCK_DIR="/tmp/gateway_op.lock"
+VER_CACHE_FILE="${GATEWAY_RUNTIME_DIR}/ver.cache"
+LAN_SCAN_CACHE="${GATEWAY_RUNTIME_DIR}/lan_scan.cache"
+GATEWAY_LOCK_DIR="${GATEWAY_RUNTIME_DIR}/op.lock"
+GATEWAY_UPDATE_CACHE="${GATEWAY_RUNTIME_DIR}/update_check.cache"
 UI_DIR="${SB_DIR}/ui"
 UI_VER_FILE="${UI_DIR}/.ui_version"
 UI_TYPE_FILE="${UI_DIR}/.ui_type"
@@ -83,7 +68,6 @@ ZASHBOARD_TAR_URL="https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-
 METACUBEXD_REPO="MetaCubeX/metacubexd"
 METACUBEXD_TAR_URL="https://github.com/MetaCubeX/metacubexd/releases/latest/download/compressed-dist.tgz"
 METACUBEXD_FALLBACK_TAR_URL="https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.tar.gz"
-UI_ZIP_URL="${ZASHBOARD_ZIP_URL}"
 AGH_CONF="/etc/AdGuardHome/AdGuardHome.yaml"
 ALPINE_NFT_CONF="/etc/nftables.nft"
 OPENWRT_NFT_CONF="/etc/nftables.d/90-gateway.nft"
@@ -103,9 +87,10 @@ STORAGE_VIDEOS="${STORAGE_ROOT}/Videos"
 STORAGE_DOWNLOADS="${STORAGE_ROOT}/Downloads"
 STORAGE_INCOMPLETE="${STORAGE_DOWNLOADS}/Incomplete"
 STORAGE_BACKUPS="${STORAGE_ROOT}/Backups"
+STORAGE_SHARED="${STORAGE_ROOT}/Shared"
 LUKS_KEYFILE="/etc/sing-box/homelab/storage.luks.key"
 LUKS_MAPPER_NAME="homelab_storage"
-EXT_DISK_SCAN_CACHE="/tmp/gateway_disks.cache"
+EXT_DISK_SCAN_CACHE="${GATEWAY_RUNTIME_DIR}/disks.cache"
 PKI_PORTAL_DIR="/srv/homelab/pki-portal"
 CADDY_CONF="/etc/caddy/Caddyfile"
 CADDY_CONFD="/etc/caddy/conf.d"
@@ -172,10 +157,12 @@ SB_ARCH="amd64"
 MIHOMO_ARCH="amd64-v1"
 AGH_ARCH="amd64"
 ARCH_RAW="x86_64"
-SB_GOMEMLIMIT="200MiB"
-AGH_GOMEMLIMIT="100MiB"
-SYS_CONNTRACK_MAX="65536"
-SYS_BUF_MAX="16777216"
+SB_GOMEMLIMIT="110MiB"
+AGH_GOMEMLIMIT="55MiB"
+SB_GOGC="35"
+AGH_GOGC="35"
+SYS_CONNTRACK_MAX="16384"
+SYS_BUF_MAX="2097152"
+SYS_UDP_TIMEOUT="30"
+SYS_UDP_STREAM_TIMEOUT="90"
 TOTAL_RAM_MB="512"
-
-# Инициализация цветовой палитры терминала (ANSI 256-color Neon с fallback на 16 цветов и отключением в cron)

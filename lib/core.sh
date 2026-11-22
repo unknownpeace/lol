@@ -52,47 +52,194 @@ atomic_commit_tmp() {
     return 0
 }
 
-# Безопасная атомарная запись /etc/resolv.conf (Alpine и OpenWrt)
-write_resolv_conf() {
-    if is_openwrt 2>/dev/null; then
-        printf "%s\n" "$1" > "/tmp/resolv.conf.$$"
-        mv -f "/tmp/resolv.conf.$$" /tmp/resolv.conf 2>/dev/null || cp -f "/tmp/resolv.conf.$$" /tmp/resolv.conf 2>/dev/null || true
-        rm -f "/tmp/resolv.conf.$$" 2>/dev/null || true
-        return 0
+# Гарантированное создание приватного runtime-каталога /run/gateway (0700 root:root)
+ensure_gateway_runtime_dir() {
+    _rt_dir="${GATEWAY_RUNTIME_DIR:-/run/gateway}"
+    if [ -L "$_rt_dir" ] || { [ -e "$_rt_dir" ] && [ ! -d "$_rt_dir" ]; }; then
+        rm -rf "$_rt_dir" 2>/dev/null || return 1
     fi
-    mkdir -p /etc/udhcpc 2>/dev/null || true
-    if [ ! -f /etc/udhcpc/udhcpc.conf ] || ! grep -q '^RESOLV_CONF=' /etc/udhcpc/udhcpc.conf 2>/dev/null; then
-        echo 'RESOLV_CONF="no"' >> /etc/udhcpc/udhcpc.conf 2>/dev/null || true
+    if [ ! -d "$_rt_dir" ]; then
+        (umask 077 && mkdir -p "$_rt_dir") 2>/dev/null || return 1
     fi
-    printf "%s\n" "$1" > "/tmp/resolv.conf.$$"
-    rm -f /etc/resolv.conf 2>/dev/null || true
-    mv -f "/tmp/resolv.conf.$$" /etc/resolv.conf 2>/dev/null || cp -f "/tmp/resolv.conf.$$" /etc/resolv.conf 2>/dev/null || true
-    rm -f "/tmp/resolv.conf.$$" 2>/dev/null || true
+    chown root:root "$_rt_dir" 2>/dev/null || true
+    chmod 0700 "$_rt_dir" 2>/dev/null || return 1
     return 0
 }
 
-# Механизм межпроцессной блокировки (защита от гонки cron autoupdate, watchdog и установки модулей)
+# Общий секрет между Caddy и gateway-webui (32 hex, 0600 root:root; печатает токен в stdout)
+# Caddy передаёт его в X-Gateway-Proxy-Token после проверки basic_auth и снятия Authorization.
+ensure_webui_proxy_token() {
+    _tok_sb="${SB_DIR:-/etc/sing-box}"
+    _tok_dir="${HOMELAB_DIR:-/etc/sing-box/homelab}"
+    _tok_file="${_tok_dir}/webui_proxy.token"
+    mkdir -p "$_tok_sb" "$_tok_dir" 2>/dev/null || true
+    chown root:root "$_tok_sb" "$_tok_dir" 2>/dev/null || true
+    chmod 700 "$_tok_sb" 2>/dev/null || true
+    chmod 750 "$_tok_dir" 2>/dev/null || true
+
+    _cur_tok=""
+    [ -s "$_tok_file" ] && _cur_tok=$(tr -d ' \t\r\n' < "$_tok_file" 2>/dev/null || true)
+    case "$_cur_tok" in
+        *[!0-9a-f]*|"") _cur_tok="" ;;
+        *) [ "${#_cur_tok}" -eq 32 ] || _cur_tok="" ;;
+    esac
+
+    if [ -z "$_cur_tok" ]; then
+        _cur_tok=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -dc '0-9a-f' | head -c 32 || true)
+        if [ "${#_cur_tok}" -ne 32 ] && command -v openssl >/dev/null 2>&1; then
+            _cur_tok=$(openssl rand -hex 16 2>/dev/null | tr -dc '0-9a-f' | head -c 32 || true)
+        fi
+        [ "${#_cur_tok}" -eq 32 ] || return 1
+        (
+            umask 077
+            printf "%s\n" "$_cur_tok" > "${_tok_file}.tmp.$$" &&
+            chown root:root "${_tok_file}.tmp.$$" 2>/dev/null || true
+            chmod 600 "${_tok_file}.tmp.$$" 2>/dev/null || true
+            mv -f "${_tok_file}.tmp.$$" "$_tok_file"
+        ) || { rm -f "${_tok_file}.tmp.$$" 2>/dev/null || true; return 1; }
+    fi
+    chown root:root "$_tok_file" 2>/dev/null || true
+    chmod 600 "$_tok_file" 2>/dev/null || true
+    printf "%s" "$_cur_tok"
+    return 0
+}
+
+# Проверка корректности IPv4 CIDR (X.X.X.X/1..32)
+is_valid_ipv4_cidr() {
+    _cidr_cand="$1"
+    case "$_cidr_cand" in
+        */*)
+            _cidr_ip="${_cidr_cand%%/*}"
+            _cidr_len="${_cidr_cand#*/}"
+            case "$_cidr_len" in
+                ''|*[!0-9]*) return 1 ;;
+            esac
+            [ "$_cidr_len" -ge 1 ] && [ "$_cidr_len" -le 32 ] || return 1
+            printf "%s" "$_cidr_ip" | awk -F'.' '
+                NF != 4 { exit 1 }
+                {
+                    for (i = 1; i <= 4; i++) {
+                        if ($i !~ /^(0|[1-9][0-9]*)$/) exit 1
+                        if ($i + 0 < 0 || $i + 0 > 255) exit 1
+                    }
+                    if ($1 + 0 < 1 || $1 + 0 > 223 || $1 + 0 == 127) exit 1
+                }
+            ' >/dev/null 2>&1
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# Обёртка curl с безопасным фоллбэком --curves для OpenWrt mbedTLS/wolfSSL
+gw_curl() {
+    _gc_out=""
+    _gc_rc=0
+    if [ -z "${_GW_NO_CURVES:-}" ]; then
+        _gc_out=$(curl --curves X25519:P-256 "$@" 2>/dev/null) || _gc_rc=$?
+        if [ "$_gc_rc" -eq 0 ]; then
+            printf "%s" "$_gc_out"
+            return 0
+        fi
+        case "$_gc_rc" in
+            2|4|35|45|59)
+                _GW_NO_CURVES=1
+                ;;
+            *)
+                printf "%s" "$_gc_out"
+                return "$_gc_rc"
+                ;;
+        esac
+    fi
+    curl "$@"
+}
+
+# Вызов Clash API с передачей Bearer-токена через stdin (-K -), чтобы не светить ADMIN_PASS в ps
+clash_api_curl() {
+    _ca_pass="${ADMIN_PASS:-}"
+    _ca_esc=$(printf "%s" "$_ca_pass" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf 'header = "Authorization: Bearer %s"\n' "$_ca_esc" | curl -K - "$@"
+}
+
+# Безопасная атомарная запись resolv.conf в той же ФС (OpenWrt держит /etc/resolv.conf симлинком на /tmp/resolv.conf)
+write_resolv_conf() {
+    if is_openwrt 2>/dev/null; then
+        _rc_dst="/tmp/resolv.conf"
+    else
+        mkdir -p /etc/udhcpc 2>/dev/null || true
+        if [ ! -f /etc/udhcpc/udhcpc.conf ] || ! grep -q '^RESOLV_CONF=' /etc/udhcpc/udhcpc.conf 2>/dev/null; then
+            echo 'RESOLV_CONF="no"' >> /etc/udhcpc/udhcpc.conf 2>/dev/null || true
+        fi
+        _rc_dst="/etc/resolv.conf"
+    fi
+    _rc_tmp="${_rc_dst}.tmp.$$"
+    if printf "%s\n" "$1" > "$_rc_tmp" 2>/dev/null; then
+        chmod 0644 "$_rc_tmp" 2>/dev/null || true
+        if ! mv -f "$_rc_tmp" "$_rc_dst" 2>/dev/null; then
+            cp -f "$_rc_tmp" "$_rc_dst" 2>/dev/null || true
+            rm -f "$_rc_tmp" 2>/dev/null || true
+        fi
+    fi
+    return 0
+}
+
+# Механизм межпроцессной блокировки в /run/gateway (защита от гонки cron autoupdate, watchdog и установки)
 acquire_gateway_lock() {
     LOCK_OWNER="${1:-op}"
-    if mkdir "$GATEWAY_LOCK_DIR" 2>/dev/null; then
+    ensure_gateway_runtime_dir || return 1
+    if (umask 077 && mkdir "$GATEWAY_LOCK_DIR" 2>/dev/null); then
         printf "%s %s\n" "$$" "$LOCK_OWNER" > "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true
+        chmod 0600 "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true
         return 0
     fi
+
+    _stale_lock=0
     if [ -f "${GATEWAY_LOCK_DIR}/pid" ]; then
         OLD_PID=$(awk '{print $1}' "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true)
+        case "$OLD_PID" in
+            ''|*[!0-9]*) OLD_PID="" ;;
+        esac
         if [ -n "$OLD_PID" ] && ! kill -0 "$OLD_PID" 2>/dev/null; then
-            rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
-            if mkdir "$GATEWAY_LOCK_DIR" 2>/dev/null; then
-                printf "%s %s\n" "$$" "$LOCK_OWNER" > "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true
-                return 0
+            _stale_lock=1
+        fi
+    fi
+
+    if [ "$_stale_lock" -eq 0 ]; then
+        if [ ! -f "${GATEWAY_LOCK_DIR}/pid" ] || [ -z "${OLD_PID:-}" ]; then
+            _lck_ts=$(date -r "$GATEWAY_LOCK_DIR" +%s 2>/dev/null || stat -c %Y "$GATEWAY_LOCK_DIR" 2>/dev/null || true)
+            _now_ts=$(date +%s 2>/dev/null || echo 0)
+            case "$_lck_ts" in ''|*[!0-9]*) _lck_ts="" ;; esac
+            if [ -n "$_lck_ts" ] && [ "${_now_ts:-0}" -gt 0 ]; then
+                [ $((_now_ts - _lck_ts)) -ge 30 ] && _stale_lock=1
+            elif [ -n "$(find "$GATEWAY_LOCK_DIR" -maxdepth 0 -mmin +1 2>/dev/null || true)" ]; then
+                _stale_lock=1
             fi
+        fi
+    fi
+
+    if [ "$_stale_lock" -eq 1 ]; then
+        rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
+        if (umask 077 && mkdir "$GATEWAY_LOCK_DIR" 2>/dev/null); then
+            printf "%s %s\n" "$$" "$LOCK_OWNER" > "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true
+            chmod 0600 "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true
+            return 0
         fi
     fi
     return 1
 }
 
 release_gateway_lock() {
-    rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
+    if [ "${1:-}" = "force" ]; then
+        rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
+        return 0
+    fi
+    if [ -f "${GATEWAY_LOCK_DIR}/pid" ]; then
+        _own_pid=$(awk '{print $1}' "${GATEWAY_LOCK_DIR}/pid" 2>/dev/null || true)
+        if [ -z "$_own_pid" ] || [ "$_own_pid" = "$$" ]; then
+            rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
+        fi
+    else
+        rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -106,41 +253,71 @@ get_sub_filter_regex() {
     return 0
 }
 
-# Автоматический расчет лимитов RAM и сетевого стека под железо (с учетом нагрузки Homelab)
+# Автоматический расчет лимитов RAM и сетевого стека под железо (с учетом нагрузки Homelab и swapless OpenWrt)
 calc_hardware_limits() {
     MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo "524288")
     [ -z "$MEM_KB" ] && MEM_KB="524288"
     TOTAL_RAM_MB=$((MEM_KB / 1024))
+    _is_owrt_hw=0
+    if is_openwrt 2>/dev/null || [ -f /etc/openwrt_release ]; then
+        _is_owrt_hw=1
+    fi
 
     if [ "$TOTAL_RAM_MB" -le 300 ]; then
-        SB_GOMEMLIMIT="95MiB"
-        AGH_GOMEMLIMIT="55MiB"
-        SYS_CONNTRACK_MAX="32768"
-        SYS_BUF_MAX="8388608"
+        SB_GOMEMLIMIT="60MiB"
+        AGH_GOMEMLIMIT="35MiB"
+        SB_GOGC="35"
+        AGH_GOGC="35"
+        SYS_CONNTRACK_MAX="16384"
+        SYS_BUF_MAX="2097152"
+        SYS_UDP_TIMEOUT="30"
+        SYS_UDP_STREAM_TIMEOUT="90"
     elif [ "$TOTAL_RAM_MB" -le 600 ]; then
-        SB_GOMEMLIMIT="180MiB"
-        AGH_GOMEMLIMIT="90MiB"
-        SYS_CONNTRACK_MAX="65536"
-        SYS_BUF_MAX="16777216"
+        SB_GOMEMLIMIT="110MiB"
+        AGH_GOMEMLIMIT="55MiB"
+        SB_GOGC="35"
+        AGH_GOGC="35"
+        SYS_CONNTRACK_MAX="16384"
+        SYS_BUF_MAX="2097152"
+        SYS_UDP_TIMEOUT="30"
+        SYS_UDP_STREAM_TIMEOUT="90"
     elif [ "$TOTAL_RAM_MB" -le 1200 ]; then
-        SB_GOMEMLIMIT="300MiB"
-        AGH_GOMEMLIMIT="130MiB"
-        SYS_CONNTRACK_MAX="131072"
-        SYS_BUF_MAX="33554432"
+        SB_GOMEMLIMIT="200MiB"
+        AGH_GOMEMLIMIT="90MiB"
+        SB_GOGC="50"
+        AGH_GOGC="50"
+        SYS_CONNTRACK_MAX="32768"
+        SYS_BUF_MAX="4194304"
+        SYS_UDP_TIMEOUT="45"
+        SYS_UDP_STREAM_TIMEOUT="120"
     elif [ "$TOTAL_RAM_MB" -le 2500 ]; then
-        SB_GOMEMLIMIT="450MiB"
-        AGH_GOMEMLIMIT="180MiB"
-        SYS_CONNTRACK_MAX="196608"
-        SYS_BUF_MAX="33554432"
+        if [ "$_is_owrt_hw" -eq 1 ]; then
+            SB_GOMEMLIMIT="320MiB"
+            AGH_GOMEMLIMIT="130MiB"
+        else
+            SB_GOMEMLIMIT="400MiB"
+            AGH_GOMEMLIMIT="160MiB"
+        fi
+        SB_GOGC="50"
+        AGH_GOGC="50"
+        SYS_CONNTRACK_MAX="65536"
+        SYS_BUF_MAX="8388608"
+        SYS_UDP_TIMEOUT="60"
+        SYS_UDP_STREAM_TIMEOUT="180"
     else
-        SB_GOMEMLIMIT="600MiB"
-        AGH_GOMEMLIMIT="250MiB"
-        SYS_CONNTRACK_MAX="262144"
-        SYS_BUF_MAX="67108864"
-    fi
-    if (is_openwrt 2>/dev/null || [ -f /etc/openwrt_release ]) && [ "$TOTAL_RAM_MB" -ge 1500 ]; then
-        SB_GOMEMLIMIT="off"
-        AGH_GOMEMLIMIT="off"
+        if [ "$_is_owrt_hw" -eq 1 ]; then
+            SB_GOMEMLIMIT="450MiB"
+            AGH_GOMEMLIMIT="180MiB"
+        else
+            SB_GOMEMLIMIT="600MiB"
+            AGH_GOMEMLIMIT="250MiB"
+        fi
+        SB_GOGC="50"
+        AGH_GOGC="50"
+        SYS_CONNTRACK_MAX="131072"
+        SYS_BUF_MAX="16777216"
+        SYS_UDP_TIMEOUT="60"
+        SYS_UDP_STREAM_TIMEOUT="180"
     fi
     return 0
 }
@@ -219,6 +396,9 @@ detect_os() {
             exit 1
             ;;
     esac
+    if [ -w /run ] 2>/dev/null && [ ! -d "${GATEWAY_RUNTIME_DIR:-/run/gateway}" ]; then
+        ensure_gateway_runtime_dir >/dev/null 2>&1 || true
+    fi
     return 0
 }
 
@@ -228,26 +408,20 @@ ensure_alpine_modules() {
         for kmod in tun tcp_bbr nf_conntrack; do
             modprobe "$kmod" 2>/dev/null || true
         done
-        if [ ! -e /dev/net/tun ]; then
-            mkdir -p /dev/net
-            mknod /dev/net/tun c 10 200 2>/dev/null || true
-            chmod 666 /dev/net/tun 2>/dev/null || true
-        fi
-        ensure_core_tools
-        return 0
+    else
+        touch /etc/modules 2>/dev/null || true
+        for kmod in tun tcp_bbr nf_conntrack nft_chain_nat nft_masq nft_redir nft_reject_inet; do
+            modprobe "$kmod" 2>/dev/null || true
+            grep -qxF "$kmod" /etc/modules 2>/dev/null || echo "$kmod" >> /etc/modules
+        done
+        rc-update add modules boot >/dev/null 2>&1 || true
+        rc-update add sysctl boot >/dev/null 2>&1 || true
     fi
-    touch /etc/modules 2>/dev/null || true
-    for kmod in tun tcp_bbr nf_conntrack nft_chain_nat nft_masq nft_redir nft_reject_inet; do
-        modprobe "$kmod" 2>/dev/null || true
-        grep -qxF "$kmod" /etc/modules 2>/dev/null || echo "$kmod" >> /etc/modules
-    done
     if [ ! -e /dev/net/tun ]; then
         mkdir -p /dev/net
         mknod /dev/net/tun c 10 200 2>/dev/null || true
         chmod 666 /dev/net/tun 2>/dev/null || true
     fi
-    rc-update add modules boot >/dev/null 2>&1 || true
-    rc-update add sysctl boot >/dev/null 2>&1 || true
     ensure_core_tools
     return 0
 }
@@ -296,22 +470,55 @@ is_valid_ipv4() {
     ' >/dev/null 2>&1
 }
 
-# Динамическое определение имени физического LAN-интерфейса (eth0, br-lan, ens18, enp0s3 и т.д.)
+# Динамическое определение имени физического LAN-интерфейса (br-lan, eth0, ens18, enp0s3 и т.д.)
 get_lan_ifname() {
-    DEF_DEV=$(ip -4 route show default 2>/dev/null | awk -v ct="${CORE_TUN_IF:-gateway-tun}" '{for(i=1;i<=NF;i++) if($i=="dev" && $(i+1)!=ct && $(i+1)!="gateway-tun" && $(i+1)!="singbox-tun" && $(i+1)!="mihomo0" && $(i+1)!="lo") {print $(i+1); exit}}')
+    if is_openwrt 2>/dev/null || [ -f /etc/openwrt_release ]; then
+        if command -v uci >/dev/null 2>&1; then
+            _ow_lan=$(uci -q get network.lan.device 2>/dev/null || uci -q get network.lan.ifname 2>/dev/null || true)
+            _ow_lan="${_ow_lan%% *}"
+            if [ -n "$_ow_lan" ] && ip link show "$_ow_lan" >/dev/null 2>&1; then
+                printf "%s" "$_ow_lan"
+                return 0
+            fi
+        fi
+        if ip link show br-lan >/dev/null 2>&1; then
+            printf "br-lan"
+            return 0
+        fi
+    fi
+
+    DEF_DEV=$(ip -4 route show default 2>/dev/null | awk -v ct="${CORE_TUN_IF:-gateway-tun}" '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "dev") {
+                    d = $(i + 1)
+                    sub(/@.*/, "", d)
+                    if (d != "" && d != ct && d != "gateway-tun" && d != "singbox-tun" && d != "mihomo0" && d != "lo" && \
+                        d !~ /^(lxcbr|veth|wg|tun|tap|docker|virbr)/) {
+                        print d; exit
+                    }
+                }
+            }
+        }
+    ')
     if [ -n "$DEF_DEV" ] && ip link show "$DEF_DEV" >/dev/null 2>&1; then
         printf "%s" "$DEF_DEV"
-        return 0
-    fi
-    if is_openwrt 2>/dev/null && ip link show br-lan >/dev/null 2>&1; then
-        printf "br-lan"
         return 0
     fi
     if ip link show eth0 >/dev/null 2>&1; then
         printf "eth0"
         return 0
     fi
-    ANY_DEV=$(ip -o -4 addr show scope global 2>/dev/null | awk -v ct="${CORE_TUN_IF:-gateway-tun}" '$2 != ct && $2 != "gateway-tun" && $2 != "singbox-tun" && $2 != "mihomo0" && $2 != "lo" {print $2; exit}')
+    ANY_DEV=$(ip -o -4 addr show scope global 2>/dev/null | awk -v ct="${CORE_TUN_IF:-gateway-tun}" '
+        {
+            d = $2
+            sub(/@.*/, "", d)
+            if (d != "" && d != ct && d != "gateway-tun" && d != "singbox-tun" && d != "mihomo0" && d != "lo" && \
+                d !~ /^(lxcbr|veth|wg|tun|tap|docker|virbr)/) {
+                print d; exit
+            }
+        }
+    ')
     if [ -n "$ANY_DEV" ] && ip link show "$ANY_DEV" >/dev/null 2>&1; then
         printf "%s" "$ANY_DEV"
         return 0
@@ -322,6 +529,10 @@ get_lan_ifname() {
 
 # Получение текущего LAN IP-адреса самого сервера
 get_current_lan_ip() {
+    if [ -n "${GW_TARGET_LAN_IP_OVERRIDE:-}" ] && is_valid_ipv4 "$GW_TARGET_LAN_IP_OVERRIDE"; then
+        printf "%s" "$GW_TARGET_LAN_IP_OVERRIDE"
+        return 0
+    fi
     L_IF=$(get_lan_ifname)
     CUR_LAN=$(ip -4 addr show "$L_IF" 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
     [ -z "$CUR_LAN" ] && CUR_LAN=$(ip -4 addr show eth0 2>/dev/null | awk '/inet / {split($2,a,"/"); print a[1]; exit}')
@@ -440,6 +651,3 @@ service_ctl() {
             ;;
     esac
 }
-
-
-# Проверка валидности конфигурации sing-box-extended

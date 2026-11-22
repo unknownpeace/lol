@@ -17,26 +17,19 @@ sanitize_domain_entry() {
         return 1
     fi
 
-    # Авто-конвертация кириллических IDN-доменов (например, кинопоиск.рф -> xn--...p1ai) через python3
-    if printf "%s" "$RAW_DOM" | grep -q '[^[:ascii:]]' 2>/dev/null; then
+    # Авто-конвертация кириллических IDN-доменов (например, кинопоиск.рф -> xn--...p1ai) через python3 (совместимо с BusyBox)
+    if LC_ALL=C awk -v s="$RAW_DOM" 'BEGIN { exit (s ~ /[^A-Za-z0-9._-]/) ? 0 : 1 }' 2>/dev/null; then
         if command -v python3 >/dev/null 2>&1; then
             IDN_DOM=$(python3 -c 'import sys; print(sys.argv[1].strip().encode("idna").decode("ascii").lower())' "$RAW_DOM" 2>/dev/null || true)
             [ -n "$IDN_DOM" ] && RAW_DOM="$IDN_DOM"
         fi
     fi
 
-    case "$RAW_DOM" in
-        ""|*[![:alnum:]._-]*|*..*|.*|*.)
-            return 1
-            ;;
-        *.*)
-            printf "+.%s" "$RAW_DOM"
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    if ! LC_ALL=C awk -v s="$RAW_DOM" 'BEGIN { if (s == "" || s ~ /[^A-Za-z0-9._-]/ || s ~ /\.\./ || s ~ /^\./ || s ~ /\.$/ || s !~ /\./) exit 1; exit 0 }' 2>/dev/null; then
+        return 1
+    fi
+    printf "+.%s" "$RAW_DOM"
+    return 0
 }
 
 # Вывод пронумерованного списка строк из файла (для доменов и IP устройств)
@@ -104,16 +97,15 @@ sync_user_domain_rulesets() {
     [ -f "$USER_DIRECT_FILE" ] || printf "+.localdomain\n+.lan\n" > "$USER_DIRECT_FILE"
     grep -qxF "+.lan" "$USER_DIRECT_FILE" 2>/dev/null || echo "+.lan" >> "$USER_DIRECT_FILE"
     [ -f "$USER_PROXY_FILE" ] || : > "$USER_PROXY_FILE"
-    sed -i 's/\r$//' "$USER_DIRECT_FILE" "$USER_PROXY_FILE" "$CUSTOM_NODES_FILE" 2>/dev/null || true
 
     if command -v jq >/dev/null 2>&1; then
-        sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^+\.//;s/^\.//' "$USER_DIRECT_FILE" 2>/dev/null | grep -v '^$' | \
+        awk '{ gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 != "" && $0 !~ /^#/) { sub(/^\+\./, ""); sub(/^\./, ""); if ($0 != "") print } }' "$USER_DIRECT_FILE" 2>/dev/null | \
             jq -R . | jq -s '{version: 3, rules: [{domain_suffix: (if length > 0 then . else ["localdomain", "lan"] end)}]}' > "${USER_DIRECT_JSON}.tmp" && \
-            mv "${USER_DIRECT_JSON}.tmp" "$USER_DIRECT_JSON"
+            mv -f "${USER_DIRECT_JSON}.tmp" "$USER_DIRECT_JSON"
 
-        sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^+\.//;s/^\.//' "$USER_PROXY_FILE" 2>/dev/null | grep -v '^$' | \
+        awk '{ gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 != "" && $0 !~ /^#/) { sub(/^\+\./, ""); sub(/^\./, ""); if ($0 != "") print } }' "$USER_PROXY_FILE" 2>/dev/null | \
             jq -R . | jq -s '{version: 3, rules: (if length > 0 then [{domain_suffix: .}] else [] end)}' > "${USER_PROXY_JSON}.tmp" && \
-            mv "${USER_PROXY_JSON}.tmp" "$USER_PROXY_JSON"
+            mv -f "${USER_PROXY_JSON}.tmp" "$USER_PROXY_JSON"
     else
         cat << 'J_DIR' > "$USER_DIRECT_JSON"
 {"version":3,"rules":[{"domain_suffix":["localdomain","lan"]}]}
@@ -125,22 +117,31 @@ J_PRX
     return 0
 }
 
-# Сборка JSON-массивов IP-адресов устройств (DIRECT и Full-VPN)
+# Сборка JSON-массивов IP-адресов устройств (DIRECT и Full-VPN) с фильтрацией комментариев и валидацией
 get_ip_cidr_json_array() {
     SRC_FILE="$1"
     if [ ! -s "$SRC_FILE" ] || ! command -v jq >/dev/null 2>&1; then
         printf "[]"
         return 0
     fi
-    sed -i 's/\r$//' "$SRC_FILE" 2>/dev/null || true
-    awk '{
-        gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", $0);
-        if ($0 != "") {
-            if (index($0, "/") == 0) print $0 "/32";
-            else print $0;
-        }
-    }' "$SRC_FILE" | jq -R . | jq -s .
+    _valid_cidrs=""
+    while IFS= read -r _ip_line || [ -n "$_ip_line" ]; do
+        _ip_line=$(printf "%s" "$_ip_line" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        case "$_ip_line" in
+            ""|\#*) continue ;;
+        esac
+        if is_valid_ipv4 "$_ip_line"; then
+            _valid_cidrs="${_valid_cidrs}${_ip_line}/32
+"
+        elif is_valid_ipv4_cidr "$_ip_line"; then
+            _valid_cidrs="${_valid_cidrs}${_ip_line}
+"
+        fi
+    done < "$SRC_FILE"
+    if [ -z "$_valid_cidrs" ]; then
+        printf "[]"
+    else
+        printf "%s" "$_valid_cidrs" | jq -R 'select(length > 0)' | jq -s .
+    fi
     return 0
 }
-
-# Генерация эталонного /etc/sing-box/config.json (оптимизировано под 200+ нод, AI-сервера и зону .lan)

@@ -5,7 +5,7 @@ diagnose_failed_nodes() {
         return 1
     fi
     load_gateway_env
-    API_JSON=$(curl -fsS --connect-timeout 2 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
+    API_JSON=$(clash_api_curl -fsS --connect-timeout 2 "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
     if [ -z "$API_JSON" ]; then
         echo "${C_RED}[X] Не удалось подключиться к Clash API (127.0.0.1:9090).${C_RES}"
         return 1
@@ -29,14 +29,14 @@ diagnose_failed_nodes() {
     printf "%s\n" "$FAILED_LIST" | while IFS= read -r NODE_KEY; do
         [ -z "$NODE_KEY" ] && continue
         ENC_N=$(jq -rn --arg s "$NODE_KEY" '$s|@uri')
-        RES1=$(curl -fsS --connect-timeout 6 -m 7 -H "Authorization: Bearer ${ADMIN_PASS}" \
+        RES1=$(clash_api_curl -fsS --connect-timeout 6 -m 7 \
             "http://127.0.0.1:9090/proxies/${ENC_N}/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=5000" 2>/dev/null || true)
         D1=$(printf "%s" "$RES1" | jq -r '.delay // 0' 2>/dev/null || echo "0")
 
         if [ "${D1:-0}" -gt 0 ]; then
             printf "  %s[✓ ОЖИВЛЕНА: %4s ms]%s %s\n" "$C_GRN" "$D1" "$C_RES" "$NODE_KEY"
         else
-            RES2=$(curl -fsS --connect-timeout 6 -m 7 -H "Authorization: Bearer ${ADMIN_PASS}" \
+            RES2=$(clash_api_curl -fsS --connect-timeout 6 -m 7 \
                 "http://127.0.0.1:9090/proxies/${ENC_N}/delay?url=http%3A%2F%2Fcp.cloudflare.com%2Fgenerate_204&timeout=5000" 2>/dev/null || true)
             D2=$(printf "%s" "$RES2" | jq -r '.delay // 0' 2>/dev/null || echo "0")
             if [ "${D2:-0}" -gt 0 ]; then
@@ -61,7 +61,7 @@ manage_nodes_cli_menu() {
     load_gateway_env
 
     while true; do
-        API_JSON=$(curl -fsS --connect-timeout 2 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
+        API_JSON=$(clash_api_curl -fsS --connect-timeout 2 "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
         if [ -z "$API_JSON" ]; then
             echo "${C_RED}[X] Не удалось получить список нод от Clash API (127.0.0.1:9090).${C_RES}"
             return 1
@@ -86,7 +86,8 @@ manage_nodes_cli_menu() {
         ui_box_sep
         echo "${C_BLD}Активные селекторы маршрутизации (выберите для смены ноды):${C_RES}"
 
-        GRP_LIST_FILE="/tmp/gateway_selectors.list"
+        ensure_gateway_runtime_dir >/dev/null 2>&1 || true
+        GRP_LIST_FILE=$(mktemp "${GATEWAY_RUNTIME_DIR:-/run/gateway}/selectors.XXXXXX" 2>/dev/null || printf "%s" "${GATEWAY_RUNTIME_DIR:-/run/gateway}/selectors.$$")
         printf "%s" "$API_JSON" | jq -r '
             [.proxies | to_entries[] | select(.value.type == "Selector" and .key != "GLOBAL")]
             | map(.key) | .[]
@@ -128,7 +129,7 @@ manage_nodes_cli_menu() {
             *)
                 TARGET_GRP=$(awk -v t="$G_SEL" 'NR == t {print $0; exit}' "$GRP_LIST_FILE" 2>/dev/null)
                 if [ -n "$TARGET_GRP" ]; then
-                    NODES_LIST_FILE="/tmp/gateway_group_nodes.list"
+                    NODES_LIST_FILE=$(mktemp "${GATEWAY_RUNTIME_DIR:-/run/gateway}/group_nodes.XXXXXX" 2>/dev/null || printf "%s" "${GATEWAY_RUNTIME_DIR:-/run/gateway}/group_nodes.$$")
                     printf "%s" "$API_JSON" | jq -r --arg g "$TARGET_GRP" '.proxies[$g].all[]?' > "$NODES_LIST_FILE" 2>/dev/null || true
                     echo ""
                     echo "${C_CYN}--- Доступные ноды для группы «${TARGET_GRP}» ---${C_RES}"
@@ -153,7 +154,7 @@ manage_nodes_cli_menu() {
                             if [ -n "$PICKED_NODE" ]; then
                                 ENC_GRP=$(jq -rn --arg s "$TARGET_GRP" '$s|@uri')
                                 PAYLOAD_JSON=$(jq -n --arg name "$PICKED_NODE" '{"name": $name}')
-                                if curl -fsS -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
+                                if clash_api_curl -fsS -X PUT -H "Content-Type: application/json" \
                                     -d "$PAYLOAD_JSON" "http://127.0.0.1:9090/proxies/${ENC_GRP}" >/dev/null 2>&1; then
                                     echo "${C_GRN}[✓] Группа «${TARGET_GRP}» переключена на: ${PICKED_NODE}${C_RES}"
                                     sleep 1
@@ -165,8 +166,8 @@ manage_nodes_cli_menu() {
                 fi
                 ;;
         esac
+        rm -f "$GRP_LIST_FILE"
     done
+    rm -f "${GRP_LIST_FILE:-}" 2>/dev/null || true
     return 0
 }
-
-# Быстрая смена единого пароля (Sing-Box Zashboard + AdGuard Home + Samba + Vaultwarden + Caddy BasicAuth)

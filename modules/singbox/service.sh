@@ -5,9 +5,17 @@ backup_gateway_state() {
     mkdir -p "$STATE_BAK_DIR" 2>/dev/null || true
     chmod 700 "$STATE_BAK_DIR" 2>/dev/null || true
     for f in "$SB_CONF" "$MIHOMO_CONF" "$SB_ENV" "$HOMELAB_ENV" "$CUSTOM_NODES_FILE" "$WARP_NODES_FILE" \
-             "$USER_DIRECT_FILE" "$USER_PROXY_FILE" "$USER_BYPASS_IPS" "$USER_FORCE_PROXY_IPS"; do
+             "$USER_DIRECT_FILE"; do
         if [ -s "$f" ]; then
             cp -f "$f" "$STATE_BAK_DIR/" 2>/dev/null || true
+        fi
+    done
+    # Опциональные пользовательские списки могут легально очищаться до 0 байт
+    for opt_f in "$USER_PROXY_FILE" "$USER_BYPASS_IPS" "$USER_FORCE_PROXY_IPS"; do
+        if [ -f "$opt_f" ]; then
+            cp -f "$opt_f" "$STATE_BAK_DIR/" 2>/dev/null || true
+        else
+            rm -f "${STATE_BAK_DIR}/$(basename "$opt_f")" 2>/dev/null || true
         fi
     done
     sync
@@ -31,18 +39,6 @@ restore_gateway_state() {
     sync
     sync_user_domain_rulesets
     load_gateway_env
-    if [ "$(get_active_core)" = "mihomo" ]; then
-        service_ctl sing-box stop
-        service_ctl sing-box disable
-        service_ctl mihomo enable
-        service_ctl mihomo restart
-    else
-        service_ctl mihomo stop
-        service_ctl mihomo disable
-        service_ctl sing-box enable
-        service_ctl sing-box restart
-    fi
+    activate_core_service "$(get_active_core)"
     return 0
 }
-
-# Наглядный отчет по 3 независимым слотам прокси

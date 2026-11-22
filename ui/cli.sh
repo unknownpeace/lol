@@ -3,6 +3,7 @@
 # Маршрутизация аргументов командной строки (CLI: `gateway <command>`)
 # ==============================================================================
 gateway_cli_dispatch() {
+    set +e
     detect_os >/dev/null 2>&1 || true
     load_gateway_env >/dev/null 2>&1 || true
     case "${1:-}" in
@@ -66,8 +67,17 @@ gateway_cli_dispatch() {
             singbox|sing-box|sb|mihomo|clash|meta)
                 switch_core_engine "$2" || return $?
                 ;;
+            "")
+                if ( : < /dev/tty ) 2>/dev/null; then
+                    prompt_core_and_ui_menu
+                else
+                    echo "Использование: gw core [singbox|mihomo|status]"
+                    return 1
+                fi
+                ;;
             *)
-                prompt_core_and_ui_menu
+                echo "${C_RED}[X] Неизвестная подкоманда core: ${2}. Доступно: singbox | mihomo | status${C_RES}"
+                return 1
                 ;;
         esac
         ;;
@@ -80,8 +90,17 @@ gateway_cli_dispatch() {
             zashboard|zash|zb|metacubexd|metacube|xd)
                 switch_web_ui "$2" || return $?
                 ;;
+            "")
+                if ( : < /dev/tty ) 2>/dev/null; then
+                    prompt_core_and_ui_menu
+                else
+                    echo "Использование: gw ui [zashboard|metacubexd|status]"
+                    return 1
+                fi
+                ;;
             *)
-                prompt_core_and_ui_menu
+                echo "${C_RED}[X] Неизвестная веб-панель: ${2}. Доступно: zashboard | metacubexd | status${C_RES}"
+                return 1
                 ;;
         esac
         ;;
@@ -89,14 +108,23 @@ gateway_cli_dispatch() {
         case "${2:-}" in
             add)
                 shift 2
-                cli_proxy_add "$*"
+                cli_proxy_add "$@"
                 ;;
             list|status)
                 print_proxy_slots_report
                 list_my_nodes
                 ;;
+            "")
+                if ( : < /dev/tty ) 2>/dev/null; then
+                    manage_nodes_cli_menu
+                else
+                    echo "Использование: gw proxy [add <url|key|warp>|list|status]"
+                    return 1
+                fi
+                ;;
             *)
-                manage_nodes_cli_menu
+                echo "${C_RED}[X] Неизвестная подкоманда proxy: ${2}. Доступно: add | list | status${C_RES}"
+                return 1
                 ;;
         esac
         ;;
@@ -109,16 +137,21 @@ gateway_cli_dispatch() {
                 cli_domain_rule_add "proxy" "${3:-}"
                 ;;
             test|check|inspect)
+                if [ -z "${3:-}" ] && ! ( : < /dev/tty ) 2>/dev/null; then
+                    echo "Использование: gw domain test <домен>"
+                    return 1
+                fi
                 inspect_domain_route "${3:-}"
                 ;;
             *)
-                ui_warn_box "Укажите действие для домена: direct или proxy." \
-                            "Пример: gateway domain direct https://kinopoisk.ru  ИЛИ  gateway domain proxy https://openai.com"
+                ui_warn_box "Укажите действие для домена: direct, proxy или test." \
+                            "Пример: gateway domain direct https://kinopoisk.ru  ИЛИ  gateway domain test openai.com"
+                return 1
                 ;;
         esac
         ;;
     ssl|cert|certs|tls)
-        require_alpine_feature "Подсистема Caddy SSL/PKI" || return 0
+        require_alpine_feature "Подсистема Caddy SSL/PKI" || return 1
         case "${2:-}" in
             status)
                 show_ssl_status
@@ -132,12 +165,24 @@ gateway_cli_dispatch() {
             duckdns|setup)
                 if [ -n "${3:-}" ] && [ -n "${4:-}" ]; then
                     issue_duckdns_cert "$3" "$4" || return $?
-                else
+                elif ( : < /dev/tty ) 2>/dev/null; then
                     prompt_ssl_management_menu
+                else
+                    echo "Использование: gw ssl duckdns <subdomain> <token>"
+                    return 1
+                fi
+                ;;
+            "")
+                if ( : < /dev/tty ) 2>/dev/null; then
+                    prompt_ssl_management_menu
+                else
+                    echo "Использование: gw ssl [status|renew|local|duckdns <sub > <token>]"
+                    return 1
                 fi
                 ;;
             *)
-                prompt_ssl_management_menu
+                echo "${C_RED}[X] Неизвестная подкоманда ssl: ${2}. Доступно: status | renew | local | duckdns${C_RES}"
+                return 1
                 ;;
         esac
         ;;
@@ -150,11 +195,17 @@ gateway_cli_dispatch() {
     passwd|password)
         if [ -n "${2:-}" ]; then
             change_unified_password "$2" "yes"
-        else
+        elif ( : < /dev/tty ) 2>/dev/null; then
             printf "Введите новый единый мастер-пароль: "
+            stty -echo 2>/dev/null || true
             read -r IN_P < /dev/tty || true
+            stty echo 2>/dev/null || true
+            printf "\n"
             IN_P=$(printf "%s" "$IN_P" | tr -d '\r\n')
             change_unified_password "$IN_P"
+        else
+            echo "Использование: gw passwd <новый_пароль>"
+            return 1
         fi
         ;;
     answers)
@@ -167,33 +218,61 @@ gateway_cli_dispatch() {
                 ;;
             *)
                 echo "Использование: gw answers template [файл]  ИЛИ  gw answers verify [файл]"
+                return 1
                 ;;
         esac
         ;;
     disk|disks|storage)
-        require_alpine_feature "Управление внешними дисками (LUKS2)" || return 0
-        manage_external_disks_menu
+        require_alpine_feature "Управление внешними дисками (LUKS2)" || return 1
+        if ( : < /dev/tty ) 2>/dev/null; then
+            manage_external_disks_menu
+        else
+            echo "Использование: gw unlock | gw lock | gw disk (требуется TTY)"
+            return 1
+        fi
         ;;
     install|--answers*|-a|-f|--unattended)
         run_installer "$@"
         ;;
     homelab)
-        require_alpine_feature "Модули Homelab" || return 0
+        require_alpine_feature "Модули Homelab" || return 1
         case "${2:-}" in
             status|test)        run_homelab_self_test ;;
             links|urls)         print_quick_access_card ;;
             disk|disks|storage) manage_external_disks_menu ;;
             unlock)             unlock_external_storage_cli ;;
             lock|eject)         unmount_external_storage_safe ;;
-            install)            [ -n "${3:-}" ] && homelab_module_dispatch "$(resolve_homelab_module_id "$3" || printf "%s" "$3")" "install" || prompt_homelab_modules_wizard ;;
-            remove)             [ -n "${3:-}" ] && homelab_module_dispatch "$(resolve_homelab_module_id "$3" || printf "%s" "$3")" "remove" ;;
-            restart)            [ -n "${3:-}" ] && homelab_module_dispatch "$(resolve_homelab_module_id "$3" || printf "%s" "$3")" "restart" ;;
-            update)             [ -n "${3:-}" ] && homelab_module_dispatch "$(resolve_homelab_module_id "$3" || printf "%s" "$3")" "update" ;;
-            *)                  show_homelab_menu ;;
+            install)
+                if [ -n "${3:-}" ]; then
+                    _hm_id=$(resolve_homelab_module_id "$3" || true)
+                    [ -n "$_hm_id" ] || { echo "${C_RED}[X] Неизвестный модуль Homelab: ${3}${C_RES}"; return 1; }
+                    homelab_module_dispatch "$_hm_id" "install"
+                else
+                    prompt_homelab_modules_wizard
+                fi
+                ;;
+            remove|restart|update)
+                [ -n "${3:-}" ] || { echo "Использование: gw homelab ${2} <модуль>"; return 1; }
+                _hm_id=$(resolve_homelab_module_id "$3" || true)
+                [ -n "$_hm_id" ] || { echo "${C_RED}[X] Неизвестный модуль Homelab: ${3}${C_RES}"; return 1; }
+                homelab_module_dispatch "$_hm_id" "$2"
+                ;;
+            "")
+                if ( : < /dev/tty ) 2>/dev/null; then
+                    show_homelab_menu
+                else
+                    echo "Использование: gw homelab [status|links|install|remove|restart|update <модуль>]"
+                    return 1
+                fi
+                ;;
+            *)
+                echo "${C_RED}[X] Неизвестная подкоманда homelab: ${2}. Доступно: status | links | install | remove | restart | update${C_RES}"
+                return 1
+                ;;
         esac
         ;;
     lxc|container|containers)
-        require_alpine_feature "Виртуализация LXC" || return 0
+        require_alpine_feature "Виртуализация LXC" || return 1
         case "${2:-list}" in
             list|ls)
                 lxc_list_containers
@@ -234,6 +313,7 @@ gateway_cli_dispatch() {
                 ;;
             *)
                 echo "Использование: gw lxc [list|create|start|stop|restart|attach|snap|autostart|fix-net|rm|menu]"
+                return 1
                 ;;
         esac
         ;;
@@ -241,8 +321,12 @@ gateway_cli_dispatch() {
         case "${2:-create}" in
             create)   create_unified_backup "no" ;;
             full)     create_unified_backup "yes" ;;
-            restore)  restore_unified_backup ;;
+            restore)  restore_unified_backup "${3:-}" ;;
             telegram) [ -f "$BACKUP_ARCHIVE" ] || create_unified_backup "no"; send_telegram_backup "$BACKUP_ARCHIVE" ;;
+            *)
+                echo "Использование: gw backup [create|full|restore [файл]|telegram]"
+                return 1
+                ;;
         esac
         ;;
     killswitch|kill-switch|ks)
@@ -271,12 +355,17 @@ gateway_cli_dispatch() {
     help|--help|-h)
         print_gateway_cli_help
         ;;
-    *)
+    "")
         if [ ! -f "$SB_CONF" ] && [ ! -f "$MIHOMO_CONF" ]; then
             run_installer
         else
             show_menu
         fi
+        ;;
+    *)
+        echo "${C_RED}[X] Неизвестная команда: ${1}${C_RES}"
+        echo "Запустите ${C_CYN}gw --help${C_RES} для просмотра списка доступных команд."
+        return 1
         ;;
 esac
 }

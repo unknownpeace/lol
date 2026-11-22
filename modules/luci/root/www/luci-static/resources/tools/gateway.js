@@ -42,9 +42,9 @@ function injectStyles() {
 		'.gw-form-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 10px; }',
 		'.gw-field { display: flex; flex-direction: column; gap: 4px; min-width: 240px; flex: 1; }',
 		'.gw-field label { font-size: 12px; font-weight: 600; opacity: 0.85; }',
-		'.gw-field input[type="text"], .gw-field input[type="password"], .gw-field select, .gw-field .cbi-input-text, .gw-field .cbi-input-select { width: 100% !important; max-width: 100% !important; box-sizing: border-box; }',
+		'.gw-field input[type="text"], .gw-field input[type="password"], .gw-field select, .gw-field textarea, .gw-field .cbi-input-text, .gw-field .cbi-input-select, .gw-field .cbi-input-textarea { width: 100% !important; max-width: 100% !important; box-sizing: border-box; }',
 		'.gw-pre { background: #161b22; color: #e6edf3; padding: 12px; border-radius: 6px; font-family: monospace; font-size: 12px; line-height: 1.45; max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-word; }',
-		'.gw-two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }',
+		'.gw-two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; }',
 		'.gw-chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }',
 		'.gw-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--border-color-medium, #d9d9d9); background: var(--background-color-low, #f6f6f6); font-size: 12px; }',
 		'.gw-chip button { border: none; background: transparent; cursor: pointer; font-weight: 700; padding: 0 2px; color: #c5221f; }'
@@ -81,13 +81,49 @@ function hostUrl(port, path) {
 	return proto + '//' + host + ':' + String(port) + (path || '');
 }
 
+var activeJobStop = null;
+
+function stopActiveJobStream() {
+	if (typeof activeJobStop === 'function') {
+		var fn = activeJobStop;
+		activeJobStop = null;
+		fn();
+	}
+}
+
 function attachJobStream(jobId, preEl, statusEl, closeBtn, onDone) {
 	var timer = null;
+	var stopped = false;
+
+	function cleanup() {
+		stopped = true;
+		if (timer !== null) {
+			window.clearTimeout(timer);
+			timer = null;
+		}
+		window.removeEventListener('hashchange', cleanup);
+		window.removeEventListener('popstate', cleanup);
+		window.removeEventListener('pagehide', cleanup);
+	}
+
+	window.addEventListener('hashchange', cleanup);
+	window.addEventListener('popstate', cleanup);
+	window.addEventListener('pagehide', cleanup);
+
 	function step() {
+		if (stopped || !statusEl.isConnected) {
+			cleanup();
+			return;
+		}
 		callJobPoll(jobId).then(function(res) {
+			if (stopped || !statusEl.isConnected) {
+				cleanup();
+				return;
+			}
 			if (!res || !res.ok) {
 				statusEl.textContent = (res && res.error) ? ('Ошибка: ' + res.error) : 'Не удалось получить статус задания';
 				closeBtn.disabled = false;
+				cleanup();
 				return;
 			}
 			if (res.log != null) {
@@ -102,24 +138,35 @@ function attachJobStream(jobId, preEl, statusEl, closeBtn, onDone) {
 					badge(ok ? 'ok' : 'err', ok ? 'Завершено успешно (код 0)' : ('Ошибка выполнения (код ' + res.exit_code + ')'))
 				]);
 				closeBtn.disabled = false;
+				cleanup();
 				if (typeof onDone === 'function')
 					onDone(res);
 			}
 		}).catch(function(err) {
+			if (stopped || !statusEl.isConnected) {
+				cleanup();
+				return;
+			}
 			statusEl.textContent = 'Ошибка опроса: ' + (err && err.message ? err.message : String(err));
 			closeBtn.disabled = false;
+			cleanup();
 		});
 	}
 	step();
+	return cleanup;
 }
 
 function openJobModal(title, jobId, onDone) {
+	stopActiveJobStream();
 	var statusEl = E('div', { 'style': 'margin-bottom: 10px;' }, [ badge('info', 'Выполняется в фоне...') ]);
 	var preEl = E('pre', { 'class': 'gw-pre' }, 'Запуск операции...');
 	var closeBtn = E('button', {
 		'class': 'btn cbi-button',
 		'disabled': true,
-		'click': function() { ui.hideModal(); }
+		'click': function() {
+			stopActiveJobStream();
+			ui.hideModal();
+		}
 	}, 'Закрыть');
 
 	ui.showModal(title, [
@@ -128,7 +175,7 @@ function openJobModal(title, jobId, onDone) {
 		E('div', { 'class': 'right', 'style': 'margin-top: 12px;' }, [ closeBtn ])
 	]);
 
-	attachJobStream(jobId, preEl, statusEl, closeBtn, onDone);
+	activeJobStop = attachJobStream(jobId, preEl, statusEl, closeBtn, onDone);
 }
 
 function runJobModal(title, action, arg1, arg2, onDone) {

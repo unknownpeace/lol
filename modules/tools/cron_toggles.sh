@@ -7,43 +7,31 @@ is_watchdog_enabled() {
     grep -q "/usr/bin/gateway watchdog" "$CRON_FILE" 2>/dev/null
 }
 
-# Включение автообновления (ежедневно в 04:00 через crond)
-enable_autoupdate() {
+_cron_set_entry() {
+    _ce_pat="$1"
+    _ce_line="$2"
     mkdir -p /etc/crontabs
     touch "$CRON_FILE"
-    sed -i '\|/usr/bin/gateway autoupdate|d' "$CRON_FILE" 2>/dev/null || true
-    echo "0 4 * * * /usr/bin/gateway autoupdate >${AUTOUPDATE_LOG} 2>&1" >> "$CRON_FILE"
+    chown root:root "$CRON_FILE" 2>/dev/null || true
+    chmod 600 "$CRON_FILE" 2>/dev/null || true
+    sed -i "\\|${_ce_pat}|d" "$CRON_FILE" 2>/dev/null || true
+    printf "%s\n" "$_ce_line" >> "$CRON_FILE"
+    chmod 600 "$CRON_FILE" 2>/dev/null || true
     service_ctl cron enable
     service_ctl cron restart
     return 0
 }
 
-# Отключение автообновления
-disable_autoupdate() {
+_cron_del_entry() {
     if [ -f "$CRON_FILE" ]; then
-        sed -i '\|/usr/bin/gateway autoupdate|d' "$CRON_FILE" 2>/dev/null || true
+        sed -i "\\|${1}|d" "$CRON_FILE" 2>/dev/null || true
     fi
     service_ctl cron reload
     return 0
 }
 
-# Управление встроенным Watchdog (самоисцеление служб каждые 5 минут)
-enable_watchdog() {
-    mkdir -p /etc/crontabs
-    touch "$CRON_FILE"
-    sed -i '\|/usr/bin/gateway watchdog|d' "$CRON_FILE" 2>/dev/null || true
-    echo "*/5 * * * * /usr/bin/gateway watchdog >/dev/null 2>&1" >> "$CRON_FILE"
-    service_ctl cron enable
-    service_ctl cron restart
-    return 0
-}
-
-disable_watchdog() {
-    if [ -f "$CRON_FILE" ]; then
-        sed -i '\|/usr/bin/gateway watchdog|d' "$CRON_FILE" 2>/dev/null || true
-    fi
-    service_ctl cron reload
-    return 0
-}
-
-# Проверка: смонтирован ли сейчас внешний диск в /srv/storage
+# Включение/отключение ночного автообновления (04:00 через crond) и Watchdog (каждые 5 мин)
+enable_autoupdate()  { _cron_set_entry "/usr/bin/gateway autoupdate" "0 4 * * * /usr/bin/gateway autoupdate >${AUTOUPDATE_LOG} 2>&1"; }
+disable_autoupdate() { _cron_del_entry "/usr/bin/gateway autoupdate"; }
+enable_watchdog()    { _cron_set_entry "/usr/bin/gateway watchdog"   "*/5 * * * * /usr/bin/gateway watchdog >/dev/null 2>&1"; }
+disable_watchdog()   { _cron_del_entry "/usr/bin/gateway watchdog"; }

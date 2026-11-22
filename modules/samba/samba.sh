@@ -1,9 +1,7 @@
 #!/bin/sh
-set -e
-
 # ==============================================================================
 # Модуль Samba (SMB2/3) + WSDD + Avahi
-# Единое сетевое хранилище (Storage, Music, Videos, Downloads)
+# Единое сетевое хранилище (Shared, Music, Videos, Downloads)
 # ==============================================================================
 
 if [ -z "${GATEWAY_DIR:-}" ]; then
@@ -29,7 +27,6 @@ setup_wsdd_and_avahi() {
         cat << WSDD_EOF > /etc/conf.d/wsdd
 # Привязка строго к физическому LAN-интерфейсу и IPv4 (в обход ${CORE_TUN_IF})
 WSDD_WORKGROUP="WORKGROUP"
-WSDD_OPTS="-4 -i ${LAN_IF} -n ${HN_SHORT}"
 command_args="-4 -i ${LAN_IF} -w WORKGROUP -n ${HN_SHORT}"
 WSDD_EOF
         service_ctl wsdd enable
@@ -40,7 +37,7 @@ WSDD_EOF
     if [ -d /etc/avahi ]; then
         mkdir -p /etc/avahi/services
         if [ -f /etc/avahi/avahi-daemon.conf ]; then
-            sed -i "s|^#*\s*use-ipv4=.*|use-ipv4=yes|; s|^#*\s*use-ipv6=.*|use-ipv6=no|; s|^#*\s*allow-interfaces=.*|allow-interfaces=${LAN_IF}|" /etc/avahi/avahi-daemon.conf 2>/dev/null || true
+            sed -i "s|^#*[[:space:]]*use-ipv4=.*|use-ipv4=yes|; s|^#*[[:space:]]*use-ipv6=.*|use-ipv6=no|; s|^#*[[:space:]]*allow-interfaces=.*|allow-interfaces=${LAN_IF}|" /etc/avahi/avahi-daemon.conf 2>/dev/null || true
             if ! grep -q '^allow-interfaces=' /etc/avahi/avahi-daemon.conf 2>/dev/null; then
                 sed -i "/^\[server\]/a allow-interfaces=${LAN_IF}" /etc/avahi/avahi-daemon.conf 2>/dev/null || true
             fi
@@ -108,7 +105,7 @@ apply_and_verify_samba_password() {
 
     # Верификация наличия активного пользователя и непустого NT-хэша в базе Samba
     if command -v pdbedit >/dev/null 2>&1; then
-        PDB_LINE=$(pdbedit -L -w "$TARGET_SMB_USER" 2>/dev/null | grep -E "^${TARGET_SMB_USER}:" | head -n 1 || true)
+        PDB_LINE=$(pdbedit -L -w -u "$TARGET_SMB_USER" 2>/dev/null | grep -E "^${TARGET_SMB_USER}:" | head -n 1 || true)
         if [ -z "$PDB_LINE" ]; then
             echo "${C_RED}[X] Ошибка: Пользователь ${TARGET_SMB_USER} отсутствует в базе passdb.tdb после smbpasswd!${C_RES}" >&2
             return 1
@@ -129,15 +126,13 @@ apply_and_verify_samba_password() {
 
     # Если smbd уже запущен и установлен smbclient — проверяем реальную SMB2/3 авторизацию
     if command -v smbclient >/dev/null 2>&1 && rc-service samba status >/dev/null 2>&1; then
-        PASS_TMP="/tmp/.smb_auth_check.$$"
-        trap 'rm -f "$PASS_TMP" 2>/dev/null || true' EXIT INT TERM
-        umask 077
+        ensure_gateway_runtime_dir || return 1
+        PASS_TMP=$(umask 077 && mktemp "${GATEWAY_RUNTIME_DIR:-/run/gateway}/smb_auth.XXXXXX" 2>/dev/null) || return 1
+        chmod 600 "$PASS_TMP" 2>/dev/null || true
         printf "username = %s\npassword = %s\n" "$TARGET_SMB_USER" "$TARGET_SMB_PASS" > "$PASS_TMP"
-        umask 022
         SMB_CHECK_OUT=$(smbclient -L //127.0.0.1 -A "$PASS_TMP" -m SMB3 2>&1 || true)
         rm -f "$PASS_TMP" 2>/dev/null || true
-        trap - EXIT INT TERM
-        if printf "%s" "$SMB_CHECK_OUT" | grep -Eq "NT_STATUS_LOGON_FAILURE|NT_STATUS_ACCOUNT_DISABLED|NT_STATUS_ACCESS_DENIED"; then
+        if printf "%s" "$SMB_CHECK_OUT" | grep -Eq "NT_STATUS_LOGON_FAILURE|NT_STATUS_WRONG_PASSWORD|NT_STATUS_ACCOUNT_DISABLED|NT_STATUS_ACCESS_DENIED|NT_STATUS_CONNECTION_REFUSED"; then
             echo "${C_RED}[X] Ошибка проверки входа Samba (smbclient): неверный пароль или доступ запрещен!${C_RES}" >&2
             return 1
         fi
@@ -190,6 +185,8 @@ write_samba_config() {
 
     mkdir -p /etc/samba /var/log/samba /var/lib/samba/private /var/cache/samba /run/samba
     chmod 700 /var/lib/samba/private 2>/dev/null || true
+    STORAGE_SHARED="${STORAGE_SHARED:-${STORAGE_ROOT:-/srv/storage}/Shared}"
+    mkdir -p "$STORAGE_SHARED" 2>/dev/null || true
     cat << SMB_EOF > /etc/samba/smb.conf.tmp.$$
 [global]
    workgroup = WORKGROUP
@@ -198,7 +195,7 @@ write_samba_config() {
    server role = standalone server
    interfaces = lo ${LAN_IF}
    bind interfaces only = yes
-   hosts allow = 127. 10. 172.16. 172.17. 172.18. 172.19. 172.20. 172.21. 172.22. 172.23. 172.24. 172.25. 172.26. 172.27. 172.28. 172.29. 172.30. 172.31. 192.168. 100.64.
+   hosts allow = 127. 10. 172.16. 172.17. 172.18. 172.19. 172.20. 172.21. 172.22. 172.23. 172.24. 172.25. 172.26. 172.27. 172.28. 172.29. 172.30. 172.31. 192.168.
    security = user
    passdb backend = tdbsam:/var/lib/samba/private/passdb.tdb
    map to guest = Never
@@ -219,103 +216,40 @@ write_samba_config() {
    aio write size = 16384
    unix charset = UTF-8
    dos charset = CP866
-
-[storage]
-   comment = Homelab Unified Storage
-   path = ${STORAGE_ROOT}
-   browseable = yes
-   writable = yes
-   read only = no
-   guest ok = no
-   valid users = ${SMB_USER} @${MEDIA_GROUP}
-   write list = ${SMB_USER} @${MEDIA_GROUP}
-   force user = ${SMB_USER}
-   force group = ${MEDIA_GROUP}
-   create mask = 0664
-   force create mode = 0664
-   directory mask = 2775
-   force directory mode = 2775
-   inherit permissions = yes
-   inherit acls = yes
-   map archive = no
-   map hidden = no
-   map system = no
-   store dos attributes = no
-   mangled names = no
-   hide dot files = yes
-
-[Music]
-   comment = Homelab Music Library
-   path = ${STORAGE_MUSIC}
-   browseable = yes
-   writable = yes
-   read only = no
-   guest ok = no
-   valid users = ${SMB_USER} @${MEDIA_GROUP}
-   write list = ${SMB_USER} @${MEDIA_GROUP}
-   force user = ${SMB_USER}
-   force group = ${MEDIA_GROUP}
-   create mask = 0664
-   force create mode = 0664
-   directory mask = 2775
-   force directory mode = 2775
-   inherit permissions = yes
-   inherit acls = yes
-   map archive = no
-   map hidden = no
-   map system = no
-   store dos attributes = no
-   mangled names = no
-   hide dot files = yes
-
-[Videos]
-   comment = Homelab Videos Library
-   path = ${STORAGE_VIDEOS}
-   browseable = yes
-   writable = yes
-   read only = no
-   guest ok = no
-   valid users = ${SMB_USER} @${MEDIA_GROUP}
-   write list = ${SMB_USER} @${MEDIA_GROUP}
-   force user = ${SMB_USER}
-   force group = ${MEDIA_GROUP}
-   create mask = 0664
-   force create mode = 0664
-   directory mask = 2775
-   force directory mode = 2775
-   inherit permissions = yes
-   inherit acls = yes
-   map archive = no
-   map hidden = no
-   map system = no
-   store dos attributes = no
-   mangled names = no
-   hide dot files = yes
-
-[Downloads]
-   comment = Homelab Downloads & Torrents
-   path = ${STORAGE_DOWNLOADS}
-   browseable = yes
-   writable = yes
-   read only = no
-   guest ok = no
-   valid users = ${SMB_USER} @${MEDIA_GROUP}
-   write list = ${SMB_USER} @${MEDIA_GROUP}
-   force user = ${SMB_USER}
-   force group = ${MEDIA_GROUP}
-   create mask = 0664
-   force create mode = 0664
-   directory mask = 2775
-   force directory mode = 2775
-   inherit permissions = yes
-   inherit acls = yes
-   map archive = no
-   map hidden = no
-   map system = no
-   store dos attributes = no
-   mangled names = no
-   hide dot files = yes
 SMB_EOF
+
+    _emit_smb_share() {
+        cat << SHARE_EOF >> /etc/samba/smb.conf.tmp.$$
+
+[$1]
+   comment = $2
+   path = $3
+   browseable = yes
+   writable = yes
+   read only = no
+   guest ok = no
+   valid users = ${SMB_USER} @${MEDIA_GROUP}
+   write list = ${SMB_USER} @${MEDIA_GROUP}
+   force user = ${SMB_USER}
+   force group = ${MEDIA_GROUP}
+   create mask = 0664
+   force create mode = 0664
+   directory mask = 2775
+   force directory mode = 2775
+   inherit permissions = yes
+   inherit acls = yes
+   map archive = no
+   map hidden = no
+   map system = no
+   store dos attributes = no
+   mangled names = no
+   hide dot files = yes
+SHARE_EOF
+    }
+    _emit_smb_share "storage"   "Homelab Shared Storage"        "$STORAGE_SHARED"
+    _emit_smb_share "Music"     "Homelab Music Library"         "$STORAGE_MUSIC"
+    _emit_smb_share "Videos"    "Homelab Videos Library"        "$STORAGE_VIDEOS"
+    _emit_smb_share "Downloads" "Homelab Downloads & Torrents"  "$STORAGE_DOWNLOADS"
 
     if command -v testparm >/dev/null 2>&1; then
         if ! testparm -s /etc/samba/smb.conf.tmp.$$ >/dev/null 2>&1; then
@@ -355,6 +289,7 @@ install_module_samba() {
     if [ -f /etc/conf.d/samba ]; then
         sed -i 's|^daemon_list=.*|daemon_list="smbd"|' /etc/conf.d/samba 2>/dev/null || true
     fi
+    ensure_openrc_mount_guard "samba" >/dev/null 2>&1 || true
 
     if ! apply_and_verify_samba_password "$SMB_USER" "$SMB_PASS"; then
         echo "${C_RED}[X] Не удалось применить и верифицировать пароль Samba для пользователя ${SMB_USER}!${C_RES}"

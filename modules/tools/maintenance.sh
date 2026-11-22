@@ -1,10 +1,15 @@
 #!/bin/sh
 rotate_gateway_logs() {
+    ensure_gateway_runtime_dir >/dev/null 2>&1 || true
     for LOG_F in "$SB_LOG_FILE" "$MIHOMO_LOG_FILE" "$AUTOUPDATE_LOG" /var/log/gateway-webui.log /var/log/gateway-console.log /var/log/caddy.log /var/log/vaultwarden.log /var/log/metube.log /var/log/code-server.log /var/log/transmission/transmission.log; do
         if [ -f "$LOG_F" ]; then
             F_SIZE=$(wc -c < "$LOG_F" 2>/dev/null | tr -d ' \t\r\n' || echo "0")
             if [ "${F_SIZE:-0}" -gt 1048576 ]; then
-                tail -n 500 "$LOG_F" > "${LOG_F}.tmp" 2>/dev/null && mv -f "${LOG_F}.tmp" "$LOG_F" 2>/dev/null || true
+                _log_tmp=$(mktemp "${GATEWAY_RUNTIME_DIR:-/run/gateway}/logrot.XXXXXX" 2>/dev/null || printf "%s" "${GATEWAY_RUNTIME_DIR:-/run/gateway}/logrot.$$")
+                if tail -n 500 "$LOG_F" > "$_log_tmp" 2>/dev/null; then
+                    cat "$_log_tmp" > "$LOG_F" 2>/dev/null || true
+                fi
+                rm -f "$_log_tmp" 2>/dev/null || true
             fi
         fi
     done
@@ -15,10 +20,11 @@ rotate_gateway_logs() {
 # Движок проверки обновлений Git и самообновления всего комплекса Gateway
 # ==============================================================================
 
-# Проверка наличия обновлений в Git-репозитории шлюза (с кэшированием на 2 часа для нулевых задержек)
+# Проверка наличия обновлений в Git-репозитории шлюза (с кэшированием в /run/gateway на 2 часа)
 check_gateway_repo_updates() {
     FORCE_CHK="${1:-no}"
-    CACHE_F="/tmp/gateway_update_check.cache"
+    ensure_gateway_runtime_dir >/dev/null 2>&1 || true
+    CACHE_F="${GATEWAY_UPDATE_CACHE:-/run/gateway/update_check.cache}"
     NOW_TS=$(date +%s 2>/dev/null || echo 0)
 
     if [ "$FORCE_CHK" != "force" ] && [ -f "$CACHE_F" ]; then
@@ -30,16 +36,18 @@ check_gateway_repo_updates() {
     fi
 
     if [ ! -d "${GATEWAY_DIR}/.git" ] || ! command -v git >/dev/null 2>&1; then
-        echo "NO_GIT|0||${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
+        printf "NO_GIT|0||%s\n" "$NOW_TS" > "$CACHE_F" 2>/dev/null || true
+        chmod 600 "$CACHE_F" 2>/dev/null || true
         return 1
     fi
 
-    CUR_BRANCH=$(git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" branch --show-current 2>/dev/null || echo "main")
+    CUR_BRANCH=$(GIT_TERMINAL_PROMPT=0 git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" branch --show-current 2>/dev/null || echo "main")
     [ -z "$CUR_BRANCH" ] && CUR_BRANCH="main"
 
-    # Быстрый fetch с таймаутом без блокировки консоли
-    if ! git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=4 fetch --quiet origin "$CUR_BRANCH" >/dev/null 2>&1; then
-        echo "FETCH_ERROR|0||${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
+    # Быстрый fetch без блокировки на запросе пароля
+    if ! GIT_TERMINAL_PROMPT=0 git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=4 fetch --quiet origin "$CUR_BRANCH" >/dev/null 2>&1; then
+        printf "FETCH_ERROR|0||%s\n" "$NOW_TS" > "$CACHE_F" 2>/dev/null || true
+        chmod 600 "$CACHE_F" 2>/dev/null || true
         return 1
     fi
 
@@ -49,18 +57,32 @@ check_gateway_repo_updates() {
     [ -z "$BEHIND_CNT" ] && BEHIND_CNT=0
 
     if [ -n "$LOCAL_H" ] && [ -n "$REMOTE_H" ] && [ "$BEHIND_CNT" -gt 0 ]; then
-        echo "UPDATE_AVAILABLE|${BEHIND_CNT}|${REMOTE_H}|${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
+        printf "UPDATE_AVAILABLE|%s|%s|%s\n" "$BEHIND_CNT" "$REMOTE_H" "$NOW_TS" > "$CACHE_F" 2>/dev/null || true
+        chmod 600 "$CACHE_F" 2>/dev/null || true
         return 0
     else
-        echo "UP_TO_DATE|0|${LOCAL_H}|${NOW_TS}" > "$CACHE_F" 2>/dev/null || true
+        printf "UP_TO_DATE|0|%s|%s\n" "$LOCAL_H" "$NOW_TS" > "$CACHE_F" 2>/dev/null || true
+        chmod 600 "$CACHE_F" 2>/dev/null || true
         return 1
     fi
 }
 
 # Получение компактного статуса версии для баннера MOTD и шапки меню
 get_gateway_update_badge() {
-    if check_gateway_repo_updates "no"; then
-        B_CNT=$(awk -F'|' '{print $2}' /tmp/gateway_update_check.cache 2>/dev/null || echo 1)
+    _badge_mode="${1:-}"
+    CACHE_F="${GATEWAY_UPDATE_CACHE:-/run/gateway/update_check.cache}"
+    _has_upd=1
+    if [ "$_badge_mode" = "cache-only" ]; then
+        if [ -f "$CACHE_F" ]; then
+            IFS='|' read -r _c_stat _c_cnt _rest < "$CACHE_F" 2>/dev/null || true
+            [ "$_c_stat" = "UPDATE_AVAILABLE" ] && _has_upd=0
+        fi
+    else
+        check_gateway_repo_updates "no" && _has_upd=0
+    fi
+
+    if [ "$_has_upd" -eq 0 ]; then
+        B_CNT=$(awk -F'|' '{print $2}' "$CACHE_F" 2>/dev/null || echo 1)
         printf "%b" "${C_YEL}🔔 Доступно обновление (${B_CNT} комм.) ➔ gw update${C_RES}"
     else
         if [ -d "${GATEWAY_DIR}/.git" ] && command -v git >/dev/null 2>&1; then
@@ -75,6 +97,7 @@ get_gateway_update_badge() {
 # Полное атомарное самообновление: Git-репозиторий + ядра + модули Homelab
 self_update_gateway() {
     SU_MODE="${1:-}"
+    CACHE_F="${GATEWAY_UPDATE_CACHE:-/run/gateway/update_check.cache}"
 
     if [ "$SU_MODE" = "check" ] || [ "$SU_MODE" = "status" ]; then
         ui_banner "GATEWAY UPDATE // ПРОВЕРКА ОБНОВЛЕНИЙ ИЗ GIT"
@@ -82,7 +105,7 @@ self_update_gateway() {
         CUR_BRANCH=$(git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" branch --show-current 2>/dev/null || echo "main")
         [ -z "$CUR_BRANCH" ] && CUR_BRANCH="main"
         if check_gateway_repo_updates "force"; then
-            B_CNT=$(awk -F'|' '{print $2}' /tmp/gateway_update_check.cache 2>/dev/null || echo 1)
+            B_CNT=$(awk -F'|' '{print $2}' "$CACHE_F" 2>/dev/null || echo 1)
             ui_box_top "🔔 ДОСТУПНА НОВАЯ ВЕРСИЯ ШЛЮЗА (новых коммитов: ${B_CNT})"
             git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" log --oneline -n 5 "HEAD..origin/${CUR_BRANCH}" 2>/dev/null | while IFS= read -r line; do
                 ui_box_row "  • ${line}"
@@ -91,7 +114,7 @@ self_update_gateway() {
             echo "Для установки обновления выполните: ${C_CYN}gw update${C_RES}"
         else
             C_STAT=""
-            [ -f /tmp/gateway_update_check.cache ] && IFS='|' read -r C_STAT _REST < /tmp/gateway_update_check.cache 2>/dev/null || true
+            [ -f "$CACHE_F" ] && IFS='|' read -r C_STAT _REST < "$CACHE_F" 2>/dev/null || true
             case "$C_STAT" in
                 NO_GIT)
                     ui_warn_box "Режим Standalone (без Git-репозитория)." \
@@ -110,23 +133,35 @@ self_update_gateway() {
         return 0
     fi
 
+    _upd_wait=0
+    while ! acquire_gateway_lock "update"; do
+        sleep 1
+        _upd_wait=$((_upd_wait + 1))
+        if [ "$_upd_wait" -ge 15 ]; then
+            ui_warn_box "Обновление уже выполняется другим процессом (${GATEWAY_LOCK_DIR})." "Повторите через несколько секунд."
+            return 1
+        fi
+    done
+    trap 'release_gateway_lock' EXIT INT TERM HUP
+
     if is_openwrt 2>/dev/null; then
         ui_banner "GATEWAY UPDATE // ПОЛНОЕ ОБНОВЛЕНИЕ ШЛЮЗА И ЯДЕР"
     else
         ui_banner "GATEWAY UPDATE // ПОЛНОЕ ОБНОВЛЕНИЕ ШЛЮЗА, ЯДЕР И HOMELAB"
     fi
 
-    # 1. Обновление кодовой базы из Git (с безопасным re-exec после pull)
+    # 1. Обновление кодовой базы из Git (строго --ff-only и без конфликтов перед re-exec)
     UPDATED_REPO="no"
+    REPO_CONFLICT="no"
     if [ -d "${GATEWAY_DIR}/.git" ] && command -v git >/dev/null 2>&1; then
         ui_step_progress 1 5 "Загрузка обновлений скриптов шлюза из Git-репозитория..."
-        CUR_BRANCH=$(git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" branch --show-current 2>/dev/null || echo "main")
+        CUR_BRANCH=$(GIT_TERMINAL_PROMPT=0 git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" branch --show-current 2>/dev/null || echo "main")
         [ -z "$CUR_BRANCH" ] && CUR_BRANCH="main"
-        if git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=8 fetch --quiet origin "$CUR_BRANCH" 2>/dev/null; then
+        if GIT_TERMINAL_PROMPT=0 git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=8 fetch --quiet origin "$CUR_BRANCH" 2>/dev/null; then
             BEHIND_CNT=$(git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" rev-list --count "HEAD..origin/${CUR_BRANCH}" 2>/dev/null | tr -dc '0-9' || true)
             [ -z "$BEHIND_CNT" ] && BEHIND_CNT=0
             if [ "$BEHIND_CNT" -gt 0 ]; then
-                ui_info_msg "Обнаружены новые изменения (коммитов: ${BEHIND_CNT}). Применение (git pull)..."
+                ui_info_msg "Обнаружены новые изменения (коммитов: ${BEHIND_CNT}). Применение (git pull --ff-only)..."
                 STASHED="no"
                 DIRTY_OUT=$(git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" status --porcelain 2>/dev/null || true)
                 if [ -n "$DIRTY_OUT" ]; then
@@ -134,19 +169,21 @@ self_update_gateway() {
                         STASHED="yes"
                     fi
                 fi
-                if git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" -c user.name="Gateway AutoUpdate" -c user.email="gateway@localhost" pull --ff-only origin "$CUR_BRANCH" 2>/dev/null || \
-                   git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" -c user.name="Gateway AutoUpdate" -c user.email="gateway@localhost" pull --no-rebase --no-edit origin "$CUR_BRANCH" 2>/dev/null; then
+                if GIT_TERMINAL_PROMPT=0 git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" -c user.name="Gateway AutoUpdate" -c user.email="gateway@localhost" pull --ff-only origin "$CUR_BRANCH" 2>/dev/null; then
                     UPDATED_REPO="yes"
                     NEW_H=$(git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" rev-parse --short HEAD 2>/dev/null || echo "HEAD")
                     ui_ok_msg "Кодовая база шлюза успешно обновлена до ${NEW_H}!"
                 else
-                    ui_warn_box "Не удалось автоматически слить изменения Git (возможен локальный конфликт)." \
-                                "Проверьте git status в каталоге ${GATEWAY_DIR}."
+                    REPO_CONFLICT="yes"
+                    ui_warn_box "Не удалось обновить код через --ff-only (история Git разошлась с origin/${CUR_BRANCH})." \
+                                "Проверьте 'git status' и 'git log' в каталоге ${GATEWAY_DIR}."
                 fi
                 if [ "$STASHED" = "yes" ]; then
                     if ! git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" stash pop >/dev/null 2>&1; then
-                        ui_warn_box "Локальные изменения сохранены в git stash, но автоматический возврат вызвал конфликт." \
-                                    "Проверьте 'git stash list' и 'git status' в каталоге ${GATEWAY_DIR}."
+                        REPO_CONFLICT="yes"
+                        git -C "${GATEWAY_DIR}" -c safe.directory="${GATEWAY_DIR}" checkout -- . >/dev/null 2>&1 || true
+                        ui_warn_box "Локальные изменения сохранены в git stash (конфликт при возврате откачен)." \
+                                    "Проверьте 'git stash list' в каталоге ${GATEWAY_DIR}."
                     fi
                 fi
             else
@@ -160,9 +197,16 @@ self_update_gateway() {
             ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gateway 2>/dev/null || true
             ln -sf "${GATEWAY_DIR}/gateway.sh" /usr/bin/gw 2>/dev/null || true
         fi
-        rm -f /tmp/gateway_update_check.cache 2>/dev/null || true
+        rm -f "$CACHE_F" 2>/dev/null || true
+        if [ "$REPO_CONFLICT" = "yes" ]; then
+            release_gateway_lock
+            trap - EXIT INT TERM HUP
+            return 1
+        fi
         if [ "$UPDATED_REPO" = "yes" ] && [ -z "${GATEWAY_SELF_UPDATE_REEXEC:-}" ]; then
             ui_info_msg "Перезапуск процесса обновления для применения нового кода скриптов..."
+            release_gateway_lock
+            trap - EXIT INT TERM HUP
             GATEWAY_SELF_UPDATE_REEXEC=1 exec /usr/bin/gw update
         fi
     else
@@ -234,7 +278,7 @@ self_update_gateway() {
     ui_box_row "• AdGuard Home:    ${AGH_VER_STR}"
     ui_box_bottom
     echo ""
+    release_gateway_lock
+    trap - EXIT INT TERM HUP
     return 0
 }
-
-# Активное сканирование всей /24 подсети LAN (прогрев ARP-таблицы за ~1.5 сек)

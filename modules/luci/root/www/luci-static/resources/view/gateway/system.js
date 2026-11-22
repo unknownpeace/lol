@@ -50,15 +50,27 @@ return view.extend({
 			E('option', { 'value': 'autoupdate' }, 'Лог ночного автообновления (04:00)')
 		]);
 		var linesSel = E('select', { 'class': 'cbi-input-select' }, [
-			E('option', { 'value': '100' }, '100 строк'),
-			E('option', { 'value': '250' }, '250 строк')
+			E('option', { 'value': '50' }, '50 строк'),
+			E('option', { 'value': '100', 'selected': 'selected' }, '100 строк'),
+			E('option', { 'value': '250' }, '250 строк'),
+			E('option', { 'value': '400' }, '400 строк')
 		]);
+		linesSel.value = '100';
 		var logPre = E('pre', { 'class': 'gw-pre' }, initialLog || '(пусто)');
+		var loadLogBtn = E('button', {
+			'class': 'btn cbi-button',
+			'click': loadLogNow
+		}, 'Обновить лог');
 
 		function loadLogNow() {
+			loadLogBtn.disabled = true;
 			logPre.textContent = 'Загрузка...';
 			return gw.api.getLogs(srcSel.value, Number(linesSel.value || 100)).then(function(r) {
 				logPre.textContent = (r && r.ok) ? (r.log || '(пусто)') : ((r && r.error) || 'Ошибка чтения лога');
+			}).catch(function(err) {
+				logPre.textContent = 'Ошибка чтения лога: ' + (err && err.message ? err.message : String(err));
+			}).finally(function() {
+				loadLogBtn.disabled = false;
 			});
 		}
 
@@ -81,12 +93,16 @@ return view.extend({
 							dom.content(updBox, E('p', { 'class': 'spinning' }, 'Связь с GitHub...'));
 							gw.api.updateCheck().then(function(r) {
 								dom.content(updBox, self.renderUpdateBox(r));
+							}).catch(function(err) {
+								dom.content(updBox, E('div', { 'class': 'alert-message warning' }, err && err.message ? err.message : String(err)));
 							}).finally(function() { btn.disabled = false; });
 						}
 					}, 'Проверить обновления в Git'),
 					E('button', {
 						'class': 'btn cbi-button cbi-button-apply',
-						'click': function() {
+						'click': function(ev) {
+							var btn = ev.currentTarget;
+							btn.disabled = true;
 							gw.runJobModal('Полное обновление шлюза (gw update)', 'update', '', '', function() {
 								gw.api.status().then(function(fresh) {
 									if (fresh && fresh.git) {
@@ -95,11 +111,13 @@ return view.extend({
 											' │ Ревизия: ', gw.badge(fresh.git.is_repo ? 'ok' : 'off', fresh.git.sha || 'Standalone')
 										]);
 									}
-									gw.api.updateCheck().then(function(u) {
+									return gw.api.updateCheck().then(function(u) {
 										dom.content(updBox, self.renderUpdateBox(u));
 									});
+								}).catch(function(err) {
+									gw.notify('warning', err && err.message ? err.message : String(err));
 								});
-							});
+							}).finally(function() { btn.disabled = false; });
 						}
 					}, 'Обновить сейчас (gw update)')
 				]),
@@ -117,10 +135,7 @@ return view.extend({
 						E('label', 'Глубина'),
 						linesSel
 					]),
-					E('button', {
-						'class': 'btn cbi-button',
-						'click': loadLogNow
-					}, 'Обновить лог')
+					loadLogBtn
 				]),
 				logPre
 			])

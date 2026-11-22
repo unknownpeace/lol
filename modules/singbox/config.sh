@@ -1,16 +1,29 @@
 #!/bin/sh
 # Генерация эталонного /etc/sing-box/config.json (Sing-Box Extended 1.14.3: Zero-Leak ИИ, Гейминг, Германия, США, .lan)
 generate_singbox_config() {
-    _PREV_CORE="${CORE_ENGINE:-}"
-    _PREV_UI="${WEB_UI:-}"
+    _OVERRIDE_CORE="${1:-}"
+    calc_hardware_limits >/dev/null 2>&1 || true
     check_github_mirror
     sync_user_domain_rulesets
     load_gateway_env || true
-    [ -n "$_PREV_CORE" ] && CORE_ENGINE="$_PREV_CORE" || true
-    [ -n "$_PREV_UI" ] && WEB_UI="$_PREV_UI" || true
+    [ -n "$_OVERRIDE_CORE" ] && CORE_ENGINE="$_OVERRIDE_CORE" || true
     [ -z "${ADMIN_PASS:-}" ] && ADMIN_PASS="admin" || true
     [ -z "${GW_IP:-}" ] && GW_IP=$(get_default_router_ip) || true
     CUR_LIP_SB=$(get_current_lan_ip)
+
+    if [ "${TOTAL_RAM_MB:-512}" -le 600 ]; then
+        SB_DNS_CACHE="2048"
+        SB_UT_INT="10m"
+        SB_UT_IDLE="15m"
+    elif [ "${TOTAL_RAM_MB:-512}" -le 1200 ]; then
+        SB_DNS_CACHE="4096"
+        SB_UT_INT="10m"
+        SB_UT_IDLE="15m"
+    else
+        SB_DNS_CACHE="8192"
+        SB_UT_INT="3m"
+        SB_UT_IDLE="30m"
+    fi
 
     PROVIDERS_JSON_ARR="[]"
     PROVIDER_TAGS_JSON="[]"
@@ -20,7 +33,7 @@ generate_singbox_config() {
         # Слот 1: Поддержка одной или нескольких HTTP(S) подписок
         if is_sub_enabled; then
             IDX=0
-            for U_ITEM in $(printf "%s\n" "$SUB_URL" | tr ' |,' '\n\n\n' | grep -E '^https?://'); do
+            for U_ITEM in $(printf "%s\n" "$SUB_URL" | tr ' |' '\n\n' | grep -E '^https?://'); do
                 IDX=$((IDX + 1))
                 if [ "$IDX" -eq 1 ]; then
                     P_TAG="custom_sub"
@@ -73,6 +86,7 @@ generate_singbox_config() {
 
     FORCE_OUTBOUND_GROUP=""
     FORCE_ROUTE_RULE=""
+    FORCE_QUIC_RULE=""
     if [ "$FORCE_IPS_ARR" != "[]" ]; then
         FORCE_OUTBOUND_GROUP=$(cat << FORCE_GRP
     {
@@ -89,6 +103,7 @@ generate_singbox_config() {
     },
 FORCE_GRP
 )
+        FORCE_QUIC_RULE="{\"source_ip_cidr\": ${FORCE_IPS_ARR}, \"network\": [\"udp\"], \"port\": [443], \"action\": \"reject\"},"
         FORCE_ROUTE_RULE="{\"source_ip_cidr\": ${FORCE_IPS_ARR}, \"outbound\": \"📺 Устройства (Full-VPN)\"},"
     fi
 
@@ -97,12 +112,45 @@ FORCE_GRP
         DNS_FINAL_TAG="dns_ru"
     fi
 
+    FORCE_DNS_RULES=""
+    if [ "$FORCE_IPS_ARR" != "[]" ] && [ "$DNS_FINAL_TAG" != "dns_ru" ]; then
+        FORCE_DNS_RULES=$(cat << FORCE_DNS_EOF
+      {
+        "source_ip_cidr": ${FORCE_IPS_ARR},
+        "query_type": [
+          "A"
+        ],
+        "server": "dns_fakeip",
+        "rewrite_ttl": 1
+      },
+      {
+        "source_ip_cidr": ${FORCE_IPS_ARR},
+        "server": "dns_proxy"
+      },
+FORCE_DNS_EOF
+)
+    fi
+
+    CATCHALL_FAKEIP_RULE=""
+    if [ "$DNS_FINAL_TAG" != "dns_ru" ]; then
+        CATCHALL_FAKEIP_RULE=$(cat << 'CA_FIP_EOF'
+      ,{
+        "query_type": [
+          "A"
+        ],
+        "server": "dns_fakeip",
+        "rewrite_ttl": 1
+      }
+CA_FIP_EOF
+)
+    fi
+
+    CUR_UI_DL_URL="$ZASHBOARD_ZIP_URL"
+    [ "$(get_active_ui)" = "metacubexd" ] && CUR_UI_DL_URL="$METACUBEXD_TAR_URL"
+
     SB_HOMELAB_LIST="$HOMELAB_LAN_DOMAINS"
     if is_letsencrypt_ssl_active 2>/dev/null && [ -n "${SSL_DOMAIN:-}" ]; then
-        SB_HOMELAB_LIST="${SB_HOMELAB_LIST} ${SSL_DOMAIN}"
-        for _le_sub in ca adguard zashboard singbox mihomo panel vaultwarden forgejo downloads ytdlp torrents torrent code; do
-            SB_HOMELAB_LIST="${SB_HOMELAB_LIST} ${_le_sub}.${SSL_DOMAIN}"
-        done
+        SB_HOMELAB_LIST="${SB_HOMELAB_LIST} $(emit_homelab_le_domains "$SSL_DOMAIN")"
     fi
     SB_HOMELAB_DOMS_ARR=$(emit_json_string_array "$SB_HOMELAB_LIST")
     SB_DDR_DOMS_ARR=$(emit_json_string_array "$DDR_BLOCK_DOMAINS")
@@ -141,7 +189,7 @@ FORCE_GRP
     "clash_api": {
       "external_controller": "0.0.0.0:9090",
       "external_ui": "${UI_DIR}",
-      "external_ui_download_url": "${GH_PROXY}${UI_ZIP_URL}",
+      "external_ui_download_url": "${GH_PROXY}${CUR_UI_DL_URL}",
       "secret": "PLACEHOLDER_SECRET",
       "default_mode": "rule"
     },
@@ -151,7 +199,8 @@ FORCE_GRP
   },
   "http_clients": [
     {
-      "tag": "default"
+      "tag": "default",
+      "detour": "DIRECT"
     }
   ],
   "dns": {
@@ -222,6 +271,9 @@ ${SB_HOMELAB_HOSTS_JSON}
       },
       {
         "domain": ${SB_HOMELAB_DOMS_ARR},
+        "query_type": [
+          "A"
+        ],
         "server": "dns_homelab"
       },
       {
@@ -252,6 +304,7 @@ ${SB_HOMELAB_HOSTS_JSON}
         ],
         "server": "dns_local"
       },
+      ${FORCE_DNS_RULES}
       {
         "domain": ${SB_BOOTSTRAP_DOMS_ARR},
         "server": "dns_bootstrap"
@@ -386,19 +439,12 @@ ${SB_HOMELAB_HOSTS_JSON}
           "google_domain"
         ],
         "server": "dns_ru"
-      },
-      {
-        "query_type": [
-          "A"
-        ],
-        "server": "dns_fakeip",
-        "rewrite_ttl": 1
-      }
+      }${CATCHALL_FAKEIP_RULE}
     ],
     "final": "${DNS_FINAL_TAG}",
     "strategy": "ipv4_only",
     "reverse_mapping": true,
-    "cache_capacity": 8192
+    "cache_capacity": ${SB_DNS_CACHE}
   },
   "inbounds": [
     {
@@ -560,9 +606,9 @@ ${SB_HOMELAB_HOSTS_JSON}
       "providers": ${PROVIDER_TAGS_JSON},
       "include": "PLACEHOLDER_AI_INC",
       "url": "https://www.gstatic.com/generate_204",
-      "interval": "3m",
+      "interval": "${SB_UT_INT}",
       "tolerance": 50,
-      "idle_timeout": "30m"
+      "idle_timeout": "${SB_UT_IDLE}"
     },
     {
       "type": "urltest",
@@ -573,9 +619,9 @@ ${SB_HOMELAB_HOSTS_JSON}
       "providers": ${PROVIDER_TAGS_JSON},
       "include": "PLACEHOLDER_GAME_INC",
       "url": "https://www.gstatic.com/generate_204",
-      "interval": "3m",
+      "interval": "${SB_UT_INT}",
       "tolerance": 25,
-      "idle_timeout": "30m"
+      "idle_timeout": "${SB_UT_IDLE}"
     },
     {
       "type": "urltest",
@@ -586,9 +632,9 @@ ${SB_HOMELAB_HOSTS_JSON}
       "providers": ${PROVIDER_TAGS_JSON},
       "include": "PLACEHOLDER_US_INC",
       "url": "https://www.gstatic.com/generate_204",
-      "interval": "3m",
+      "interval": "${SB_UT_INT}",
       "tolerance": 40,
-      "idle_timeout": "30m"
+      "idle_timeout": "${SB_UT_IDLE}"
     },
     {
       "type": "urltest",
@@ -600,9 +646,9 @@ ${SB_HOMELAB_HOSTS_JSON}
       "include": "PLACEHOLDER_DE_INC",
       "exclude": "PLACEHOLDER_DE_EXCL",
       "url": "https://www.gstatic.com/generate_204",
-      "interval": "3m",
+      "interval": "${SB_UT_INT}",
       "tolerance": 35,
-      "idle_timeout": "30m"
+      "idle_timeout": "${SB_UT_IDLE}"
     },
     {
       "type": "urltest",
@@ -615,9 +661,9 @@ ${SB_HOMELAB_HOSTS_JSON}
       "providers": ${PROVIDER_TAGS_JSON},
       "exclude": "PLACEHOLDER_AUTO_EXCL",
       "url": "https://www.gstatic.com/generate_204",
-      "interval": "3m",
+      "interval": "${SB_UT_INT}",
       "tolerance": 35,
-      "idle_timeout": "30m"
+      "idle_timeout": "${SB_UT_IDLE}"
     },
     {
       "type": "direct",
@@ -704,19 +750,27 @@ ${SB_HOMELAB_HOSTS_JSON}
         "action": "reject"
       },
       {
-        "protocol": [
-          "bittorrent"
-        ],
-        "outbound": "🧲 Торренты"
-      },
-      {
-        "rule_set": [
-          "torrent_domain"
-        ],
-        "outbound": "🧲 Торренты"
-      },
-      {
         "domain_suffix": ${SB_AI_DOMS_ARR},
+        "network": [
+          "udp"
+        ],
+        "port": [
+          443
+        ],
+        "action": "reject"
+      },
+      {
+        "domain_suffix": ${SB_MEDIA_EXTRA_DOMS_ARR},
+        "network": [
+          "udp"
+        ],
+        "port": [
+          443
+        ],
+        "action": "reject"
+      },
+      {
+        "domain_suffix": ${SB_ROBLOX_DOMS_ARR},
         "network": [
           "udp"
         ],
@@ -737,10 +791,17 @@ ${SB_HOMELAB_HOSTS_JSON}
           "cursor_domain",
           "copilot_domain",
           "youtube_domain",
+          "spotify_domain",
+          "twitch_domain",
           "meta_domain",
+          "facebook_ip",
           "discord_domain",
+          "roblox_domain",
           "tiktok_domain",
-          "ru_bundle"
+          "cloudflare_domain",
+          "cloudflare_ip",
+          "ru_bundle",
+          "refilter_ip"
         ],
         "network": [
           "udp"
@@ -750,13 +811,26 @@ ${SB_HOMELAB_HOSTS_JSON}
         ],
         "action": "reject"
       },
+      ${FORCE_QUIC_RULE}
+      ${FORCE_ROUTE_RULE}
+      {
+        "protocol": [
+          "bittorrent"
+        ],
+        "outbound": "🧲 Торренты"
+      },
+      {
+        "rule_set": [
+          "torrent_domain"
+        ],
+        "outbound": "🧲 Торренты"
+      },
       {
         "rule_set": [
           "user_proxy_domains"
         ],
         "outbound": "🛑 Обход блокировок"
       },
-      ${FORCE_ROUTE_RULE}
       {
         "domain_suffix": ${SB_AI_DOMS_ARR},
         "outbound": "🤖 Нейросети (ИИ)"
@@ -1154,169 +1228,136 @@ ${SB_HOMELAB_HOSTS_JSON}
 }
 CONFIG_EOF
 
-    # Подстановка секретов, regex-фильтров групп и сборка WARP / DIRECT-only вариантов через jq
-    if command -v jq >/dev/null 2>&1; then
-        if is_warp_enabled; then
-            if [ "$PROVIDER_TAGS_JSON" != "[]" ]; then
-                jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP}" --arg wlic "${WARP_LICENSE:-}" \
-                   --arg ai_inc "$FILTER_AI_INCLUDE" --arg de_inc "$FILTER_DE_INCLUDE" --arg de_exc "$FILTER_DE_EXCLUDE" \
-                   --arg us_inc "$FILTER_US_INCLUDE" --arg game_inc "$FILTER_GAME_INCLUDE" --arg auto_exc "$FILTER_AUTO_EXCLUDE" \
-                   --slurpfile w "$WARP_NODES_FILE" '
-                    ($w[0].masque // {
-                        "type": "masque",
-                        "tag": "☁️ WARP MASQUE (TCP/H2)",
-                        "use_http2": true,
-                        "use_l4_proxy": false,
-                        "use_ipv6": false,
-                        "profile": {
-                            "detour": "DIRECT",
-                            "id": "",
-                            "auth_token": "",
-                            "license_key": $wlic
-                        },
-                        "address": "162.159.198.2",
-                        "port": 443,
-                        "udp_timeout": "5m0s",
-                        "udp_keepalive_period": "30s",
-                        "reconnect_delay": "5s",
-                        "handshake_timeout": "10s",
-                        "congestion_controller": "bbr",
-                        "tls": {
-                            "server_name": "engage.cloudflareclient.com",
-                            "insecure": false,
-                            "fragment": true,
-                            "fragment_fallback_delay": "500ms",
-                            "record_fragment": true
-                        }
-                    }) as $msq
-                    | (($w[0].outbounds | map(.tag)) + [$msq.tag]) as $warp_tags
-                    | .experimental.clash_api.secret = $secret
-                    | (.dns.servers[] | select(.tag == "dns_local") | .server) = $gw
-                    | .endpoints = ($w[0].outbounds // [])
-                    | (.outbounds[] | select(.tag == "⚡ Авто (Самый быстрый)") | .exclude) = $auto_exc
-                    | (.outbounds[] | select(.tag == "🤖 Авто-ИИ") | .include) = $ai_inc
-                    | (.outbounds[] | select(.tag == "🇩🇪 Германия" or .tag == "🇩🇪 Авто-DE") | .include) = $de_inc
-                    | (.outbounds[] | select(.tag == "🇩🇪 Германия" or .tag == "🇩🇪 Авто-DE") | .exclude) = $de_exc
-                    | (.outbounds[] | select(.tag == "🇺🇸 США" or .tag == "🇺🇸 Авто-US") | .include) = $us_inc
-                    | (.outbounds[] | select(.tag == "🎮 Авто-Гейминг") | .include) = $game_inc
-                    | (.outbounds[] | select(.type == "selector" and .providers != null and .tag != "🇩🇪 Германия" and .tag != "🇺🇸 США") | .outbounds) += ["☁️ Amnezia WARP", $msq.tag]
-                    | ([.outbounds[] | select(.tag != "DIRECT" and .tag != "⛔ Нет рабочих нод")]) as $main
-                    | ([.outbounds[] | select(.tag == "DIRECT" or .tag == "⛔ Нет рабочих нод")]) as $tail
-                    | .outbounds = ($main + [{
-                        "type": "urltest",
-                        "tag": "☁️ Amnezia WARP",
-                        "outbounds": $warp_tags,
-                        "url": "https://cp.cloudflare.com/generate_204",
-                        "interval": "3m",
-                        "tolerance": 50,
-                        "idle_timeout": "30m"
-                    }, $msq] + $tail)
-                ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
-            else
-                jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP}" --arg wlic "${WARP_LICENSE:-}" \
-                   --slurpfile w "$WARP_NODES_FILE" '
-                    ["🤖 Авто-ИИ", "🇩🇪 Авто-DE", "🇩🇪 Германия", "🇺🇸 Авто-US", "🇺🇸 США", "🎮 Авто-Гейминг", "⛔ Нет рабочих нод"] as $drop_tags
-                    | ($w[0].masque // {
-                        "type": "masque",
-                        "tag": "☁️ WARP MASQUE (TCP/H2)",
-                        "use_http2": true,
-                        "use_l4_proxy": false,
-                        "use_ipv6": false,
-                        "profile": {
-                            "detour": "DIRECT",
-                            "id": "",
-                            "auth_token": "",
-                            "license_key": $wlic
-                        },
-                        "address": "162.159.198.2",
-                        "port": 443,
-                        "udp_timeout": "5m0s",
-                        "udp_keepalive_period": "30s",
-                        "reconnect_delay": "5s",
-                        "handshake_timeout": "10s",
-                        "congestion_controller": "bbr",
-                        "tls": {
-                            "server_name": "engage.cloudflareclient.com",
-                            "insecure": false,
-                            "fragment": true,
-                            "fragment_fallback_delay": "500ms",
-                            "record_fragment": true
-                        }
-                    }) as $msq
-                    | (($w[0].outbounds | map(.tag)) + [$msq.tag]) as $warp_tags
-                    | .experimental.clash_api.secret = $secret
-                    | (.dns.servers[] | select(.tag == "dns_local") | .server) = $gw
-                    | del(.providers)
-                    | .endpoints = ($w[0].outbounds // [])
-                    | .outbounds |= map(select(.tag as $t | ($drop_tags | index($t) | not)))
-                    | (.outbounds[] | select(.type == "urltest" and .providers != null)) |= (
-                        del(.providers, .exclude, .include)
-                        | .outbounds = $warp_tags
-                    )
-                    | (.outbounds[] | select(.type == "selector" and .providers != null)) |= (
-                        del(.providers, .exclude, .include)
-                        | .outbounds = ((.outbounds | map(select(. as $o | ($drop_tags | index($o) | not)))) + ["☁️ Amnezia WARP"] + $warp_tags)
-                    )
-                    | ([.outbounds[] | select(.tag != "DIRECT" and .tag != "⛔ Нет рабочих нод")]) as $main
-                    | ([.outbounds[] | select(.tag == "DIRECT" or .tag == "⛔ Нет рабочих нод")]) as $tail
-                    | .outbounds = ($main + [{
-                        "type": "urltest",
-                        "tag": "☁️ Amnezia WARP",
-                        "outbounds": $warp_tags,
-                        "url": "https://cp.cloudflare.com/generate_204",
-                        "interval": "3m",
-                        "tolerance": 50,
-                        "idle_timeout": "30m"
-                    }, $msq] + $tail)
-                ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
-            fi
-        elif [ "$PROVIDER_TAGS_JSON" = "[]" ]; then
-            jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP}" '
-                ["🤖 Авто-ИИ", "🇩🇪 Авто-DE", "🇩🇪 Германия", "🇺🇸 Авто-US", "🇺🇸 США", "🎮 Авто-Гейминг", "⛔ Нет рабочих нод"] as $drop_tags
-                | .experimental.clash_api.secret = $secret
-                | (.dns.servers[] | select(.tag == "dns_local") | .server) = $gw
-                | (.dns.servers[] | select(.tag == "dns_ai" or .tag == "dns_proxy") | .detour) = "DIRECT"
-                | del(.providers)
-                | .outbounds |= map(select(.tag as $t | ($drop_tags | index($t) | not)))
-                | (.outbounds[] | select(.type == "urltest" and .providers != null)) |= (
-                    del(.providers, .exclude, .include)
-                    | .outbounds = ["DIRECT"]
-                )
-                | (.outbounds[] | select(.providers != null)) |= (
-                    del(.providers, .exclude, .include)
-                    | .outbounds = (
-                        (.outbounds // [] | map(select(. as $o | ($drop_tags | index($o) | not))))
-                        | if length == 0 then ["DIRECT"] else . end
-                    )
-                )
-            ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
-        else
-            jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP}" \
-               --arg ai_inc "$FILTER_AI_INCLUDE" --arg de_inc "$FILTER_DE_INCLUDE" --arg de_exc "$FILTER_DE_EXCLUDE" \
-               --arg us_inc "$FILTER_US_INCLUDE" --arg game_inc "$FILTER_GAME_INCLUDE" --arg auto_exc "$FILTER_AUTO_EXCLUDE" '
-                .experimental.clash_api.secret = $secret
-                | (.dns.servers[] | select(.tag == "dns_local") | .server) = $gw
-                | (.outbounds[] | select(.tag == "⚡ Авто (Самый быстрый)") | .exclude) = $auto_exc
-                | (.outbounds[] | select(.tag == "🤖 Авто-ИИ") | .include) = $ai_inc
-                | (.outbounds[] | select(.tag == "🇩🇪 Германия" or .tag == "🇩🇪 Авто-DE") | .include) = $de_inc
-                | (.outbounds[] | select(.tag == "🇩🇪 Германия" or .tag == "🇩🇪 Авто-DE") | .exclude) = $de_exc
-                | (.outbounds[] | select(.tag == "🇺🇸 США" or .tag == "🇺🇸 Авто-US") | .include) = $us_inc
-                | (.outbounds[] | select(.tag == "🎮 Авто-Гейминг") | .include) = $game_inc
-            ' "${SB_CONF}.tmp" > "${SB_CONF}.final.$$"
-        fi
+    # Подстановка секретов, regex-фильтров групп и сборка WARP / DIRECT-only вариантов через jq (fail-closed)
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "${C_RED}[X] Ошибка: Утилита jq не найдена — генерация ${SB_CONF} отменена!${C_RES}" >&2
         rm -f "${SB_CONF}.tmp"
-        if [ -s "${SB_CONF}.final.$$" ]; then
-            chmod 600 "${SB_CONF}.final.$$" 2>/dev/null || true
-            mv -f "${SB_CONF}.final.$$" "$SB_CONF"
-        else
-            rm -f "${SB_CONF}.final.$$"
-            [ -f "${SB_CONF}.bak" ] && cp -f "${SB_CONF}.bak" "$SB_CONF" || true
-        fi
-    else
-        chmod 600 "${SB_CONF}.tmp" 2>/dev/null || true
-        mv -f "${SB_CONF}.tmp" "$SB_CONF"
+        [ -f "${SB_CONF}.bak" ] && cp -f "${SB_CONF}.bak" "$SB_CONF" 2>/dev/null || true
+        return 1
     fi
-    chmod 600 "$SB_CONF" 2>/dev/null || true
-    save_gateway_env
+
+    _jq_ok=0
+    _jq_filters='(.outbounds[] | select(.tag == "⚡ Авто (Самый быстрый)") | .exclude) = $auto_exc
+        | (.outbounds[] | select(.tag == "🤖 Авто-ИИ") | .include) = $ai_inc
+        | (.outbounds[] | select(.tag == "🇩🇪 Германия" or .tag == "🇩🇪 Авто-DE") | .include) = $de_inc
+        | (.outbounds[] | select(.tag == "🇩🇪 Германия" or .tag == "🇩🇪 Авто-DE") | .exclude) = $de_exc
+        | (.outbounds[] | select(.tag == "🇺🇸 США" or .tag == "🇺🇸 Авто-US") | .include) = $us_inc
+        | (.outbounds[] | select(.tag == "🎮 Авто-Гейминг") | .include) = $game_inc'
+    _jq_drop='["🤖 Авто-ИИ", "🇩🇪 Авто-DE", "🇩🇪 Германия", "🇺🇸 Авто-US", "🇺🇸 США", "🎮 Авто-Гейминг", "⛔ Нет рабочих нод"] as $drop_tags'
+
+    if is_warp_enabled; then
+        _jq_warp_init='($w[0].masque // {
+            "type": "masque",
+            "tag": "☁️ WARP MASQUE (TCP/H2)",
+            "use_http2": true,
+            "use_l4_proxy": false,
+            "use_ipv6": false,
+            "profile": {
+                "detour": "DIRECT",
+                "id": "",
+                "auth_token": "",
+                "license_key": $wlic
+            },
+            "address": "162.159.198.2",
+            "port": 443,
+            "udp_timeout": "5m0s",
+            "udp_keepalive_period": "30s",
+            "reconnect_delay": "5s",
+            "handshake_timeout": "10s",
+            "congestion_controller": "bbr",
+            "tls": {
+                "server_name": "engage.cloudflareclient.com",
+                "insecure": false,
+                "fragment": true,
+                "fragment_fallback_delay": "500ms",
+                "record_fragment": true
+            }
+        }) as $msq
+        | ([($w[0].outbounds // [])[] | select((.private_key // "") != "")]) as $valid_wg
+        | (($valid_wg | map(.tag)) + [$msq.tag]) as $warp_tags
+        | .experimental.clash_api.secret = $secret
+        | (.dns.servers[] | select(.tag == "dns_local") | .server) = $gw
+        | .endpoints = $valid_wg'
+        _jq_warp_tail='([.outbounds[] | select(.tag != "DIRECT" and .tag != "⛔ Нет рабочих нод")]) as $main
+        | ([.outbounds[] | select(.tag == "DIRECT" or .tag == "⛔ Нет рабочих нод")]) as $tail
+        | .outbounds = ($main + [{
+            "type": "urltest",
+            "tag": "☁️ Amnezia WARP",
+            "outbounds": $warp_tags,
+            "url": "https://cp.cloudflare.com/generate_204",
+            "interval": $ut_int,
+            "tolerance": 50,
+            "idle_timeout": $ut_idle
+        }, $msq] + $tail)'
+
+        if [ "$PROVIDER_TAGS_JSON" != "[]" ]; then
+            jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP}" --arg wlic "${WARP_LICENSE:-}" --arg ut_int "$SB_UT_INT" --arg ut_idle "$SB_UT_IDLE" \
+               --arg ai_inc "$FILTER_AI_INCLUDE" --arg de_inc "$FILTER_DE_INCLUDE" --arg de_exc "$FILTER_DE_EXCLUDE" \
+               --arg us_inc "$FILTER_US_INCLUDE" --arg game_inc "$FILTER_GAME_INCLUDE" --arg auto_exc "$FILTER_AUTO_EXCLUDE" \
+               --slurpfile w "$WARP_NODES_FILE" "
+                ${_jq_warp_init}
+                | ${_jq_filters}
+                | (.outbounds[] | select(.type == \"selector\" and .providers != null and .tag != \"🇩🇪 Германия\" and .tag != \"🇺🇸 США\") | .outbounds) += [\"☁️ Amnezia WARP\", \$msq.tag]
+                | ${_jq_warp_tail}
+            " "${SB_CONF}.tmp" > "${SB_CONF}.final.$$" 2>/dev/null && _jq_ok=1 || true
+        else
+            jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP}" --arg wlic "${WARP_LICENSE:-}" --arg ut_int "$SB_UT_INT" --arg ut_idle "$SB_UT_IDLE" \
+               --slurpfile w "$WARP_NODES_FILE" "
+                ${_jq_drop}
+                | ${_jq_warp_init}
+                | del(.providers)
+                | .outbounds |= map(select(.tag as \$t | (\$drop_tags | index(\$t) | not)))
+                | (.outbounds[] | select(.type == \"urltest\" and .providers != null)) |= (
+                    del(.providers, .exclude, .include)
+                    | .outbounds = \$warp_tags
+                )
+                | (.outbounds[] | select(.type == \"selector\" and .providers != null)) |= (
+                    del(.providers, .exclude, .include)
+                    | .outbounds = ((.outbounds | map(select(. as \$o | (\$drop_tags | index(\$o) | not)))) + [\"☁️ Amnezia WARP\"] + \$warp_tags)
+                )
+                | ${_jq_warp_tail}
+            " "${SB_CONF}.tmp" > "${SB_CONF}.final.$$" 2>/dev/null && _jq_ok=1 || true
+        fi
+    elif [ "$PROVIDER_TAGS_JSON" = "[]" ]; then
+        jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP}" "
+            ${_jq_drop}
+            | .experimental.clash_api.secret = \$secret
+            | (.dns.servers[] | select(.tag == \"dns_local\") | .server) = \$gw
+            | (.dns.servers[] | select(.tag == \"dns_ai\" or .tag == \"dns_proxy\") | .detour) = \"DIRECT\"
+            | del(.providers)
+            | .outbounds |= map(select(.tag as \$t | (\$drop_tags | index(\$t) | not)))
+            | (.outbounds[] | select(.type == \"urltest\" and .providers != null)) |= (
+                del(.providers, .exclude, .include)
+                | .outbounds = [\"DIRECT\"]
+            )
+            | (.outbounds[] | select(.providers != null)) |= (
+                del(.providers, .exclude, .include)
+                | .outbounds = (
+                    (.outbounds // [] | map(select(. as \$o | (\$drop_tags | index(\$o) | not))))
+                    | if length == 0 then [\"DIRECT\"] else . end
+                )
+            )
+        " "${SB_CONF}.tmp" > "${SB_CONF}.final.$$" 2>/dev/null && _jq_ok=1 || true
+    else
+        jq --arg secret "$ADMIN_PASS" --arg gw "${GW_IP}" \
+           --arg ai_inc "$FILTER_AI_INCLUDE" --arg de_inc "$FILTER_DE_INCLUDE" --arg de_exc "$FILTER_DE_EXCLUDE" \
+           --arg us_inc "$FILTER_US_INCLUDE" --arg game_inc "$FILTER_GAME_INCLUDE" --arg auto_exc "$FILTER_AUTO_EXCLUDE" "
+            .experimental.clash_api.secret = \$secret
+            | (.dns.servers[] | select(.tag == \"dns_local\") | .server) = \$gw
+            | ${_jq_filters}
+        " "${SB_CONF}.tmp" > "${SB_CONF}.final.$$" 2>/dev/null && _jq_ok=1 || true
+    fi
+    rm -f "${SB_CONF}.tmp"
+    if [ "$_jq_ok" -eq 1 ] && [ -s "${SB_CONF}.final.$$" ]; then
+        chmod 600 "${SB_CONF}.final.$$" 2>/dev/null || true
+        mv -f "${SB_CONF}.final.$$" "$SB_CONF"
+        chmod 600 "$SB_CONF" 2>/dev/null || true
+    else
+        rm -f "${SB_CONF}.final.$$"
+        [ -f "${SB_CONF}.bak" ] && cp -f "${SB_CONF}.bak" "$SB_CONF" 2>/dev/null || true
+        chmod 600 "$SB_CONF" 2>/dev/null || true
+        return 1
+    fi
+    [ -f "$SB_ENV" ] || save_gateway_env
     return 0
 }

@@ -53,10 +53,12 @@ return view.extend({
 			return gw.api.status().then(function(fresh) {
 				if (fresh && fresh.ok)
 					self.renderBody(host, fresh);
+			}).catch(function(err) {
+				gw.notify('danger', err && err.message ? err.message : String(err));
 			});
 		}
 
-		var subIn = E('input', { 'type': 'text', 'class': 'cbi-input-text', 'value': px.sub_urls || '', 'placeholder': 'https://...' });
+		var subIn = E('textarea', { 'class': 'cbi-input-textarea', 'rows': '3', 'placeholder': 'https://... (по одной или через пробел)' }, px.sub_urls || '');
 		var ruChk = E('input', { 'type': 'checkbox' });
 		ruChk.checked = !!px.allow_ru;
 		var uriIn = E('input', { 'type': 'text', 'class': 'cbi-input-text', 'placeholder': 'vless://..., hy2://..., trojan://...' });
@@ -79,14 +81,18 @@ return view.extend({
 				E('td', { 'class': 'td' }, n.tag || '—'),
 				E('td', { 'class': 'td' }, E('button', {
 					'class': 'btn cbi-button cbi-button-negative',
-					'click': function() {
+					'click': function(ev) {
+						var btn = ev.currentTarget;
+						btn.disabled = true;
 						gw.api.nodeDelete(n.index).then(function(r) {
 							if (r && r.ok) {
 								gw.runJobModal('Пересборка конфигурации', 'apply_core', '', '', reload);
 							} else {
 								gw.notify('danger', (r && r.error) || 'Ошибка удаления ключа');
 							}
-						});
+						}).catch(function(err) {
+							gw.notify('danger', err && err.message ? err.message : String(err));
+						}).finally(function() { btn.disabled = false; });
 					}
 				}, 'Удалить'))
 			]);
@@ -113,7 +119,9 @@ return view.extend({
 				if (!locked) {
 					chipChildren.push(E('button', {
 						'title': 'Удалить',
-						'click': function() {
+						'click': function(ev) {
+							var btn = ev.currentTarget;
+							btn.disabled = true;
 							gw.api.domainRule('del', listName, d).then(function(r) {
 								if (r && r.ok) {
 									gw.notify('info', 'Удалено: ' + r.domain + ' (применяется)');
@@ -121,7 +129,9 @@ return view.extend({
 								} else {
 									gw.notify('danger', (r && r.error) || 'Ошибка удаления');
 								}
-							});
+							}).catch(function(err) {
+								gw.notify('danger', err && err.message ? err.message : String(err));
+							}).finally(function() { btn.disabled = false; });
 						}
 					}, '×'));
 				}
@@ -138,13 +148,19 @@ return view.extend({
 				return E('button', {
 					'class': 'btn cbi-button ' + cls,
 					'disabled': dev.mode === targetMode ? true : null,
-					'click': function() {
+					'click': function(ev) {
+						var btn = ev.currentTarget;
+						btn.disabled = true;
 						gw.api.deviceRule(targetMode, dev.ip).then(function(r) {
 							if (r && r.ok) {
 								gw.runJobModal('Применение режима для ' + dev.ip, 'apply_core', '', '', reload);
 							} else {
 								gw.notify('danger', (r && r.error) || 'Ошибка');
+								btn.disabled = false;
 							}
+						}).catch(function(err) {
+							gw.notify('danger', err && err.message ? err.message : String(err));
+							btn.disabled = false;
 						});
 					}
 				}, label);
@@ -163,6 +179,30 @@ return view.extend({
 			]);
 		});
 
+		function makeDomainAddBtn(label, listName, cls, jobTitle) {
+			return E('button', {
+				'class': 'btn cbi-button ' + cls,
+				'click': function(ev) {
+					var dVal = domRuleIn.value.trim();
+					if (!dVal) {
+						gw.notify('warning', 'Введите домен');
+						return;
+					}
+					var btn = ev.currentTarget;
+					btn.disabled = true;
+					gw.api.domainRule('add', listName, dVal).then(function(r) {
+						if (r && r.ok) {
+							gw.runJobModal(jobTitle, 'apply_core', '', '', reload);
+						} else {
+							gw.notify('danger', (r && r.error) || 'Ошибка');
+						}
+					}).catch(function(err) {
+						gw.notify('danger', err && err.message ? err.message : String(err));
+					}).finally(function() { btn.disabled = false; });
+				}
+			}, label);
+		}
+
 		dom.content(host, [
 			E('div', { 'class': 'cbi-section' }, [
 				E('h3', 'Слот 1: HTTP-подписки'),
@@ -176,14 +216,18 @@ return view.extend({
 					]),
 					E('button', {
 						'class': 'btn cbi-button cbi-button-apply',
-						'click': function() {
+						'click': function(ev) {
+							var btn = ev.currentTarget;
+							btn.disabled = true;
 							gw.api.setSubscription(subIn.value.trim(), ruChk.checked ? 'yes' : 'no').then(function(r) {
 								if (r && r.ok) {
 									gw.runJobModal('Применение подписки', 'apply_core', '', '', reload);
 								} else {
 									gw.notify('danger', (r && r.error) || 'Ошибка сохранения подписки');
 								}
-							});
+							}).catch(function(err) {
+								gw.notify('danger', err && err.message ? err.message : String(err));
+							}).finally(function() { btn.disabled = false; });
 						}
 					}, 'Сохранить и применить')
 				])
@@ -199,14 +243,23 @@ return view.extend({
 						]),
 						E('button', {
 							'class': 'btn cbi-button cbi-button-positive',
-							'click': function() {
-								gw.api.nodeAdd(uriIn.value.trim()).then(function(r) {
+							'click': function(ev) {
+								var uVal = uriIn.value.trim();
+								if (!uVal) {
+									gw.notify('warning', 'Введите URI-ключ');
+									return;
+								}
+								var btn = ev.currentTarget;
+								btn.disabled = true;
+								gw.api.nodeAdd(uVal).then(function(r) {
 									if (r && r.ok) {
 										gw.runJobModal('Добавление ключа URI', 'apply_core', '', '', reload);
 									} else {
 										gw.notify('danger', (r && r.error) || 'Некорректный URI');
 									}
-								});
+								}).catch(function(err) {
+									gw.notify('danger', err && err.message ? err.message : String(err));
+								}).finally(function() { btn.disabled = false; });
 							}
 						}, 'Добавить')
 					]),
@@ -255,11 +308,16 @@ return view.extend({
 						'click': function(ev) {
 							var btn = ev.currentTarget;
 							var dVal = domInspectIn.value.trim();
-							if (!dVal) return;
+							if (!dVal) {
+								gw.notify('warning', 'Введите домен для проверки');
+								return;
+							}
 							btn.disabled = true;
 							dom.content(inspectBox, E('p', { 'class': 'spinning' }, 'Проверяю DNS и HTTPS...'));
 							gw.api.domainInspect(dVal).then(function(r) {
 								dom.content(inspectBox, self.renderInspectResult(r));
+							}).catch(function(err) {
+								dom.content(inspectBox, E('div', { 'class': 'alert-message warning' }, err && err.message ? err.message : String(err)));
 							}).finally(function() { btn.disabled = false; });
 						}
 					}, 'Проверить маршрут')
@@ -274,30 +332,8 @@ return view.extend({
 						E('label', 'Домен для добавления в список'),
 						domRuleIn
 					]),
-					E('button', {
-						'class': 'btn cbi-button cbi-button-positive',
-						'click': function() {
-							gw.api.domainRule('add', 'proxy', domRuleIn.value.trim()).then(function(r) {
-								if (r && r.ok) {
-									gw.runJobModal('Перенос домена В ПРОКСИ', 'apply_core', '', '', reload);
-								} else {
-									gw.notify('danger', (r && r.error) || 'Ошибка');
-								}
-							});
-						}
-					}, 'В прокси'),
-					E('button', {
-						'class': 'btn cbi-button cbi-button-neutral',
-						'click': function() {
-							gw.api.domainRule('add', 'direct', domRuleIn.value.trim()).then(function(r) {
-								if (r && r.ok) {
-									gw.runJobModal('Перенос домена НАПРЯМУЮ', 'apply_core', '', '', reload);
-								} else {
-									gw.notify('danger', (r && r.error) || 'Ошибка');
-								}
-							});
-						}
-					}, 'Напрямую (DIRECT)')
+					makeDomainAddBtn('В прокси', 'proxy', 'cbi-button-positive', 'Перенос домена В ПРОКСИ'),
+					makeDomainAddBtn('Напрямую (DIRECT)', 'direct', 'cbi-button-neutral', 'Перенос домена НАПРЯМУЮ')
 				]),
 				E('div', { 'class': 'gw-two-col' }, [
 					E('div', { 'class': 'gw-card' }, [
@@ -324,14 +360,23 @@ return view.extend({
 					]),
 					E('button', {
 						'class': 'btn cbi-button cbi-button-apply',
-						'click': function() {
-							gw.api.deviceRule(manualModeSel.value, manualIpIn.value.trim()).then(function(r) {
+						'click': function(ev) {
+							var ipVal = manualIpIn.value.trim();
+							if (!ipVal) {
+								gw.notify('warning', 'Введите IPv4-адрес устройства');
+								return;
+							}
+							var btn = ev.currentTarget;
+							btn.disabled = true;
+							gw.api.deviceRule(manualModeSel.value, ipVal).then(function(r) {
 								if (r && r.ok) {
 									gw.runJobModal('Обновление правил устройств', 'apply_core', '', '', reload);
 								} else {
 									gw.notify('danger', (r && r.error) || 'Некорректный IPv4');
 								}
-							});
+							}).catch(function(err) {
+								gw.notify('danger', err && err.message ? err.message : String(err));
+							}).finally(function() { btn.disabled = false; });
 						}
 					}, 'Применить')
 				]),

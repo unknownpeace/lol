@@ -1,7 +1,7 @@
 #!/bin/sh
 heal_default_gateway_route() {
     LAN_IF_WD=$(get_lan_ifname)
-    if [ -n "${GW_IP:-}" ] && ! ip -4 route show default 2>/dev/null | grep -q "via ${GW_IP}"; then
+    if [ -n "${GW_IP:-}" ] && ! ip -4 route show default 2>/dev/null | grep -Eq "via ${GW_IP}([[:space:]]|$)"; then
         ip link set "$LAN_IF_WD" up 2>/dev/null || true
         ip -4 route replace default via "$GW_IP" dev "$LAN_IF_WD" 2>/dev/null || true
         conntrack -F >/dev/null 2>&1 || true
@@ -12,15 +12,27 @@ heal_default_gateway_route() {
 
 run_gateway_doctor() {
     set +e
+    _doc_wait=0
+    while ! acquire_gateway_lock "doctor"; do
+        sleep 1
+        _doc_wait=$((_doc_wait + 1))
+        if [ "$_doc_wait" -ge 10 ]; then
+            echo "${C_YEL}[!] Другая операция шлюза (watchdog/autoupdate) сейчас выполняется; повторите gateway doctor через несколько секунд.${C_RES}"
+            return 1
+        fi
+    done
+    trap 'release_gateway_lock' EXIT INT TERM HUP
     detect_os
     load_gateway_env
     ui_banner "GATEWAY DOCTOR // АВТОМАТИЧЕСКАЯ ДИАГНОСТИКА И ПОЧИНКА"
     ui_box_top "🩺 ПРОТОКОЛ САМОИСЦЕЛЕНИЯ СИСТЕМЫ (DOCTOR 2.0)"
 
     ui_step_progress 1 6 "Проверка целостности конфигов, PID-блокировок и баз SQLite после сбоя питания..."
-    rm -rf "$GATEWAY_LOCK_DIR" 2>/dev/null || true
     check_and_recover_power_loss_state
-    rm -f "$POWER_LOSS_FLAG" 2>/dev/null || true
+    if [ -f "$POWER_LOSS_FLAG" ]; then
+        _pl_ts=$(cat "$POWER_LOSS_FLAG" 2>/dev/null || echo "недавно")
+        ui_info_msg "Обнаружен флаг аварийного восстановления питания (${_pl_ts}) — проверка выполнена."
+    fi
 
     ui_step_progress 2 6 "Подгрузка ядерных модулей (tun, tcp_bbr, nftables) и настройка sysctl..."
     ensure_alpine_modules
@@ -77,9 +89,16 @@ nameserver 77.88.8.8"
         fi
         check_and_heal_lxc_doctor
     fi
-    backup_gateway_state
-    ui_ok_msg "Авто-починка (gateway doctor) успешно завершена!"
+    if core_check_config && is_core_running; then
+        backup_gateway_state
+        rm -f "$POWER_LOSS_FLAG" 2>/dev/null || true
+        ui_ok_msg "Авто-починка (gateway doctor) успешно завершена!"
+    else
+        ui_warn_msg "Ядро $(get_active_core_name) не удалось запустить — снимок .last_good_state не перезаписан."
+    fi
     ui_box_bottom
+    release_gateway_lock
+    trap - EXIT INT TERM HUP
     run_self_test
     return 0
 }
@@ -122,7 +141,7 @@ run_watchdog() {
         RECOVERED_MSG="${RECOVERED_MSG}
 ⚡ [Авто-Доктор] На сервере ($(get_current_lan_ip)) перезапущен туннель $(get_active_core_name)."
     elif is_sub_enabled && command -v jq >/dev/null 2>&1; then
-        PROV_JSON=$(curl -fsS --connect-timeout 2 -m 3 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/providers/proxies" 2>/dev/null || true)
+        PROV_JSON=$(clash_api_curl -fsS --connect-timeout 2 -m 3 "http://127.0.0.1:9090/providers/proxies" 2>/dev/null || true)
         if [ -n "$PROV_JSON" ]; then
             EMPTY_SUB=$(printf "%s" "$PROV_JSON" | jq -r '[.providers // {} | to_entries[] | select((.value.vehicleType == "Remote" or .value.vehicleType == "HTTP") and ((.value.proxies // []) | length == 0))] | length' 2>/dev/null || echo "0")
             if [ "${EMPTY_SUB:-0}" -gt 0 ]; then
@@ -156,6 +175,8 @@ run_watchdog() {
             C_SVC=$(get_module_field "$CORE_HL" 3)
             if [ -n "$C_SVC" ] && [ -x "/etc/init.d/${C_SVC}" ] && ! rc-service "$C_SVC" status >/dev/null 2>&1; then
                 rc-service "$C_SVC" restart >/dev/null 2>&1 || true
+                RECOVERED_MSG="${RECOVERED_MSG}
+⚡ [Авто-Доктор Homelab] Перезапущен базовый сервис ${CORE_HL} (${C_SVC})."
             fi
         fi
     done
@@ -173,7 +194,9 @@ run_watchdog() {
             [ -f "$STORAGE_ALERT_CACHE" ] && LAST_ALERT_TS=$(cat "$STORAGE_ALERT_CACHE" 2>/dev/null | tr -d ' \t\r\n' || echo "0")
             case "$LAST_ALERT_TS" in ''|*[!0-9]*) LAST_ALERT_TS=0 ;; esac
             if [ $((NOW_TS - LAST_ALERT_TS)) -ge 3600 ]; then
+                ensure_gateway_runtime_dir >/dev/null 2>&1 || true
                 echo "$NOW_TS" > "$STORAGE_ALERT_CACHE" 2>/dev/null || true
+                chmod 600 "$STORAGE_ALERT_CACHE" 2>/dev/null || true
                 send_telegram_msg "⚡ Сервер ($(get_current_lan_ip)) перезагрузился после сбоя питания. Сетевой шлюз ($(get_active_core_name) + AdGuard) работает, но внешний диск (${STORAGE_ROOT}) ожидает подключения или разблокировки (выполните: gateway unlock)" >/dev/null 2>&1 || true
             fi
             if [ -n "$RECOVERED_MSG" ]; then
@@ -218,7 +241,10 @@ run_autoupdate() {
     while ! acquire_gateway_lock "autoupdate"; do
         sleep 1
         WAIT_LCK=$((WAIT_LCK + 1))
-        [ "$WAIT_LCK" -ge 15 ] && break
+        if [ "$WAIT_LCK" -ge 15 ]; then
+            echo "=== [$(date '+%Y-%m-%d %H:%M:%S')] Пропуск автообновления: не удалось получить блокировку ${GATEWAY_LOCK_DIR} ==="
+            return 1
+        fi
     done
     trap 'release_gateway_lock' EXIT INT TERM HUP
     detect_os
@@ -239,12 +265,15 @@ run_autoupdate() {
     return 0
 }
 
-# Получение последнего тега релиза с GitHub
+# Получение и строгая валидация последнего тега релиза с GitHub
+_is_valid_github_tag() {
+    printf "%s" "${1:-}" | grep -Eq '^v?[0-9A-Za-z._-]+$'
+}
+
 fetch_latest_github_tag() {
     REPO="$1"
     TAG=""
-    RAW_JSON=$(curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || \
-               curl -fsSL --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
+    RAW_JSON=$(gw_curl -fsSL --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null || true)
     if [ -n "$RAW_JSON" ]; then
         if command -v jq >/dev/null 2>&1; then
             TAG=$(printf "%s" "$RAW_JSON" | jq -r '.tag_name // empty' 2>/dev/null || true)
@@ -253,22 +282,25 @@ fetch_latest_github_tag() {
             TAG=$(printf "%s" "$RAW_JSON" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 | tr -d ' \t\r\n' || true)
         fi
     fi
-    case "$TAG" in *[\/:]*|"") TAG="" ;; esac
+    _is_valid_github_tag "$TAG" || TAG=""
     if [ -z "$TAG" ]; then
-        TAG=$(curl -fsSLI --curves X25519:P-256 --connect-timeout 3 -m 5 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d '\r\n' || true)
+        TAG=$(gw_curl -fsSLI --connect-timeout 3 -m 5 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null | awk -F'/' '{print $NF}' | tr -d '\r\n' || true)
         [ "$TAG" = "latest" ] && TAG="" || true
-        case "$TAG" in *[\/:]*|"") TAG="" ;; esac
+        _is_valid_github_tag "$TAG" || TAG=""
     fi
     printf "%s" "$TAG"
     return 0
 }
 
-# Мгновенное чтение кэша версий из /tmp (чтобы меню открывалось за 0.01 сек без паузы!)
+# Безопасное чтение кэша версий из /run/gateway без dot-sourcing (0.01 сек)
 refresh_remote_versions() {
     FORCE_FETCH="${1:-no}"
     if [ "$FORCE_FETCH" != "yes" ] && [ -f "$VER_CACHE_FILE" ]; then
-        # shellcheck disable=SC1090
-        . "$VER_CACHE_FILE" 2>/dev/null || true
+        parse_env_file_safely "$VER_CACHE_FILE"
+        _is_valid_github_tag "${LATEST_SB_TAG:-}" || LATEST_SB_TAG=""
+        _is_valid_github_tag "${LATEST_MIHOMO_TAG:-}" || LATEST_MIHOMO_TAG=""
+        _is_valid_github_tag "${LATEST_AGH_TAG:-}" || LATEST_AGH_TAG=""
+        _is_valid_github_tag "${LATEST_UI_TAG:-}" || LATEST_UI_TAG=""
         return 0
     fi
 
@@ -290,7 +322,8 @@ refresh_remote_versions() {
         fi
     fi
 
-    cat << VC_EOF > "$VER_CACHE_FILE" 2>/dev/null || true
+    ensure_gateway_runtime_dir >/dev/null 2>&1 || true
+    atomic_write_file "$VER_CACHE_FILE" 0600 "root:root" << VC_EOF 2>/dev/null || true
 LATEST_SB_TAG='${LATEST_SB_TAG}'
 LATEST_MIHOMO_TAG='${LATEST_MIHOMO_TAG}'
 LATEST_AGH_TAG='${LATEST_AGH_TAG}'
@@ -307,7 +340,6 @@ print_gateway_header() {
     LAN_IF_NOW=$(get_lan_ifname)
 
     ACT_C=$(get_active_core)
-    ACT_CN=$(get_active_core_name)
     ACT_CTAG=$([ "$ACT_C" = "mihomo" ] && echo "MIHOMO" || echo "SING-BOX")
     LATEST_CORE_T=$([ "$ACT_C" = "mihomo" ] && echo "${LATEST_MIHOMO_TAG:-}" || echo "${LATEST_SB_TAG:-}")
 
@@ -358,7 +390,7 @@ print_gateway_header() {
         P_INFO="подписок: ${SUB_CNT} шт. | ключей URI: ${MY_CNT}"
     elif [ "$SUB_CNT" -eq 1 ]; then
         P_BADGE=$(ui_badge "info" "ПОДПИСКА HTTP")
-        P_INFO="${SUB_URL}"
+        P_INFO=$(mask_sub_url "$SUB_URL")
     elif [ "$MY_CNT" -gt 0 ]; then
         P_BADGE=$(ui_badge "info" "КЛЮЧИ URI: ${MY_CNT}")
         P_INFO="активно в my_nodes.yaml: ${MY_CNT} шт."
@@ -386,7 +418,7 @@ print_gateway_header() {
 
     if [ -f "${UI_DIR}/index.html" ]; then
         UI_VER=""
-        [ -f "$UI_VER_FILE" ] && UI_VER=$(cat "$UI_VER_FILE" 2>/dev/null | tr -d ' \t\r\n') || true
+        [ -f "$UI_VER_FILE" ] && UI_VER=$(tr -d ' \t\r\n' < "$UI_VER_FILE" 2>/dev/null || true)
         [ -z "$UI_VER" ] && UI_VER="установлена"
         ACT_UIN=$(get_active_ui_name | tr 'a-z' 'A-Z')
         UI_BADGE=$(ui_badge "on" "$ACT_UIN")
@@ -418,31 +450,17 @@ print_gateway_header() {
     RAM_BAR=$(ui_progress_bar "$RAM_PCT" 10)
 
     if is_openwrt; then
-        DISK_PCT=$(get_disk_usage_pct "/")
-        DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
-        DISK_FREE_TXT=$(df -Ph / 2>/dev/null | awk 'NR==2 {print $4 " своб. из " $2}' || true)
-        [ -z "$DISK_FREE_TXT" ] && DISK_FREE_TXT="н/д"
-
-        ui_box_top "⚡ ПРИБОРНАЯ ПАНЕЛЬ ШЛЮЗА (${OS_NAME})"
-        ui_box_row "Сеть LAN:     ${C_BLD}${LAN_IF_NOW}: ${LAN_IP_NOW}${C_RES} ▸ Роутер: ${C_CYN}${GW_IP}${C_RES} │ DHCP (AGH): ${DHCP_TXT}"
-        ui_box_row "Загрузка ОЗУ: ${RAM_BAR} (${RAM_USED}/${TOTAL_RAM_MB} МБ, лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
-        ui_box_row "Система (/):  ${DISK_BAR} (${DISK_FREE_TXT}) ▸ ${C_CYN}OpenWrt Overlay${C_RES}"
-        ui_box_sep "СТАТУС ЯДЕР И СЛУЖБ"
-        ui_box_row "Ядро шлюза:   ${S_BADGE} ${S_VER_INFO} │ Веб-панель: ${UI_BADGE} ${UI_VER_INFO}"
-        ui_box_row "AdGuard Home: ${A_BADGE} ${A_VER_INFO} (DNS :53 + *.lan Rewrites)"
-        ui_box_row "Основной пул: ${P_BADGE} ${P_INFO}"
-        ui_box_row "Amnezia WARP: ${W_BADGE} ${W_INFO}"
-        ui_box_row "Защита сети:  ${KS_BADGE} ${KS_INFO}"
-        ui_box_row "Автономность: ${AU_BADGE} │ Watchdog: ${WD_TXT} │ Telegram: ${TG_TXT}"
+        DISK_TARGET_D="/"
+        _hdr_title="⚡ ПРИБОРНАЯ ПАНЕЛЬ ШЛЮЗА (${OS_NAME})"
+        _disk_lbl="Система (/): "
+        _disk_tag="OpenWrt Overlay"
+        _hl_suffix=""
     else
-        DISK_PCT=$(get_disk_usage_pct "$STORAGE_ROOT")
-        DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
         DISK_TARGET_D="${STORAGE_ROOT:-/}"
         [ -d "$DISK_TARGET_D" ] || DISK_TARGET_D="/"
-        DISK_FREE_TXT=$(df -Ph "$DISK_TARGET_D" 2>/dev/null | awk 'NR==2 {print $4 " своб. из " $2}' || true)
-        [ -z "$DISK_FREE_TXT" ] && DISK_FREE_TXT="н/д"
-        DISK_BADGE=$(get_storage_disk_badge)
-
+        _hdr_title="⚡ ПРИБОРНАЯ ПАНЕЛЬ ТЕЛЕМЕТРИИ ШЛЮЗА И HOMELAB (${OS_NAME})"
+        _disk_lbl="Накопитель:  "
+        _disk_tag=$(get_storage_disk_badge)
         HL_ACT_CNT=$(count_enabled_homelab_modules)
         HL_TOT_CNT=$(awk -F'|' '$1 !~ /^#/ && NF >= 2 {c++} END {print c+0}' "$HOMELAB_STATE" 2>/dev/null || echo "7")
         [ "${HL_TOT_CNT:-0}" -le 0 ] && HL_TOT_CNT=7
@@ -451,19 +469,24 @@ print_gateway_header() {
         else
             HL_BADGE=$(ui_badge "off" "HOMELAB: 0/${HL_TOT_CNT}")
         fi
-
-        ui_box_top "⚡ ПРИБОРНАЯ ПАНЕЛЬ ТЕЛЕМЕТРИИ ШЛЮЗА И HOMELAB (${OS_NAME})"
-        ui_box_row "Сеть LAN:     ${C_BLD}${LAN_IF_NOW}: ${LAN_IP_NOW}${C_RES} ▸ Роутер: ${C_CYN}${GW_IP}${C_RES} │ DHCP (AGH): ${DHCP_TXT}"
-        ui_box_row "Загрузка ОЗУ: ${RAM_BAR} (${RAM_USED}/${TOTAL_RAM_MB} МБ, лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
-        ui_box_row "Накопитель:   ${DISK_BAR} (${DISK_FREE_TXT}) ▸ ${C_CYN}${DISK_BADGE}${C_RES}"
-        ui_box_sep "СТАТУС ЯДЕР И СЛУЖБ"
-        ui_box_row "Ядро шлюза:   ${S_BADGE} ${S_VER_INFO} │ Веб-панель: ${UI_BADGE} ${UI_VER_INFO}"
-        ui_box_row "AdGuard Home: ${A_BADGE} ${A_VER_INFO} (DNS :53 + *.lan Rewrites)"
-        ui_box_row "Основной пул: ${P_BADGE} ${P_INFO}"
-        ui_box_row "Amnezia WARP: ${W_BADGE} ${W_INFO}"
-        ui_box_row "Защита сети:  ${KS_BADGE} ${KS_INFO}"
-        ui_box_row "Автономность: ${AU_BADGE} │ Watchdog: ${WD_TXT} │ Telegram: ${TG_TXT} │ Стек: ${HL_BADGE}"
+        _hl_suffix=" │ Стек: ${HL_BADGE}"
     fi
+    DISK_PCT=$(get_disk_usage_pct "$DISK_TARGET_D")
+    DISK_BAR=$(ui_progress_bar "$DISK_PCT" 10)
+    DISK_FREE_TXT=$(df -Ph "$DISK_TARGET_D" 2>/dev/null | awk 'NR==2 {print $4 " своб. из " $2}' || true)
+    [ -z "$DISK_FREE_TXT" ] && DISK_FREE_TXT="н/д"
+
+    ui_box_top "$_hdr_title"
+    ui_box_row "Сеть LAN:     ${C_BLD}${LAN_IF_NOW}: ${LAN_IP_NOW}${C_RES} ▸ Роутер: ${C_CYN}${GW_IP}${C_RES} │ DHCP (AGH): ${DHCP_TXT}"
+    ui_box_row "Загрузка ОЗУ: ${RAM_BAR} (${RAM_USED}/${TOTAL_RAM_MB} МБ, лимит SB: ${SB_GOMEMLIMIT}, AGH: ${AGH_GOMEMLIMIT})"
+    ui_box_row "${_disk_lbl} ${DISK_BAR} (${DISK_FREE_TXT}) ▸ ${C_CYN}${_disk_tag}${C_RES}"
+    ui_box_sep "СТАТУС ЯДЕР И СЛУЖБ"
+    ui_box_row "Ядро шлюза:   ${S_BADGE} ${S_VER_INFO} │ Веб-панель: ${UI_BADGE} ${UI_VER_INFO}"
+    ui_box_row "AdGuard Home: ${A_BADGE} ${A_VER_INFO} (DNS :53 + *.lan Rewrites)"
+    ui_box_row "Основной пул: ${P_BADGE} ${P_INFO}"
+    ui_box_row "Amnezia WARP: ${W_BADGE} ${W_INFO}"
+    ui_box_row "Защита сети:  ${KS_BADGE} ${KS_INFO}"
+    ui_box_row "Автономность: ${AU_BADGE} │ Watchdog: ${WD_TXT} │ Telegram: ${TG_TXT}${_hl_suffix}"
 
     if [ -f "$POWER_LOSS_FLAG" ]; then
         PL_TIME=$(cat "$POWER_LOSS_FLAG" 2>/dev/null || echo "недавно")
@@ -477,5 +500,3 @@ print_gateway_header() {
     ui_box_bottom
     return 0
 }
-
-# Проверка прямого доступа к GitHub (с защитой от фрагментации TLS 1.3 Kyber)

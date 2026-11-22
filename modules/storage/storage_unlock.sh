@@ -47,13 +47,22 @@ auto_fsck_device() {
     [ -z "$FSCK_FSTYPE" ] && FSCK_FSTYPE=$(blkid -s TYPE -o value "$FSCK_DEV" 2>/dev/null || true)
     case "$FSCK_FSTYPE" in
         ext4|ext3|ext2)
-            command -v e2fsck >/dev/null 2>&1 && e2fsck -p -f "$FSCK_DEV" >/dev/null 2>&1 || fsck.ext4 -y "$FSCK_DEV" >/dev/null 2>&1 || true
+            if command -v e2fsck >/dev/null 2>&1; then
+                _fsck_rc=0
+                e2fsck -p "$FSCK_DEV" >/dev/null 2>&1 || _fsck_rc=$?
+                if [ "$_fsck_rc" -gt 1 ] && command -v fsck.ext4 >/dev/null 2>&1; then
+                    fsck.ext4 -y "$FSCK_DEV" >/dev/null 2>&1 || true
+                fi
+            elif command -v fsck.ext4 >/dev/null 2>&1; then
+                fsck.ext4 -p "$FSCK_DEV" >/dev/null 2>&1 || true
+            fi
             ;;
         f2fs)
             command -v fsck.f2fs >/dev/null 2>&1 && fsck.f2fs -a "$FSCK_DEV" >/dev/null 2>&1 || true
             ;;
         btrfs)
-            command -v btrfs >/dev/null 2>&1 && btrfs check --readonly "$FSCK_DEV" >/dev/null 2>&1 || true
+            # Btrfs восстанавливает журнал автоматически при mount; медленный offline btrfs check пропускаем на штатном монтировании
+            command -v btrfs >/dev/null 2>&1 && btrfs device scan "$FSCK_DEV" >/dev/null 2>&1 || true
             ;;
         *)
             fsck -p "$FSCK_DEV" >/dev/null 2>&1 || fsck -y "$FSCK_DEV" >/dev/null 2>&1 || true
@@ -107,7 +116,7 @@ try_auto_unlock_and_mount_storage() {
     auto_fsck_device "$TARGET_MNT_DEV" "$DET_FS"
 
     mkdir -p "$STORAGE_ROOT"
-    M_OPTS=$(get_optimal_mount_opts "$DET_FS")
+    M_OPTS=$(get_optimal_mount_opts "$DET_FS" "$TARGET_MNT_DEV")
     if mount -t "$DET_FS" -o "$M_OPTS" "$TARGET_MNT_DEV" "$STORAGE_ROOT" 2>/dev/null || mount "$TARGET_MNT_DEV" "$STORAGE_ROOT" 2>/dev/null; then
         EXT_STORAGE_EXPECTED="yes"
         EXT_STORAGE_FSTYPE="$DET_FS"
@@ -209,11 +218,22 @@ safe_power_action() {
 
     ui_step_progress 3 4 "Сброс дисковых кэшей (sync) и безопасная парковка LUKS2..."
     sync
+    _pwr_unmounted="yes"
     if is_external_storage_mounted; then
-        umount "$STORAGE_ROOT" 2>/dev/null || umount -l "$STORAGE_ROOT" 2>/dev/null || true
+        if ! umount "$STORAGE_ROOT" 2>/dev/null; then
+            sleep 1
+            sync
+            if ! umount "$STORAGE_ROOT" 2>/dev/null; then
+                _pwr_unmounted="no"
+                mount -o remount,ro "$STORAGE_ROOT" 2>/dev/null || true
+                ui_box_row "${C_YEL}[!] Не удалось полностью размонтировать ${STORAGE_ROOT} (переведено в read-only перед ${PWR_MODE}).${C_RES}"
+            fi
+        fi
     fi
-    if [ -b "/dev/mapper/${LUKS_MAPPER_NAME}" ]; then
-        cryptsetup close "$LUKS_MAPPER_NAME" 2>/dev/null || true
+    if [ "$_pwr_unmounted" = "yes" ] && [ -b "/dev/mapper/${LUKS_MAPPER_NAME}" ]; then
+        if ! cryptsetup close "$LUKS_MAPPER_NAME" 2>/dev/null; then
+            ui_box_row "${C_YEL}[!] Контейнер LUKS2 ${LUKS_MAPPER_NAME} остался занят перед ${PWR_MODE}.${C_RES}"
+        fi
     fi
     sync
 
@@ -226,5 +246,3 @@ safe_power_action() {
     fi
     return 0
 }
-
-# Команда `gateway doctor` / `gateway fix`: умная комплексная авто-починка сервера одной командой

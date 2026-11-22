@@ -41,22 +41,38 @@ create_unified_backup() {
     [ -f /etc/conf.d/vaultwarden ] && BACKUP_PATHS="$BACKUP_PATHS /etc/conf.d/vaultwarden"
     [ -d /var/lib/vaultwarden ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/vaultwarden"
     [ -d /etc/forgejo ] && BACKUP_PATHS="$BACKUP_PATHS /etc/forgejo"
-    [ -d /var/lib/forgejo/repos ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/forgejo/repos"
+    [ -d /var/lib/forgejo/repos ] && {
+        if [ -L /var/lib/forgejo/repos ]; then
+            _real_fg_repos=$(readlink -f /var/lib/forgejo/repos 2>/dev/null || true)
+            if [ -n "$_real_fg_repos" ] && [ -d "$_real_fg_repos" ] && ! is_openwrt; then
+                mkdir -p "${STAGE_DIR}/forgejo_repos"
+                cp -a "${_real_fg_repos}/." "${STAGE_DIR}/forgejo_repos/" 2>/dev/null || true
+            fi
+        else
+            BACKUP_PATHS="$BACKUP_PATHS /var/lib/forgejo/repos"
+        fi
+    }
     [ -d /var/lib/forgejo/custom ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/forgejo/custom"
     [ -d /var/lib/forgejo/data/jwt ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/forgejo/data/jwt"
     [ -d /var/lib/forgejo/data/attachments ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/forgejo/data/attachments"
+    [ -d /var/lib/coder ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/coder"
+    [ -d /opt/code-server ] && BACKUP_PATHS="$BACKUP_PATHS /opt/code-server"
     [ -d /var/lib/transmission/config ] && BACKUP_PATHS="$BACKUP_PATHS /var/lib/transmission/config"
     [ -d /opt/metube ] && BACKUP_PATHS="$BACKUP_PATHS /opt/metube"
+    [ -f /etc/crontabs/root ] && BACKUP_PATHS="$BACKUP_PATHS /etc/crontabs/root"
+    [ -f /etc/network/interfaces ] && BACKUP_PATHS="$BACKUP_PATHS /etc/network/interfaces"
+    [ -f /etc/sysctl.d/99-gateway-forward.conf ] && BACKUP_PATHS="$BACKUP_PATHS /etc/sysctl.d/99-gateway-forward.conf"
     [ "$INCLUDE_MEDIA" = "yes" ] && [ -d "$STORAGE_ROOT" ] && BACKUP_PATHS="$BACKUP_PATHS $STORAGE_ROOT"
 
     umask 077
-    TAR_ERR="/tmp/gw_backup_tar.err.$$"
+    ensure_gateway_runtime_dir >/dev/null 2>&1 || true
+    TAR_ERR=$(mktemp "${GATEWAY_RUNTIME_DIR:-/run/gateway}/gw_backup_tar.XXXXXX" 2>/dev/null || printf "%s" "${GATEWAY_RUNTIME_DIR:-/run/gateway}/gw_backup_tar.$$")
     TAR_RC=0
     # shellcheck disable=SC2086
     if ! is_openwrt && [ -d "$STAGE_DIR" ]; then
         BACKUP_PATHS="$BACKUP_PATHS $STAGE_DIR"
     fi
-    tar --exclude='*cache.db*' --exclude='*.db-wal' --exclude='*.db-shm' --exclude='*/msg.sock*' --exclude='*.sock' --exclude='*.pid' -czf "${BACKUP_ARCHIVE}.tmp.$$" $BACKUP_PATHS 2>"$TAR_ERR" || TAR_RC=$?
+    tar --exclude='*storage.luks.key*' --exclude='*cache.db*' --exclude='*.db-wal' --exclude='*.db-shm' --exclude='*/msg.sock*' --exclude='*.sock' --exclude='*.pid' -czf "${BACKUP_ARCHIVE}.tmp.$$" $BACKUP_PATHS 2>"$TAR_ERR" || TAR_RC=$?
     if [ "$TAR_RC" -gt 1 ] || [ ! -s "${BACKUP_ARCHIVE}.tmp.$$" ] || ! tar -tzf "${BACKUP_ARCHIVE}.tmp.$$" >/dev/null 2>&1; then
         echo "${C_RED}[X] Ошибка создания архива резервной копии (код tar: ${TAR_RC})!${C_RES}"
         [ -s "$TAR_ERR" ] && tail -n 5 "$TAR_ERR" || true
@@ -71,8 +87,18 @@ create_unified_backup() {
     umask 022
 
     if [ -d "${STORAGE_BACKUPS:-/srv/storage/Backups}" ]; then
-        cp -f "$BACKUP_ARCHIVE" "${STORAGE_BACKUPS}/gateway_backup_$(date '+%Y%m%d_%H%M').tar.gz" 2>/dev/null || true
-        cp -f "$BACKUP_ARCHIVE" "${STORAGE_BACKUPS}/gateway_backup_latest.tar.gz" 2>/dev/null || true
+        chown root:root "${STORAGE_BACKUPS}" 2>/dev/null || true
+        chmod 0700 "${STORAGE_BACKUPS}" 2>/dev/null || true
+        _sbak_ts="${STORAGE_BACKUPS}/gateway_backup_$(date '+%Y%m%d_%H%M').tar.gz"
+        _sbak_lat="${STORAGE_BACKUPS}/gateway_backup_latest.tar.gz"
+        if cp -f "$BACKUP_ARCHIVE" "$_sbak_ts" 2>/dev/null; then
+            chmod 0600 "$_sbak_ts" 2>/dev/null || true
+            chown root:root "$_sbak_ts" 2>/dev/null || true
+        fi
+        if cp -f "$BACKUP_ARCHIVE" "$_sbak_lat" 2>/dev/null; then
+            chmod 0600 "$_sbak_lat" 2>/dev/null || true
+            chown root:root "$_sbak_lat" 2>/dev/null || true
+        fi
         ls -1t "${STORAGE_BACKUPS}"/gateway_backup_2*.tar.gz 2>/dev/null | awk 'NR>5' | xargs rm -f 2>/dev/null || true
     fi
     B_SIZE=$(du -sh "$BACKUP_ARCHIVE" 2>/dev/null | awk '{print $1}' || echo "н/д")
@@ -113,10 +139,20 @@ restore_unified_backup() {
     fi
     rm -f /etc/sing-box/cache.db 2>/dev/null || true
 
-    tar -xzf "$TARGET_BAK" -C / 2>/dev/null || true
+    if ! tar -xzf "$TARGET_BAK" -C /; then
+        echo "${C_RED}[X] Ошибка распаковки архива резервной копии ${TARGET_BAK}!${C_RES}"
+        return 1
+    fi
 
-    # Восстановление консистентных SQLite-дампов поверх распакованных баз
-    STAGE_RESTORE="/var/lib/gateway_backup_stage/sqlite_dumps"
+    # Восстановление консистентных SQLite-дампов и репозиториев Forgejo
+    STAGE_BASE="/var/lib/gateway_backup_stage"
+    STAGE_RESTORE="${STAGE_BASE}/sqlite_dumps"
+    if [ -d "${STAGE_BASE}/forgejo_repos" ]; then
+        mkdir -p /var/lib/forgejo/repos 2>/dev/null || true
+        _dst_fg=$(readlink -f /var/lib/forgejo/repos 2>/dev/null || printf "/var/lib/forgejo/repos")
+        mkdir -p "$_dst_fg" 2>/dev/null || true
+        cp -a "${STAGE_BASE}/forgejo_repos/." "$_dst_fg/" 2>/dev/null || true
+    fi
     if [ -d "$STAGE_RESTORE" ]; then
         if [ -f "${STAGE_RESTORE}/vaultwarden.sqlite3" ]; then
             mkdir -p /var/lib/vaultwarden
@@ -128,10 +164,10 @@ restore_unified_backup() {
             rm -f /var/lib/forgejo/data/forgejo.db-wal /var/lib/forgejo/data/forgejo.db-shm 2>/dev/null || true
             cp -f "${STAGE_RESTORE}/forgejo.sqlite3" /var/lib/forgejo/data/forgejo.db 2>/dev/null || true
         fi
-        rm -rf "/var/lib/gateway_backup_stage" 2>/dev/null || true
     fi
+    rm -rf "$STAGE_BASE" 2>/dev/null || true
 
-    chmod 600 "$SB_CONF" "$SB_ENV" "$AGH_CONF" 2>/dev/null || true
+    chmod 600 "$SB_CONF" "$SB_ENV" "$AGH_CONF" "$CRON_FILE" 2>/dev/null || true
     if ! is_openwrt; then
         chmod 600 "$HOMELAB_ENV" 2>/dev/null || true
     fi

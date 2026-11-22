@@ -147,7 +147,7 @@ core_restart_and_wait() {
     _START_W=0
     while [ "$_START_W" -lt 15 ]; do
         if is_core_running && ip link show "$CORE_TUN_IF" >/dev/null 2>&1 && \
-           curl -fsS --connect-timeout 1 -m 2 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/version" >/dev/null 2>&1; then
+           clash_api_curl -fsS --connect-timeout 1 -m 2 "http://127.0.0.1:9090/version" >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
@@ -162,7 +162,7 @@ _core_delay_group() {
     _tmo_ms="${2:-5000}"
     _curl_max="${3:-20}"
     _enc_g=$(jq -rn --arg s "$_grp_tag" '$s|@uri')
-    curl -g -fsS --connect-timeout 2 -m "$_curl_max" -H "Authorization: Bearer ${ADMIN_PASS}" \
+    clash_api_curl -g -fsS --connect-timeout 2 -m "$_curl_max" \
         "http://127.0.0.1:9090/group/${_enc_g}/delay?url=https%3A%2F%2Fwww.gstatic.com%2Fgenerate_204&timeout=${_tmo_ms}" >/dev/null 2>&1 || true
 }
 
@@ -173,14 +173,14 @@ core_reload_api() {
 
     _API_WAIT=0
     while [ "$_API_WAIT" -lt 12 ]; do
-        if curl -fsS --connect-timeout 1 -m 2 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/version" >/dev/null 2>&1; then
+        if clash_api_curl -fsS --connect-timeout 1 -m 2 "http://127.0.0.1:9090/version" >/dev/null 2>&1; then
             break
         fi
         sleep 1
         _API_WAIT=$((_API_WAIT + 1))
     done
 
-    API_PROX_JSON=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/providers/proxies" 2>/dev/null || true)
+    API_PROX_JSON=$(clash_api_curl -fsS --connect-timeout 2 -m 5 "http://127.0.0.1:9090/providers/proxies" 2>/dev/null || true)
     HAS_REAL_PROV=0
     if [ -n "$API_PROX_JSON" ]; then
         PROV_TAGS=$(printf "%s" "$API_PROX_JSON" | jq -r '.providers | to_entries[]? | select(.value.vehicleType=="HTTP" or .value.vehicleType=="File" or .value.vehicleType=="Remote" or .value.vehicleType=="Local") | .key' 2>/dev/null || true)
@@ -189,13 +189,13 @@ core_reload_api() {
             printf "%s\n" "$PROV_TAGS" | while IFS= read -r P_TAG; do
                 [ -z "$P_TAG" ] && continue
                 ENC_P=$(jq -rn --arg s "$P_TAG" '$s|@uri')
-                _PUT_CODE=$(curl -g -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 -m 15 -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
+                _PUT_CODE=$(clash_api_curl -g -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 -m 15 -X PUT \
                     "http://127.0.0.1:9090/providers/proxies/${ENC_P}" 2>/dev/null || echo "000")
                 case "$_PUT_CODE" in
                     200|204|503) ;;
                     *)
                         sleep 2
-                        curl -g -fsS --connect-timeout 2 -m 15 -X PUT -H "Authorization: Bearer ${ADMIN_PASS}" \
+                        clash_api_curl -g -fsS --connect-timeout 2 -m 15 -X PUT \
                             "http://127.0.0.1:9090/providers/proxies/${ENC_P}" >/dev/null 2>&1 || true
                         ;;
                 esac
@@ -209,7 +209,7 @@ core_reload_api() {
     _PREV_UNHYDRATED=-1
     _STABLE_CNT=0
     while [ "$_WAIT_I" -lt 25 ]; do
-        PROX_JSON=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
+        PROX_JSON=$(clash_api_curl -fsS --connect-timeout 2 -m 5 "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
         [ "$HAS_REAL_PROV" -eq 0 ] && break
         [ -z "$PROX_JSON" ] && break
         _UNHYDRATED=$(printf "%s" "$PROX_JSON" | jq -r '[.proxies | to_entries[] | select(.value.type=="URLTest" and ((.value.all|length) <= 1))] | length' 2>/dev/null || echo "0")
@@ -236,7 +236,7 @@ core_reload_api() {
         }
 
         # Retry any populated URLTest group still stuck on dummy fallback after concurrent burst
-        PROX_JSON=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
+        PROX_JSON=$(clash_api_curl -fsS --connect-timeout 2 -m 5 "http://127.0.0.1:9090/proxies" 2>/dev/null || true)
         if [ -n "$PROX_JSON" ]; then
             printf "%s" "$PROX_JSON" | jq -r '.proxies | to_entries[] | select(.value.type=="URLTest" and .key!="⚡ Авто (Самый быстрый)" and ((.value.all|length) > 1) and .value.now=="⛔ Нет рабочих нод") | .key' 2>/dev/null | while IFS= read -r STUCK_G; do
                 [ -z "$STUCK_G" ] && continue
@@ -246,7 +246,7 @@ core_reload_api() {
             HAS_MAIN_AUTO=$(printf "%s" "$PROX_JSON" | jq -r 'if .proxies["⚡ Авто (Самый быстрый)"].type=="URLTest" then "1" else "0" end' 2>/dev/null || echo "0")
             if [ "$HAS_MAIN_AUTO" = "1" ]; then
                 _core_delay_group "⚡ Авто (Самый быстрый)" 5000 20
-                MAIN_NOW=$(curl -fsS --connect-timeout 2 -m 5 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/proxies" 2>/dev/null | \
+                MAIN_NOW=$(clash_api_curl -fsS --connect-timeout 2 -m 5 "http://127.0.0.1:9090/proxies" 2>/dev/null | \
                     jq -r 'if .proxies["⚡ Авто (Самый быстрый)"].now=="⛔ Нет рабочих нод" and ((.proxies["⚡ Авто (Самый быстрый)"].all|length) > 1) then "1" else "0" end' 2>/dev/null || echo "0")
                 if [ "$MAIN_NOW" = "1" ]; then
                     sleep 1
@@ -286,18 +286,20 @@ install_web_ui() {
     case "$TARGET_UI_VER" in v*) ;; *) TARGET_UI_VER="$DEF_VER_T" ;; esac
 
     echo "Загрузка и установка веб-панели ${UI_NAME_T} ${TARGET_UI_VER}..."
-    rm -rf /tmp/gw_ui.tgz /tmp/gw_ui_extract
-    mkdir -p /tmp/gw_ui_extract
+    ensure_gateway_runtime_dir || return 1
+    _ui_stage=$(mktemp -d "${GATEWAY_RUNTIME_DIR:-/run/gateway}/ui.XXXXXX" 2>/dev/null) || return 1
+    chmod 700 "$_ui_stage" 2>/dev/null || true
+    mkdir -p "${_ui_stage}/extract"
 
     DL_OK="no"
-    if download_file "$URL_1" "/tmp/gw_ui.tgz" && tar -xzf /tmp/gw_ui.tgz -C /tmp/gw_ui_extract 2>/dev/null; then
+    if download_file "$URL_1" "${_ui_stage}/gw_ui.tgz" && tar -xzf "${_ui_stage}/gw_ui.tgz" -C "${_ui_stage}/extract" 2>/dev/null; then
         DL_OK="yes"
-    elif [ -n "$URL_2" ] && download_file "$URL_2" "/tmp/gw_ui.tgz" && tar -xzf /tmp/gw_ui.tgz -C /tmp/gw_ui_extract 2>/dev/null; then
+    elif [ -n "$URL_2" ] && download_file "$URL_2" "${_ui_stage}/gw_ui.tgz" && tar -xzf "${_ui_stage}/gw_ui.tgz" -C "${_ui_stage}/extract" 2>/dev/null; then
         DL_OK="yes"
     fi
 
     if [ "$DL_OK" = "yes" ]; then
-        INDEX_PATH=$(find /tmp/gw_ui_extract -type f -name "index.html" 2>/dev/null | head -n 1 || true)
+        INDEX_PATH=$(find "${_ui_stage}/extract" -type f -name "index.html" 2>/dev/null | head -n 1 || true)
         if [ -n "$INDEX_PATH" ] && [ -s "$INDEX_PATH" ]; then
             SRC_UI_DIR=$(dirname "$INDEX_PATH")
             mkdir -p "${UI_DIR}.new.$$"
@@ -308,13 +310,13 @@ install_web_ui() {
             echo "$TARGET_UI_VER" > "$UI_VER_FILE"
             echo "$TARGET_UI" > "$UI_TYPE_FILE"
             LATEST_UI_TAG="$TARGET_UI_VER"
-            rm -rf /tmp/gw_ui.tgz /tmp/gw_ui_extract
+            rm -rf "$_ui_stage"
             echo "${C_GRN}[✓] Веб-панель ${UI_NAME_T} ${TARGET_UI_VER} успешно установлена в ${UI_DIR}.${C_RES}"
             return 0
         fi
     fi
 
-    rm -rf /tmp/gw_ui.tgz /tmp/gw_ui_extract "${UI_DIR}.new.$$"
+    rm -rf "$_ui_stage" "${UI_DIR}.new.$$"
     echo "${C_RED}[X] Ошибка загрузки или распаковки веб-панели ${UI_NAME_T}!${C_RES}"
     return 1
 }
@@ -339,6 +341,18 @@ switch_web_ui() {
     return 1
 }
 
+activate_core_service() {
+    if [ "${1:-$(get_active_core)}" = "mihomo" ]; then
+        _act_s="mihomo"; _dis_s="sing-box"
+    else
+        _act_s="sing-box"; _dis_s="mihomo"
+    fi
+    service_ctl "$_dis_s" stop
+    service_ctl "$_dis_s" disable
+    service_ctl "$_act_s" enable
+    service_ctl "$_act_s" restart
+}
+
 apply_and_verify_core() {
     ACTION_TITLE="${1:-Обновление конфигурации}"
     ensure_alpine_modules
@@ -346,9 +360,12 @@ apply_and_verify_core() {
     ACT_CORE=$(get_active_core)
     ACT_NAME=$(get_active_core_name)
     ACT_SVC=$(get_active_core_service)
-    ACT_CONF=$(get_active_core_conf)
 
-    core_generate_config
+    core_generate_config || {
+        echo "${C_RED}[X] Не удалось сгенерировать конфигурацию ${ACT_NAME} при действии: ${ACTION_TITLE}!${C_RES}"
+        restore_gateway_state
+        return 1
+    }
 
     if ! core_check_config; then
         echo "${C_RED}[X] Ошибка синтаксиса ${ACT_NAME} при действии: ${ACTION_TITLE}!${C_RES}"
@@ -371,6 +388,7 @@ apply_and_verify_core() {
     if [ "$WAIT_OK" = "yes" ]; then
         sync_dns_firewall "yes" "keep" >/dev/null 2>&1 || true
         core_reload_api
+        backup_gateway_state >/dev/null 2>&1 || true
         ui_box_top "✔ ${ACTION_TITLE}: УСПЕШНО (${ACT_NAME} & ${CORE_TUN_IF} АКТИВНЫ)"
         print_proxy_slots_report
         ui_box_bottom
@@ -423,9 +441,9 @@ switch_core_engine() {
     # 2. Генерируем и проверяем новый конфиг ДО остановки старого ядра
     CORE_ENGINE="$TARGET_CORE"
     if [ "$TARGET_CORE" = "mihomo" ]; then
-        generate_mihomo_config
+        generate_mihomo_config "$TARGET_CORE"
     else
-        generate_singbox_config
+        generate_singbox_config "$TARGET_CORE"
     fi
     CORE_ENGINE="$TARGET_CORE"
     if ! core_check_config; then
@@ -455,7 +473,7 @@ switch_core_engine() {
     W_IDX=0
     while [ "$W_IDX" -lt 15 ]; do
         if (pgrep -x "$TARGET_SVC" >/dev/null 2>&1 || is_core_running) && ip link show "$CORE_TUN_IF" >/dev/null 2>&1 && \
-           curl -fsS -m 1 -H "Authorization: Bearer ${ADMIN_PASS}" "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
+           clash_api_curl -fsS -m 1 "http://127.0.0.1:9090/configs" >/dev/null 2>&1; then
             WAIT_OK="yes"
             break
         fi
@@ -470,6 +488,7 @@ switch_core_engine() {
             reload_caddy_safe >/dev/null 2>&1 || true
         fi
         core_reload_api
+        backup_gateway_state >/dev/null 2>&1 || true
         rm -f "$VER_CACHE_FILE"
         echo "${C_GRN}[✓] Ядро успешно переключено на ${TARGET_NAME} ($(get_active_core_version))! TUN: ${CORE_TUN_IF}${C_RES}"
         if [ "$TARGET_CORE" = "mihomo" ] && is_warp_enabled; then

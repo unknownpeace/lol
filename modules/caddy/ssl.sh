@@ -1,5 +1,4 @@
 #!/bin/sh
-set -e
 
 # ==============================================================================
 # 🔒 Управление SSL/TLS сертификатами (Local PKI vs Let's Encrypt Wildcard)
@@ -60,6 +59,14 @@ issue_duckdns_cert() {
         echo "${C_RED}[X] Ошибка: Укажите субдомен и токен DuckDNS!${C_RES}"
         return 1
     fi
+    if ! printf "%s" "$TARGET_SUB" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'; then
+        echo "${C_RED}[X] Ошибка: Недопустимый формат субдомена DuckDNS (${TARGET_SUB})!${C_RES}"
+        return 1
+    fi
+    if ! printf "%s" "$TARGET_TOKEN" | grep -Eq '^[A-Za-z0-9-]+$'; then
+        echo "${C_RED}[X] Ошибка: Недопустимые символы в токене DuckDNS!${C_RES}"
+        return 1
+    fi
 
     install_acme_core || return 1
     FULL_DOMAIN="${TARGET_SUB}.duckdns.org"
@@ -72,20 +79,44 @@ issue_duckdns_cert() {
         return 1
     fi
 
+    # Обновление сохраненного токена DuckDNS в account.conf для корректного автопродления
+    mkdir -p "$ACME_HOME_DIR"
+    if [ -f "${ACME_HOME_DIR}/account.conf" ]; then
+        awk -v tok="$TARGET_TOKEN" '
+            /^SAVED_DuckDNS_Token=/ { next }
+            { print }
+            END { printf "SAVED_DuckDNS_Token='\''%s'\''\n", tok }
+        ' "${ACME_HOME_DIR}/account.conf" > "${ACME_HOME_DIR}/account.conf.tmp.$$" && \
+            chmod 600 "${ACME_HOME_DIR}/account.conf.tmp.$$" && \
+            mv -f "${ACME_HOME_DIR}/account.conf.tmp.$$" "${ACME_HOME_DIR}/account.conf" || rm -f "${ACME_HOME_DIR}/account.conf.tmp.$$" 2>/dev/null || true
+    fi
+
     FORCE_ISSUE="${3:-no}"
     EXISTING_CERT=""
-    for _c_cand in "${ACME_HOME_DIR}/*.${FULL_DOMAIN}_ecc/fullchain.cer" "${ACME_HOME_DIR}/*.${FULL_DOMAIN}/fullchain.cer"; do
+    ACME_ECC_FLAG="--ecc"
+    for _c_cand in \
+        "${ACME_HOME_DIR}/*.${FULL_DOMAIN}_ecc/fullchain.cer" \
+        "${ACME_HOME_DIR}/${FULL_DOMAIN}_ecc/fullchain.cer" \
+        "${ACME_HOME_DIR}/*.${FULL_DOMAIN}/fullchain.cer" \
+        "${ACME_HOME_DIR}/${FULL_DOMAIN}/fullchain.cer"; do
         if [ -s "$_c_cand" ]; then
             EXISTING_CERT="$_c_cand"
+            case "$_c_cand" in
+                *_ecc/*) ACME_ECC_FLAG="--ecc" ;;
+                *)       ACME_ECC_FLAG="" ;;
+            esac
             break
         fi
     done
 
     REUSED_CERT="no"
     if [ "$FORCE_ISSUE" != "--force" ] && [ -n "$EXISTING_CERT" ] && command -v openssl >/dev/null 2>&1; then
-        if openssl x509 -checkend 1209600 -noout -in "$EXISTING_CERT" >/dev/null 2>&1; then
+        _san_txt=$(openssl x509 -noout -ext subjectAltName -in "$EXISTING_CERT" 2>/dev/null || true)
+        if openssl x509 -checkend 1209600 -noout -in "$EXISTING_CERT" >/dev/null 2>&1 && \
+           printf "%s" "$_san_txt" | grep -q "DNS:\*\.${FULL_DOMAIN}" && \
+           printf "%s" "$_san_txt" | grep -q "DNS:${FULL_DOMAIN}"; then
             REUSED_CERT="yes"
-            echo "${C_GRN}[✓] Найден действующий Let's Encrypt Wildcard (*.${FULL_DOMAIN}, запас > 14 дн.) — переиспользуем без повторного запроса к ACME!${C_RES}"
+            echo "${C_GRN}[✓] Найден действующий Let's Encrypt Wildcard (*.${FULL_DOMAIN} + ${FULL_DOMAIN}, запас > 14 дн.) — переиспользуем!${C_RES}"
         fi
     fi
 
@@ -93,31 +124,20 @@ issue_duckdns_cert() {
         echo "${C_CYN}[*] Регистрация аккаунта в Let's Encrypt ACME...${C_RES}"
         acme.sh --home "$ACME_HOME_DIR" --register-account -m "admin@${FULL_DOMAIN}" --server letsencrypt >/dev/null 2>&1 || true
 
-        echo "${C_CYN}[*] Запрос Let's Encrypt Wildcard (*.${FULL_DOMAIN}) через DuckDNS DNS-01...${C_RES}"
+        echo "${C_CYN}[*] Запрос Let's Encrypt Wildcard (*.${FULL_DOMAIN} + ${FULL_DOMAIN}) через DuckDNS DNS-01...${C_RES}"
         echo "    (Добавление TXT-записи без открытия портов наружу, ожидание DNS 60 сек)..."
 
-        if ! DuckDNS_Token="$TARGET_TOKEN" acme.sh --home "$ACME_HOME_DIR" --server letsencrypt --issue --dns dns_duckdns -d "*.${FULL_DOMAIN}" --dnssleep 60 --force; then
+        if ! DuckDNS_Token="$TARGET_TOKEN" acme.sh --home "$ACME_HOME_DIR" --server letsencrypt --issue --dns dns_duckdns -d "*.${FULL_DOMAIN}" -d "${FULL_DOMAIN}" --keylength ec-256 --dnssleep 60 --force; then
             echo "${C_RED}[X] Ошибка выпуска сертификата Let's Encrypt! Проверьте токен DuckDNS и доступ к ACME API.${C_RES}"
             return 1
         fi
+        ACME_ECC_FLAG="--ecc"
     fi
 
-    mkdir -p "$SSL_CERTS_DIR"
-    chmod 755 /etc/ssl 2>/dev/null || true
-    chmod 750 "$SSL_CERTS_DIR" 2>/dev/null || true
-    if ! acme.sh --home "$ACME_HOME_DIR" --install-cert -d "*.${FULL_DOMAIN}" \
-        --cert-file "${SSL_CERTS_DIR}/cert.pem" \
-        --key-file "${SSL_KEY_FILE}" \
-        --fullchain-file "${SSL_FULLCHAIN_FILE}" \
-        --reloadcmd "chown -R caddy:caddy '${SSL_CERTS_DIR}' && chmod 750 '${SSL_CERTS_DIR}' && chmod 644 '${SSL_CERTS_DIR}/cert.pem' '${SSL_FULLCHAIN_FILE}' && chmod 600 '${SSL_KEY_FILE}' && rc-service caddy restart"; then
+    if ! _install_acme_cert_files "*.${FULL_DOMAIN}" "${FULL_DOMAIN}" "${ACME_ECC_FLAG}"; then
         echo "${C_RED}[X] Ошибка установки файлов сертификата в ${SSL_CERTS_DIR}!${C_RES}"
         return 1
     fi
-
-    chown -R caddy:caddy "$SSL_CERTS_DIR" 2>/dev/null || true
-    chmod 750 "$SSL_CERTS_DIR" 2>/dev/null || true
-    chmod 644 "${SSL_CERTS_DIR}/cert.pem" "$SSL_FULLCHAIN_FILE" 2>/dev/null || true
-    chmod 600 "$SSL_KEY_FILE" 2>/dev/null || true
 
     ensure_acme_cron_job
 
@@ -127,11 +147,43 @@ issue_duckdns_cert() {
     DUCKDNS_TOKEN="${TARGET_TOKEN}"
     save_homelab_env
 
-    sync_caddy_main_config
-    if command -v sync_all_caddy_sites >/dev/null 2>&1; then
-        sync_all_caddy_sites
-    elif command -v reload_caddy_safe >/dev/null 2>&1; then
-        reload_caddy_safe
+    _sync_services_after_ssl_change || return 1
+
+    echo "${C_GRN}[✓] Wildcard-сертификат Let's Encrypt (*.${FULL_DOMAIN}) успешно получен и установлен!${C_RES}"
+    return 0
+}
+
+_install_acme_cert_files() {
+    _iac_id="$1"
+    _iac_dom="$2"
+    _iac_ecc="$3"
+    mkdir -p "$SSL_CERTS_DIR"
+    chmod 755 /etc/ssl 2>/dev/null || true
+    chown root:caddy "$SSL_CERTS_DIR" 2>/dev/null || true
+    chmod 750 "$SSL_CERTS_DIR" 2>/dev/null || true
+    # shellcheck disable=SC2086
+    if ! acme.sh --home "$ACME_HOME_DIR" --install-cert -d "$_iac_id" -d "$_iac_dom" $_iac_ecc \
+        --cert-file "${SSL_CERTS_DIR}/cert.pem" \
+        --key-file "${SSL_KEY_FILE}" \
+        --fullchain-file "${SSL_FULLCHAIN_FILE}" \
+        --reloadcmd "chown -R root:caddy '${SSL_CERTS_DIR}' && chmod 750 '${SSL_CERTS_DIR}' && chmod 644 '${SSL_CERTS_DIR}/cert.pem' '${SSL_FULLCHAIN_FILE}' && chmod 640 '${SSL_KEY_FILE}' && rc-service caddy restart"; then
+        return 1
+    fi
+    chown -R root:caddy "$SSL_CERTS_DIR" 2>/dev/null || true
+    chmod 750 "$SSL_CERTS_DIR" 2>/dev/null || true
+    chmod 644 "${SSL_CERTS_DIR}/cert.pem" "$SSL_FULLCHAIN_FILE" 2>/dev/null || true
+    chmod 640 "$SSL_KEY_FILE" 2>/dev/null || true
+    return 0
+}
+
+_sync_services_after_ssl_change() {
+    if [ -x /usr/sbin/caddy ] && is_module_enabled "caddy"; then
+        sync_caddy_main_config || return 1
+        if command -v sync_all_caddy_sites >/dev/null 2>&1; then
+            sync_all_caddy_sites || return 1
+        elif command -v reload_caddy_safe >/dev/null 2>&1; then
+            reload_caddy_safe || return 1
+        fi
     fi
     sync_agh_homelab_rewrites "$(get_current_lan_ip)"
     if is_module_enabled "vaultwarden" && command -v sync_vaultwarden_config >/dev/null 2>&1; then
@@ -154,8 +206,6 @@ issue_duckdns_cert() {
     if command -v build_pki_portal >/dev/null 2>&1; then
         build_pki_portal >/dev/null 2>&1 || true
     fi
-
-    echo "${C_GRN}[✓] Wildcard-сертификат Let's Encrypt (*.${FULL_DOMAIN}) успешно получен и установлен!${C_RES}"
     return 0
 }
 
@@ -167,27 +217,32 @@ renew_duckdns_cert_force() {
         return 1
     fi
     ACME_CERT_ID="*.${SSL_DOMAIN}"
-    if [ ! -d "${ACME_HOME_DIR}/*.${SSL_DOMAIN}" ] && [ ! -d "${ACME_HOME_DIR}/*.${SSL_DOMAIN}_ecc" ]; then
+    ACME_ECC_FLAG="--ecc"
+    if [ -d "${ACME_HOME_DIR}/*.${SSL_DOMAIN}_ecc" ]; then
+        ACME_CERT_ID="*.${SSL_DOMAIN}"
+        ACME_ECC_FLAG="--ecc"
+    elif [ -d "${ACME_HOME_DIR}/${SSL_DOMAIN}_ecc" ]; then
         ACME_CERT_ID="${SSL_DOMAIN}"
+        ACME_ECC_FLAG="--ecc"
+    elif [ -d "${ACME_HOME_DIR}/*.${SSL_DOMAIN}" ]; then
+        ACME_CERT_ID="*.${SSL_DOMAIN}"
+        ACME_ECC_FLAG=""
+    elif [ -d "${ACME_HOME_DIR}/${SSL_DOMAIN}" ]; then
+        ACME_CERT_ID="${SSL_DOMAIN}"
+        ACME_ECC_FLAG=""
     fi
     echo "${C_CYN}[*] Принудительное продление сертификата для *.${SSL_DOMAIN}...${C_RES}"
-    if DuckDNS_Token="${DUCKDNS_TOKEN:-}" acme.sh --home "$ACME_HOME_DIR" --renew -d "${ACME_CERT_ID}" --force; then
-        if ! acme.sh --home "$ACME_HOME_DIR" --install-cert -d "${ACME_CERT_ID}" \
-            --cert-file "${SSL_CERTS_DIR}/cert.pem" \
-            --key-file "${SSL_KEY_FILE}" \
-            --fullchain-file "${SSL_FULLCHAIN_FILE}" \
-            --reloadcmd "chown -R caddy:caddy '${SSL_CERTS_DIR}' && chmod 750 '${SSL_CERTS_DIR}' && chmod 644 '${SSL_CERTS_DIR}/cert.pem' '${SSL_FULLCHAIN_FILE}' && chmod 600 '${SSL_KEY_FILE}' && rc-service caddy restart"; then
+    if DuckDNS_Token="${DUCKDNS_TOKEN:-}" acme.sh --home "$ACME_HOME_DIR" --renew -d "${ACME_CERT_ID}" ${ACME_ECC_FLAG} --force; then
+        if ! _install_acme_cert_files "${ACME_CERT_ID}" "${SSL_DOMAIN}" "${ACME_ECC_FLAG}"; then
             echo "${C_RED}[X] Ошибка установки обновленного сертификата в ${SSL_CERTS_DIR}!${C_RES}"
             return 1
         fi
-        chown -R caddy:caddy "$SSL_CERTS_DIR" 2>/dev/null || true
-        chmod 750 "$SSL_CERTS_DIR" 2>/dev/null || true
-        chmod 644 "${SSL_CERTS_DIR}/cert.pem" "$SSL_FULLCHAIN_FILE" 2>/dev/null || true
-        chmod 600 "$SSL_KEY_FILE" 2>/dev/null || true
-        if command -v sync_all_caddy_sites >/dev/null 2>&1; then
-            sync_all_caddy_sites
-        elif command -v reload_caddy_safe >/dev/null 2>&1; then
-            reload_caddy_safe
+        if [ -x /usr/sbin/caddy ] && is_module_enabled "caddy"; then
+            if command -v sync_all_caddy_sites >/dev/null 2>&1; then
+                sync_all_caddy_sites || return 1
+            elif command -v reload_caddy_safe >/dev/null 2>&1; then
+                reload_caddy_safe || return 1
+            fi
         fi
         echo "${C_GRN}[✓] Сертификат успешно обновлен, Caddy перезагружен.${C_RES}"
         return 0
@@ -203,33 +258,7 @@ switch_to_local_pki() {
     SSL_TYPE="local"
     save_homelab_env
     echo "${C_CYN}[*] Переключение HTTPS на локальный PKI (*.lan)...${C_RES}"
-    sync_caddy_main_config
-    if command -v sync_all_caddy_sites >/dev/null 2>&1; then
-        sync_all_caddy_sites
-    elif command -v reload_caddy_safe >/dev/null 2>&1; then
-        reload_caddy_safe
-    fi
-    sync_agh_homelab_rewrites "$(get_current_lan_ip)"
-    if is_module_enabled "vaultwarden" && command -v sync_vaultwarden_config >/dev/null 2>&1; then
-        sync_vaultwarden_config >/dev/null 2>&1 || true
-        service_ctl vaultwarden restart >/dev/null 2>&1 || true
-    fi
-    if is_module_enabled "forgejo" && command -v sync_forgejo_domain_config >/dev/null 2>&1; then
-        sync_forgejo_domain_config >/dev/null 2>&1 || true
-        service_ctl forgejo restart >/dev/null 2>&1 || true
-    fi
-    if [ -f "$(get_active_core_conf)" ]; then
-        if core_generate_config >/dev/null 2>&1 && core_check_config; then
-            if is_core_running; then
-                service_ctl "$(get_active_core_service)" restart >/dev/null 2>&1 || true
-                sleep 1
-                core_reload_api >/dev/null 2>&1 || true
-            fi
-        fi
-    fi
-    if command -v build_pki_portal >/dev/null 2>&1; then
-        build_pki_portal >/dev/null 2>&1 || true
-    fi
+    _sync_services_after_ssl_change || return 1
     echo "${C_GRN}[✓] Шлюз переведен в оффлайн-режим Local PKI (*.lan).${C_RES}"
     return 0
 }
@@ -248,8 +277,8 @@ show_ssl_status() {
             ISSUER_NAME=$(openssl x509 -in "$SSL_FULLCHAIN_FILE" -noout -issuer 2>/dev/null | sed 's/.*CN[[:space:]]*=[[:space:]]*//' || echo "Let's Encrypt")
             NOT_AFTER=$(openssl x509 -in "$SSL_FULLCHAIN_FILE" -noout -enddate 2>/dev/null | cut -d= -f2 || true)
             CLEAN_DATE=$(printf "%s" "$NOT_AFTER" | sed -E 's/  +/ 0/')
-            EXP_SEC=$(date -D '%b %d %T %Y GMT' -d "$CLEAN_DATE" +%s 2>/dev/null || date -d "$NOT_AFTER" +%s 2>/dev/null || echo 0)
-            NOW_SEC=$(date +%s 2>/dev/null || echo 0)
+            EXP_SEC=$(TZ=UTC date -D '%b %d %T %Y GMT' -d "$CLEAN_DATE" +%s 2>/dev/null || TZ=UTC date -d "$NOT_AFTER" +%s 2>/dev/null || echo 0)
+            NOW_SEC=$(TZ=UTC date +%s 2>/dev/null || date +%s 2>/dev/null || echo 0)
             if [ "$EXP_SEC" -gt "$NOW_SEC" ]; then
                 DAYS_LEFT=$(( (EXP_SEC - NOW_SEC) / 86400 ))
                 ui_box_row "Действителен до:   ${NOT_AFTER} (${C_GRN}${DAYS_LEFT} дн. осталось${C_RES}, эмитент: ${ISSUER_NAME})"
@@ -295,8 +324,15 @@ prompt_ssl_management_menu() {
                 read -r IN_SUB < /dev/tty || true
                 IN_SUB=$(clean_clipboard_line "$IN_SUB")
                 [ -z "$IN_SUB" ] && IN_SUB="${SSL_DOMAIN%%.*}"
-                printf " Введите токен DuckDNS (UUID) [%s]: " "${DUCKDNS_TOKEN:-}"
+                if [ -n "${DUCKDNS_TOKEN:-}" ]; then
+                    printf " Введите токен DuckDNS (UUID) [настроен, Enter = оставить текущий]: "
+                else
+                    printf " Введите токен DuckDNS (UUID): "
+                fi
+                [ -t 0 ] && stty -echo 2>/dev/null || true
                 read -r IN_TOKEN < /dev/tty || true
+                [ -t 0 ] && stty echo 2>/dev/null || true
+                printf "\n"
                 IN_TOKEN=$(clean_clipboard_line "$IN_TOKEN")
                 [ -z "$IN_TOKEN" ] && IN_TOKEN="${DUCKDNS_TOKEN:-}"
 

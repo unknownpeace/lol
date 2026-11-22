@@ -20,19 +20,21 @@ install_singbox_binary() {
     fi
 
     echo "Загрузка Sing-Box Extended ${SB_TAG} (${SB_ARCH})..."
-    rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+    ensure_gateway_runtime_dir || return 1
+    _sb_stage=$(mktemp -d "${GATEWAY_RUNTIME_DIR:-/run/gateway}/sb.XXXXXX" 2>/dev/null) || return 1
+    chmod 700 "$_sb_stage" 2>/dev/null || true
     SB_ASSET="sing-box-${SB_VER_NO_V}-linux-${SB_ARCH}.tar.gz"
     SB_URL="https://github.com/shtorm-7/sing-box-extended/releases/download/${SB_TAG}/${SB_ASSET}"
-    if download_file "$SB_URL" "/tmp/sing-box.tar.gz" && verify_github_asset_sha256 "shtorm-7/sing-box-extended" "$SB_ASSET" "/tmp/sing-box.tar.gz"; then
-        mkdir -p /tmp/sb_extract
-        if tar -xzf /tmp/sing-box.tar.gz -C /tmp/sb_extract 2>/dev/null; then
-            SB_BIN=$(find /tmp/sb_extract -type f -name "sing-box" | head -n 1)
+    if download_file "$SB_URL" "${_sb_stage}/sing-box.tar.gz" && verify_github_asset_sha256 "shtorm-7/sing-box-extended" "$SB_ASSET" "${_sb_stage}/sing-box.tar.gz" "$SB_TAG"; then
+        mkdir -p "${_sb_stage}/extract"
+        if tar -xzf "${_sb_stage}/sing-box.tar.gz" -C "${_sb_stage}/extract" 2>/dev/null; then
+            SB_BIN=$(find "${_sb_stage}/extract" -type f -name "sing-box" | head -n 1)
             if [ -n "$SB_BIN" ] && [ -f "$SB_BIN" ]; then
                 chmod +x "$SB_BIN"
                 if "$SB_BIN" version >/dev/null 2>&1; then
                     service_ctl sing-box stop
                     mv -f "$SB_BIN" /usr/bin/sing-box
-                    rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+                    rm -rf "$_sb_stage"
                     echo "${C_GRN}[✓] Sing-Box Extended безопасно обновлен до ${SB_TAG}.${C_RES}"
                     return 0
                 else
@@ -41,31 +43,77 @@ install_singbox_binary() {
             fi
         fi
     else
-        echo "${C_RED}[X] Не удалось скачать Sing-Box Extended ${SB_TAG}.${C_RES}"
+        echo "${C_RED}[X] Не удалось скачать или верифицировать Sing-Box Extended ${SB_TAG}.${C_RES}"
     fi
-    rm -rf /tmp/sing-box.tar.gz /tmp/sb_extract
+    rm -rf "$_sb_stage"
     [ -x /usr/bin/sing-box ] && return 0 || return 1
 }
 
-# Криптографическая проверка SHA-256 скачанного архива через GitHub Releases API
+# Криптографическая проверка SHA-256 скачанного архива через GitHub Releases API (fail-closed для зеркал)
 verify_github_asset_sha256() {
     REPO_NAME="$1"
     ASSET_NAME="$2"
     LOCAL_FILE="$3"
-    command -v sha256sum >/dev/null 2>&1 || return 0
-    command -v jq >/dev/null 2>&1 || return 0
+    TAG_NAME="${4:-}"
+    _from_mirror="${LAST_DOWNLOAD_VIA_MIRROR:-no}"
 
-    REL_JSON=$(curl -fsSL --curves X25519:P-256 --connect-timeout 3 -m 5 "https://api.github.com/repos/${REPO_NAME}/releases/latest" 2>/dev/null || true)
-    [ -z "$REL_JSON" ] && return 0
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        if [ "$_from_mirror" = "yes" ]; then
+            echo "${C_RED}[X] КРИТИЧЕСКАЯ ОШИБКА: Отсутствует sha256sum — загрузка с зеркала без проверки отклонена!${C_RES}" >&2
+            return 1
+        fi
+        return 0
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        if [ "$_from_mirror" = "yes" ]; then
+            echo "${C_RED}[X] КРИТИЧЕСКАЯ ОШИБКА: Отсутствует jq — загрузка с зеркала без проверки SHA-256 отклонена!${C_RES}" >&2
+            return 1
+        fi
+        return 0
+    fi
 
-    EXP_DIGEST=$(printf "%s" "$REL_JSON" | jq -r --arg name "$ASSET_NAME" '.assets[]? | select(.name == $name) | .digest // empty' 2>/dev/null | sed 's/^sha256://' | tr -d ' \t\r\n')
-    [ -z "$EXP_DIGEST" ] && return 0
+    if [ -n "$TAG_NAME" ]; then
+        _api_url="https://api.github.com/repos/${REPO_NAME}/releases/tags/${TAG_NAME}"
+    else
+        _api_url="https://api.github.com/repos/${REPO_NAME}/releases/latest"
+    fi
+
+    REL_JSON=$(gw_curl -fsSL --connect-timeout 3 -m 6 "$_api_url" 2>/dev/null || true)
+    EXP_DIGEST=""
+    if [ -n "$REL_JSON" ]; then
+        EXP_DIGEST=$(printf "%s" "$REL_JSON" | jq -r --arg name "$ASSET_NAME" '.assets[]? | select(.name == $name) | .digest // empty' 2>/dev/null | sed 's/^sha256://' | tr -d ' \t\r\n')
+    fi
+
+    if [ -z "$EXP_DIGEST" ] && [ -n "$TAG_NAME" ]; then
+        for _cs_name in checksums.txt SHA256SUMS sha256sums.txt "${ASSET_NAME}.sha256"; do
+            _cs_txt=$(gw_curl -fsSL --connect-timeout 3 -m 6 "https://github.com/${REPO_NAME}/releases/download/${TAG_NAME}/${_cs_name}" 2>/dev/null || true)
+            if [ -n "$_cs_txt" ]; then
+                EXP_DIGEST=$(printf "%s\n" "$_cs_txt" | awk -v a="$ASSET_NAME" '
+                    $2 == a || $2 == ("*" a) || $2 ~ ("/" a "$") { print $1; exit }
+                    NF == 1 && /^[0-9a-fA-F]{64}$/ { print $1; exit }
+                ' | tr -d ' \t\r\n')
+                [ -n "$EXP_DIGEST" ] && break
+            fi
+        done
+    fi
+
+    if [ -z "$EXP_DIGEST" ]; then
+        if [ "$_from_mirror" = "yes" ]; then
+            echo "${C_RED}[X] КРИТИЧЕСКАЯ ОШИБКА БЕЗОПАСНОСТИ: Не удалось получить эталонный SHA-256 для ${ASSET_NAME} при загрузке через стороннее зеркало!${C_RES}" >&2
+            return 1
+        fi
+        if [ -n "$REL_JSON" ]; then
+            echo "${C_RED}[X] Ошибка верификации: В релизе GitHub отсутствует SHA-256 дайджест для ${ASSET_NAME}!${C_RES}" >&2
+            return 1
+        fi
+        return 0
+    fi
 
     ACT_DIGEST=$(sha256sum "$LOCAL_FILE" 2>/dev/null | awk '{print $1}' | tr -d ' \t\r\n')
-    if [ -n "$ACT_DIGEST" ] && [ "$ACT_DIGEST" != "$EXP_DIGEST" ]; then
+    if [ -z "$ACT_DIGEST" ] || [ "$ACT_DIGEST" != "$EXP_DIGEST" ]; then
         echo "${C_RED}[X] КРИТИЧЕСКАЯ ОШИБКА БЕЗОПАСНОСТИ: Несовпадение SHA-256 для ${ASSET_NAME}!${C_RES}" >&2
         echo "    Ожидался: ${EXP_DIGEST}" >&2
-        echo "    Получен:  ${ACT_DIGEST}" >&2
+        echo "    Получен:  ${ACT_DIGEST:-<пусто>}" >&2
         return 1
     fi
     return 0
@@ -96,25 +144,27 @@ update_cores_only() {
         echo "${C_GRN}[✓] Ядро AdGuard Home ${INSTALLED_AGH_VER} актуально.${C_RES}"
     else
         echo "Загрузка AdGuard Home ${AGH_TAG}..."
-        rm -rf /tmp/agh.tar.gz /tmp/agh_extract
+        ensure_gateway_runtime_dir || return 1
+        _agh_stage=$(mktemp -d "${GATEWAY_RUNTIME_DIR:-/run/gateway}/agh.XXXXXX" 2>/dev/null) || return 1
+        chmod 700 "$_agh_stage" 2>/dev/null || true
         AGH_ASSET="AdGuardHome_linux_${AGH_ARCH}.tar.gz"
         AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/${AGH_TAG}/${AGH_ASSET}"
-        if download_file "$AGH_URL" "/tmp/agh.tar.gz" && verify_github_asset_sha256 "AdguardTeam/AdGuardHome" "$AGH_ASSET" "/tmp/agh.tar.gz"; then
-            mkdir -p /tmp/agh_extract
-            if tar -xzf /tmp/agh.tar.gz -C /tmp/agh_extract 2>/dev/null && [ -f /tmp/agh_extract/AdGuardHome/AdGuardHome ]; then
-                chmod +x /tmp/agh_extract/AdGuardHome/AdGuardHome
-                if /tmp/agh_extract/AdGuardHome/AdGuardHome --version >/dev/null 2>&1; then
+        if download_file "$AGH_URL" "${_agh_stage}/agh.tar.gz" && verify_github_asset_sha256 "AdguardTeam/AdGuardHome" "$AGH_ASSET" "${_agh_stage}/agh.tar.gz" "$AGH_TAG"; then
+            mkdir -p "${_agh_stage}/extract"
+            if tar -xzf "${_agh_stage}/agh.tar.gz" -C "${_agh_stage}/extract" 2>/dev/null && [ -f "${_agh_stage}/extract/AdGuardHome/AdGuardHome" ]; then
+                chmod +x "${_agh_stage}/extract/AdGuardHome/AdGuardHome"
+                if "${_agh_stage}/extract/AdGuardHome/AdGuardHome" --version >/dev/null 2>&1; then
                     service_ctl adguardhome stop
-                    mv -f /tmp/agh_extract/AdGuardHome/AdGuardHome /usr/bin/AdGuardHome
+                    mv -f "${_agh_stage}/extract/AdGuardHome/AdGuardHome" /usr/bin/AdGuardHome
                     echo "${C_GRN}[✓] AdGuard Home безопасно обновлен до ${AGH_TAG}.${C_RES}"
                 else
                     echo "${C_RED}[X] Ошибка проверки бинарника AdGuard Home, оставлена текущая версия.${C_RES}"
                 fi
             fi
-            rm -rf /tmp/agh.tar.gz /tmp/agh_extract
+            rm -rf "$_agh_stage"
         else
-            rm -rf /tmp/agh.tar.gz /tmp/agh_extract
-            echo "${C_RED}[X] Не удалось скачать AdGuard Home ${AGH_TAG}.${C_RES}"
+            rm -rf "$_agh_stage"
+            echo "${C_RED}[X] Не удалось скачать или верифицировать AdGuard Home ${AGH_TAG}.${C_RES}"
         fi
     fi
 
@@ -141,7 +191,8 @@ update_cores_only() {
         fi
     fi
 
-    cat << VC_EOF > "$VER_CACHE_FILE" 2>/dev/null || true
+    ensure_gateway_runtime_dir >/dev/null 2>&1 || true
+    atomic_write_file "$VER_CACHE_FILE" 0600 "root:root" << VC_EOF 2>/dev/null || true
 LATEST_SB_TAG='${LATEST_SB_TAG}'
 LATEST_MIHOMO_TAG='${LATEST_MIHOMO_TAG}'
 LATEST_AGH_TAG='${LATEST_AGH_TAG}'
@@ -160,12 +211,12 @@ setup_init_scripts() {
         if [ -z "${SB_GOMEMLIMIT:-}" ] || [ "$SB_GOMEMLIMIT" = "off" ]; then
             SB_ENV_LINE="procd_set_param env GOGC=100"
         else
-            SB_ENV_LINE="procd_set_param env GOGC=50 GOMEMLIMIT=${SB_GOMEMLIMIT}"
+            SB_ENV_LINE="procd_set_param env GOGC=${SB_GOGC:-50} GOMEMLIMIT=${SB_GOMEMLIMIT}"
         fi
         if [ -z "${AGH_GOMEMLIMIT:-}" ] || [ "$AGH_GOMEMLIMIT" = "off" ]; then
             AGH_ENV_LINE="procd_set_param env GOGC=100"
         else
-            AGH_ENV_LINE="procd_set_param env GOGC=50 GOMEMLIMIT=${AGH_GOMEMLIMIT}"
+            AGH_ENV_LINE="procd_set_param env GOGC=${AGH_GOGC:-50} GOMEMLIMIT=${AGH_GOMEMLIMIT}"
         fi
 
         cat << INIT_SB_OWRT > /etc/init.d/sing-box
@@ -178,7 +229,7 @@ start_service() {
     mkdir -p /dev/net
     [ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null || true
     procd_open_instance
-    procd_set_param command /bin/sh -c ": > '${SB_LOG_FILE}'; exec /usr/bin/sing-box run -c /etc/sing-box/config.json -D /etc/sing-box >>'${SB_LOG_FILE}' 2>&1"
+    procd_set_param command /bin/sh -c "exec /usr/bin/sing-box run -c /etc/sing-box/config.json -D /etc/sing-box >>'${SB_LOG_FILE}' 2>&1"
     ${SB_ENV_LINE}
     procd_set_param limits nofile="65535 65535"
     procd_set_param respawn 3600 3 10
@@ -207,17 +258,7 @@ start_service() {
 INIT_AGH_OWRT
         chmod +x /etc/init.d/adguardhome
 
-        if [ "$ACT_CORE_S" = "mihomo" ]; then
-            service_ctl sing-box stop
-            service_ctl sing-box disable
-            service_ctl mihomo enable
-            service_ctl mihomo restart
-        else
-            service_ctl mihomo stop
-            service_ctl mihomo disable
-            service_ctl sing-box enable
-            service_ctl sing-box restart
-        fi
+        activate_core_service "$ACT_CORE_S"
         sleep 2
         service_ctl adguardhome enable
         service_ctl adguardhome restart
@@ -227,12 +268,12 @@ INIT_AGH_OWRT
         if ! grep -q "gateway watchdog" /etc/rc.local 2>/dev/null; then
             awk 'BEGIN { added=0 }
                 /^[[:space:]]*exit[[:space:]]+0/ && !added {
-                    print "[ -x /usr/bin/gateway ] && /usr/bin/gateway watchdog >/dev/null 2>&1 &"
+                    print "(sleep 10 && [ -x /usr/bin/gateway ] && /usr/bin/gateway watchdog >/dev/null 2>&1) &"
                     added=1
                 }
                 { print }
                 END {
-                    if (!added) print "[ -x /usr/bin/gateway ] && /usr/bin/gateway watchdog >/dev/null 2>&1 &"
+                    if (!added) print "(sleep 10 && [ -x /usr/bin/gateway ] && /usr/bin/gateway watchdog >/dev/null 2>&1) &"
                 }' /etc/rc.local > "/etc/rc.local.tmp.$$" && mv -f "/etc/rc.local.tmp.$$" /etc/rc.local
         fi
         chmod +x /etc/rc.local 2>/dev/null || true
@@ -253,7 +294,7 @@ rc_oom_score_adj="-500"
 respawn_delay=3
 respawn_max=10
 retry="TERM/10/KILL/5"
-export GOGC=50
+export GOGC=${SB_GOGC:-50}
 export GOMEMLIMIT=${SB_GOMEMLIMIT}
 
 depend() {
@@ -289,7 +330,7 @@ rc_oom_score_adj="-500"
 respawn_delay=3
 respawn_max=10
 retry="TERM/10/KILL/5"
-export GOGC=50
+export GOGC=${AGH_GOGC:-50}
 export GOMEMLIMIT=${AGH_GOMEMLIMIT}
 
 depend() {
@@ -299,17 +340,7 @@ depend() {
 INIT_AGH_ALP
     chmod +x /etc/init.d/adguardhome
 
-    if [ "$ACT_CORE_S" = "mihomo" ]; then
-        service_ctl sing-box stop
-        service_ctl sing-box disable
-        service_ctl mihomo enable
-        service_ctl mihomo restart
-    else
-        service_ctl mihomo stop
-        service_ctl mihomo disable
-        service_ctl sing-box enable
-        service_ctl sing-box restart
-    fi
+    activate_core_service "$ACT_CORE_S"
     sleep 2
     service_ctl adguardhome enable
     service_ctl adguardhome restart
@@ -324,10 +355,3 @@ BOOT_GUARD_EOF
     rc-update add local default >/dev/null 2>&1 || true
     return 0
 }
-
-# ==============================================================================
-# Ядро подсистемы Homelab: Реестр модулей, Единое хранилище /srv/storage,
-# Центральный HTTPS/PKI прокси Caddy (*.lan) и Файловый сервер Samba (WSDD+Avahi)
-# ==============================================================================
-
-# Активация официального репозитория community в Alpine Linux

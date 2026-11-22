@@ -1,4 +1,9 @@
 #!/bin/sh
+_menu_pause() {
+    printf "\nНажмите Enter %s..." "${1:-для продолжения}"
+    read -r _ < /dev/tty || true
+}
+
 show_homelab_menu() {
     init_homelab_registry
     load_gateway_env
@@ -31,13 +36,11 @@ show_homelab_menu() {
                 echo ""
                 print_quick_access_card
                 run_homelab_self_test
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                _menu_pause
                 ;;
             2)
                 prompt_homelab_modules_wizard
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                _menu_pause
                 ;;
             3)
                 printf "Введите номер [1-7] или имя модуля для отключения: "
@@ -48,8 +51,7 @@ show_homelab_menu() {
                 else
                     ui_warn_box "Модуль '${RM_IN}' не распознан." "Введите число от 1 до 7 или имя модуля (например: transmission)."
                 fi
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                _menu_pause
                 ;;
             4)
                 printf "Введите номер модуля [1-7] для обновления (или Enter / 'all' — обновить все активные): "
@@ -68,8 +70,7 @@ show_homelab_menu() {
                         ui_warn_box "Модуль '${UP_IN}' не распознан." "Введите число от 1 до 7 или 'all'."
                     fi
                 fi
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                _menu_pause
                 ;;
             5)
                 printf "Введите номер [1-7] или имя модуля: "
@@ -89,8 +90,7 @@ show_homelab_menu() {
                 else
                     ui_warn_box "Модуль '${CTL_IN}' не распознан." "Введите число от 1 до 7."
                 fi
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                _menu_pause
                 ;;
             6)
                 echo "Доступные журналы: 1) caddy  2) vaultwarden  3) metube  4) code-server  5) samba  6) forgejo  7) transmission"
@@ -105,8 +105,7 @@ show_homelab_menu() {
                     6) show_service_logs_cli "forgejo" ;;
                     7) show_service_logs_cli "torrent" ;;
                 esac
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                _menu_pause
                 ;;
             7)
                 manage_external_disks_menu || true
@@ -132,8 +131,7 @@ show_homelab_menu() {
                         ;;
                     3) setup_wsdd_and_avahi; ui_ok_msg "Службы wsdd и avahi-daemon перезапущены." ;;
                 esac
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                _menu_pause
                 ;;
             9)
                 prompt_ssl_management_menu
@@ -165,13 +163,11 @@ show_homelab_menu() {
                         send_telegram_backup "$BACKUP_ARCHIVE" || true
                         ;;
                 esac
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                _menu_pause
                 ;;
             11)
                 unlock_external_storage_cli || true
-                printf "\nНажмите Enter для продолжения..."
-                read -r _ < /dev/tty || true
+                _menu_pause
                 ;;
         esac
     done
@@ -246,8 +242,7 @@ show_menu() {
             u|U)
                 echo ""
                 print_quick_access_card
-                printf "\nНажмите Enter для возврата в меню..."
-                read -r _ < /dev/tty || true
+                _menu_pause "для возврата в меню"
                 ;;
             14)
                 if require_alpine_feature "Виртуализация LXC"; then
@@ -260,8 +255,7 @@ show_menu() {
             15|d|D)
                 echo ""
                 run_gateway_doctor
-                printf "\nНажмите Enter для возврата в меню..."
-                read -r _ < /dev/tty || true
+                _menu_pause "для возврата в меню"
                 ;;
             16)
                 echo ""
@@ -352,8 +346,7 @@ show_menu() {
                                 [ "${USE_INITIAL_WARP:-no}" = "yes" ] && generate_amnezia_warp || true
                                 apply_and_verify_core "Обновление подписки (Слот 1)" || true
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         2)
                             printf "Введите дополнительную ссылку на подписку (http://...): "
@@ -370,8 +363,7 @@ show_menu() {
                                     ;;
                                 *) ui_warn_box "Ссылка подписки должна начинаться с http:// или https://" "Для добавления отдельного URI-ключа (vless://) выберите пункт 5." ;;
                             esac
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         3)
                             backup_gateway_state
@@ -379,14 +371,12 @@ show_menu() {
                             SUB_URL=""
                             save_gateway_env
                             apply_and_verify_core "Очистка подписок по ссылке (Слот 1)" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         4)
                             echo ""
                             list_my_nodes
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         5)
                             printf "Вставьте один или несколько ключей (vless://, hy2://, ss://, tuic://, wg://, anytls://): "
@@ -396,11 +386,14 @@ show_menu() {
                                 backup_gateway_state
                                 load_gateway_env
                                 sed -i '/^proxies:[[:space:]]*\[\]/d' "$CUSTOM_NODES_FILE" 2>/dev/null || true
-                                format_uri_keys "$EXTRA_KEY" >> "$CUSTOM_NODES_FILE"
+                                format_uri_keys "$EXTRA_KEY" | while IFS= read -r _ukey; do
+                                    [ -z "$_ukey" ] && continue
+                                    grep -qxF "$_ukey" "$CUSTOM_NODES_FILE" 2>/dev/null || printf "%s\n" "$_ukey" >> "$CUSTOM_NODES_FILE"
+                                done
+                                chmod 600 "$CUSTOM_NODES_FILE" 2>/dev/null || true
                                 apply_and_verify_core "Добавление личного ключа в Слот 2 (my_nodes)" || true
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         6)
                             echo ""
@@ -415,16 +408,14 @@ show_menu() {
                                     delete_my_node_by_index "$DEL_NUM" && apply_and_verify_core "Удаление ключа #${DEL_NUM}" || true
                                 fi
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         7)
                             backup_gateway_state
                             load_gateway_env
                             echo "proxies: []" > "$CUSTOM_NODES_FILE"
                             apply_and_verify_core "Очистка всех личных ключей (Слот 2)" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         8)
                             backup_gateway_state
@@ -433,8 +424,7 @@ show_menu() {
                             read -r W_LIC_IN < /dev/tty || true
                             W_LIC_IN=$(printf "%s" "$W_LIC_IN" | tr -d ' \t\r\n')
                             generate_amnezia_warp "$W_LIC_IN" && apply_and_verify_core "Обновление гибридного WARP 2.0 + MASQUE H2" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         9)
                             backup_gateway_state
@@ -443,8 +433,7 @@ show_menu() {
                             WARP_LICENSE=""
                             save_gateway_env
                             apply_and_verify_core "Отключение Amnezia WARP 2.0 (Слот 3)" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         10)
                             backup_gateway_state
@@ -458,14 +447,12 @@ show_menu() {
                             fi
                             save_gateway_env
                             apply_and_verify_core "$ACT_MSG" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         11) manage_nodes_cli_menu || true ;;
                         12)
                             diagnose_failed_nodes || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         13)
                             echo ""
@@ -476,8 +463,7 @@ show_menu() {
                                 1|singbox) switch_core_engine "singbox" || true ;;
                                 2|mihomo)  switch_core_engine "mihomo" || true ;;
                             esac
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         14)
                             echo ""
@@ -488,8 +474,7 @@ show_menu() {
                                 1|zashboard)  switch_web_ui "zashboard" || true ;;
                                 2|metacubexd) switch_web_ui "metacubexd" || true ;;
                             esac
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                     esac
                 done
@@ -497,8 +482,7 @@ show_menu() {
             3)
                 echo ""
                 self_update_gateway || true
-                printf "\nНажмите Enter для возврата в меню..."
-                read -r _ < /dev/tty || true
+                _menu_pause "для возврата в меню"
                 ;;
             4)
                 ui_box_top "♻️ ПЕРЕСБОРКА КОНФИГУРАЦИИ И СБРОС СЕССИЙ CONNTRACK"
@@ -514,13 +498,11 @@ show_menu() {
                 ;;
             5)
                 show_service_logs_cli "core" 45
-                printf "\nНажмите Enter для возврата в меню..."
-                read -r _ < /dev/tty || true
+                _menu_pause "для возврата в меню"
                 ;;
             6)
-                run_installer
-                printf "\nНажмите Enter для возврата в меню..."
-                read -r _ < /dev/tty || true
+                run_installer --interactive
+                _menu_pause "для возврата в меню"
                 ;;
             7)
                 while true; do
@@ -566,8 +548,7 @@ show_menu() {
                                 done
                                 [ -n "$ADDED_LIST" ] && apply_and_verify_core "Добавление в прокси:${ADDED_LIST}" || true
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         2)
                             printf "Введите домен или ссылку (можно несколько через пробел): "
@@ -591,8 +572,7 @@ show_menu() {
                                 done
                                 [ -n "$ADDED_LIST" ] && apply_and_verify_core "Добавление напрямую (DIRECT):${ADDED_LIST}" || true
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         3)
                             printf "Введите номер домена из списка В ПРОКСИ для удаления: "
@@ -604,8 +584,7 @@ show_menu() {
                                 DEL_VAL=$(get_entry_by_index "$USER_PROXY_FILE" "$DEL_D_IDX")
                                 delete_entry_by_index "$USER_PROXY_FILE" "$DEL_D_IDX" "" && apply_and_verify_core "Удаление ${DEL_VAL}" || true
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         4)
                             printf "Введите номер домена из списка НАПРЯМУЮ для удаления: "
@@ -617,8 +596,7 @@ show_menu() {
                                 DEL_VAL=$(get_entry_by_index "$USER_DIRECT_FILE" "$DEL_D_IDX")
                                 delete_entry_by_index "$USER_DIRECT_FILE" "$DEL_D_IDX" "+.localdomain" && apply_and_verify_core "Удаление ${DEL_VAL}" || true
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         5)
                             backup_gateway_state
@@ -626,13 +604,11 @@ show_menu() {
                             printf "+.localdomain\n+.lan\n" > "$USER_DIRECT_FILE"
                             : > "$USER_PROXY_FILE"
                             apply_and_verify_core "Сброс пользовательских списков доменов" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         6)
                             inspect_domain_route || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                     esac
                 done
@@ -674,8 +650,7 @@ show_menu() {
                             else
                                 ui_warn_box "Некорректный IP или номер устройства (${RAW_DEV_IN})." "Нажмите 's' для сканирования сети или введите IP вида 192.168.1.50."
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         2)
                             printf "Введите номер устройства из таблицы LAN ИЛИ его IP-адрес (для Full-VPN): "
@@ -690,8 +665,7 @@ show_menu() {
                             else
                                 ui_warn_box "Некорректный IP или номер устройства (${RAW_DEV_IN})." "Нажмите 's' для сканирования сети или введите IP вида 192.168.1.50."
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         3)
                             printf "Введите номер IP из списка ОБХОД (DIRECT) для удаления: "
@@ -703,8 +677,7 @@ show_menu() {
                                 DEL_IP=$(get_entry_by_index "$USER_BYPASS_IPS" "$DEL_I_IDX")
                                 delete_entry_by_index "$USER_BYPASS_IPS" "$DEL_I_IDX" "" && apply_and_verify_core "Удаление IP ${DEL_IP}" || true
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         4)
                             printf "Введите номер IP из списка FULL-VPN для удаления: "
@@ -716,8 +689,7 @@ show_menu() {
                                 DEL_IP=$(get_entry_by_index "$USER_FORCE_PROXY_IPS" "$DEL_I_IDX")
                                 delete_entry_by_index "$USER_FORCE_PROXY_IPS" "$DEL_I_IDX" "" && apply_and_verify_core "Удаление IP ${DEL_IP}" || true
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         5)
                             backup_gateway_state
@@ -725,8 +697,7 @@ show_menu() {
                             : > "$USER_BYPASS_IPS"
                             : > "$USER_FORCE_PROXY_IPS"
                             apply_and_verify_core "Очистка списков маршрутизации по IP" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                     esac
                 done
@@ -753,48 +724,44 @@ show_menu() {
                     case "$SRV_ACT" in
                         ""|0) break ;;
                         1)
-                            curl -fsS -X PATCH -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
+                            clash_api_curl -fsS -X PATCH -H "Content-Type: application/json" \
                                 -d '{"mode":"direct"}' "http://127.0.0.1:9090/configs" >/dev/null 2>&1 || true
                             ui_ok_msg "Шлюз переведен в режим паузы (DIRECT)."
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         2)
-                            curl -fsS -X PATCH -H "Authorization: Bearer ${ADMIN_PASS}" -H "Content-Type: application/json" \
+                            clash_api_curl -fsS -X PATCH -H "Content-Type: application/json" \
                                 -d '{"mode":"rule"}' "http://127.0.0.1:9090/configs" >/dev/null 2>&1 || true
                             ui_ok_msg "Режим маршрутизации по правилам (rule) восстановлен."
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         3)
                             create_unified_backup "no"
                             is_telegram_configured && send_telegram_backup "$BACKUP_ARCHIVE" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         4)
                             restore_unified_backup || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         5)
                             printf "Введите новый единый пароль: "
+                            stty -echo 2>/dev/null || true
                             read -r NEW_P_IN < /dev/tty || true
+                            stty echo 2>/dev/null || true
+                            printf "\n"
                             NEW_P_IN=$(printf "%s" "$NEW_P_IN" | tr -d '\r\n')
                             [ -n "$NEW_P_IN" ] && change_unified_password "$NEW_P_IN" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         6)
                             [ -f "$BACKUP_ARCHIVE" ] || create_unified_backup "no"
                             send_telegram_backup "$BACKUP_ARCHIVE" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         7)
                             configure_telegram_menu || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                     esac
                 done
@@ -832,8 +799,7 @@ show_menu() {
                             ;;
                         4)
                             show_service_logs_cli "autoupdate" 50
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         5) configure_telegram_menu || true ;;
                     esac
@@ -890,16 +856,14 @@ show_menu() {
                             if [ -n "$NEW_L" ] && apply_network_ips "$NEW_L" "$GW_IP"; then
                                 [ "$NEW_L" != "$CUR_LAN_NOW" ] && exit 0
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         2)
                             printf "Введите новый IP основного роутера [текущий %s]: " "$GW_IP"
                             read -r NEW_G < /dev/tty || true
                             NEW_G=$(printf "%s" "$NEW_G" | tr -d ' \t\r\n')
                             [ -n "$NEW_G" ] && apply_network_ips "$CUR_LAN_NOW" "$NEW_G" || true
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         3)
                             printf "Введите новый IP для сервера [текущий %s]: " "$CUR_LAN_NOW"
@@ -911,8 +875,7 @@ show_menu() {
                             if [ -n "$NEW_L" ] && [ -n "$NEW_G" ] && apply_network_ips "$NEW_L" "$NEW_G"; then
                                 [ "$NEW_L" != "$CUR_LAN_NOW" ] && exit 0
                             fi
-                            printf "\nНажмите Enter для продолжения..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause
                             ;;
                         4)
                             clear
@@ -939,8 +902,7 @@ show_menu() {
                                     echo "Отмена включения DHCP."
                                     ;;
                             esac
-                            printf "\nНажмите Enter для возврата в меню..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause "для возврата в меню"
                             ;;
                         5)
                             clear
@@ -959,8 +921,7 @@ show_menu() {
                                     echo "Отмена."
                                     ;;
                             esac
-                            printf "\nНажмите Enter для возврата в меню..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause "для возврата в меню"
                             ;;
                         6)
                             clear
@@ -977,8 +938,7 @@ show_menu() {
                                 ui_box_row "Вы можете безопасно включить DHCP на шлюзе."
                                 ui_box_bottom
                             fi
-                            printf "\nНажмите Enter для возврата в меню..."
-                            read -r _ < /dev/tty || true
+                            _menu_pause "для возврата в меню"
                             ;;
                     esac
                 done

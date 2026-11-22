@@ -1,5 +1,4 @@
 #!/bin/sh
-set -e
 
 # ==============================================================================
 # Модуль Forgejo (Легковесный Git-сервер)
@@ -19,7 +18,21 @@ if [ -z "${GATEWAY_DIR:-}" ]; then
     . "${GATEWAY_DIR}/modules/homelab/registry.sh"
 fi
 
-# Синхронизация DOMAIN и ROOT_URL в /etc/forgejo/app.ini под активный режим SSL (Local PKI или DuckDNS LE)
+# Проверка минимально безопасной версии Forgejo (>= 15.0.8, CVE-2026-89094)
+check_forgejo_min_version() {
+    command -v forgejo >/dev/null 2>&1 || return 1
+    _fg_ver=$(forgejo --version 2>/dev/null | sed -n 's/.*version[[:space:]]\{1,\}\([0-9][0-9.]*\).*/\1/p' | head -n 1 || true)
+    [ -z "$_fg_ver" ] && return 0
+    if command -v version_ge >/dev/null 2>&1; then
+        if ! version_ge "$_fg_ver" "15.0.8"; then
+            echo "${C_YEL}[!] ВНИМАНИЕ: Установлена версия Forgejo ${_fg_ver} (< 15.0.8, уязвимость CVE-2026-89094). Выполните apk upgrade forgejo с актуального репозитория Alpine!${C_RES}"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Синхронизация DOMAIN, ROOT_URL и файлового логирования в /etc/forgejo/app.ini
 sync_forgejo_domain_config() {
     load_gateway_env >/dev/null 2>&1 || true
     [ -f /etc/forgejo/app.ini ] || return 0
@@ -31,11 +44,14 @@ sync_forgejo_domain_config() {
     awk -v dom="$FG_EXT_DOM" '
         /^DOMAIN[[:space:]]*=/ { print "DOMAIN = " dom; next }
         /^ROOT_URL[[:space:]]*=/ { print "ROOT_URL = https://" dom "/"; next }
+        /^MODE[[:space:]]*=[[:space:]]*console[[:space:]]*$/ { print "MODE = file"; next }
         { print }
     ' /etc/forgejo/app.ini > /etc/forgejo/app.ini.tmp.$$ && \
         mv -f /etc/forgejo/app.ini.tmp.$$ /etc/forgejo/app.ini
-    chown "forgejo:${FG_GRP}" /etc/forgejo/app.ini 2>/dev/null || true
-    chmod 640 /etc/forgejo/app.ini 2>/dev/null || true
+    mkdir -p /var/log/forgejo 2>/dev/null || true
+    touch /var/log/forgejo/forgejo.log 2>/dev/null || true
+    chown "forgejo:${FG_GRP}" /etc/forgejo/app.ini /var/log/forgejo/forgejo.log 2>/dev/null || true
+    chmod 640 /etc/forgejo/app.ini /var/log/forgejo/forgejo.log 2>/dev/null || true
     return 0
 }
 
@@ -44,10 +60,11 @@ install_module_forgejo() {
     umask 022
     ensure_alpine_community_repo
     apk update >/dev/null 2>&1 || true
-    if ! apk add forgejo forgejo-openrc git git-lfs gnupg sqlite; then
+    if ! apk add --upgrade forgejo forgejo-openrc git git-lfs gnupg sqlite; then
         echo "${C_RED}[X] Не удалось установить пакет forgejo!${C_RES}"
         return 1
     fi
+    check_forgejo_min_version || true
 
     if ! id forgejo >/dev/null 2>&1; then
         addgroup -S forgejo 2>/dev/null || true
@@ -56,7 +73,8 @@ install_module_forgejo() {
 
     ensure_media_group_and_users
     FG_GRP=$(id -gn forgejo 2>/dev/null || echo "www-data")
-    mkdir -p /var/log/forgejo /var/lib/forgejo/data /var/lib/forgejo/repos /var/lib/forgejo/custom /etc/forgejo
+    mkdir -p /var/log/forgejo /var/lib/forgejo/data /var/lib/forgejo/custom /etc/forgejo
+    [ -L /var/lib/forgejo/repos ] || mkdir -p /var/lib/forgejo/repos
     chown -R "forgejo:${FG_GRP}" /var/lib/forgejo /var/log/forgejo /etc/forgejo 2>/dev/null || true
     chmod 750 /var/lib/forgejo /var/log/forgejo /etc/forgejo 2>/dev/null || true
 
@@ -93,10 +111,11 @@ INTERNAL_TOKEN = ${FG_TOK}
 
 [log]
 ROOT_PATH = /var/log/forgejo
-MODE = console
+MODE = file
+LEVEL = info
 
 [service]
-DISABLE_REGISTRATION = false
+DISABLE_REGISTRATION = true
 REQUIRE_SIGNIN_VIEW = false
 FG_EOF
         chown "forgejo:${FG_GRP}" /etc/forgejo/app.ini 2>/dev/null || true
@@ -104,6 +123,7 @@ FG_EOF
     fi
 
     sync_forgejo_domain_config
+    ensure_openrc_mount_guard "forgejo" >/dev/null 2>&1 || true
 
     su -s /bin/sh forgejo -c "/usr/bin/forgejo migrate --config /etc/forgejo/app.ini" >/dev/null 2>&1 || true
     service_ctl forgejo enable
@@ -141,9 +161,10 @@ remove_module_forgejo() {
 if [ "${0##*/}" = "forgejo.sh" ]; then
     case "${1:-status}" in
         install) install_module_forgejo ;;
+        update)  apk upgrade forgejo forgejo-openrc && sync_forgejo_domain_config && check_forgejo_min_version ;;
         remove)  remove_module_forgejo ;;
         restart) service_ctl forgejo restart ;;
         status)  service_ctl forgejo status ;;
-        *)       echo "Использование: $0 [install|remove|restart|status]" ;;
+        *)       echo "Использование: $0 [install|update|remove|restart|status]" ;;
     esac
 fi
